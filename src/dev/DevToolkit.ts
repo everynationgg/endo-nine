@@ -2,6 +2,7 @@ import type { ThreeApp } from '../render/ThreeApp';
 import type { UIManager } from '../ui/UIManager';
 import { StageEditor } from './StageEditor';
 import { GameplayDebugger } from './GameplayDebugger';
+import { PerfMonitor } from './PerfMonitor';
 import type { StageConfig, StageProfileKey } from './StageConfig';
 import { cloneStageConfig, validateStageProfile } from './StageConfig';
 
@@ -10,6 +11,7 @@ export class DevToolkit {
   private uiManager: UIManager;
   public stageEditor: StageEditor;
   public gameplayDebugger: GameplayDebugger;
+  public perfMonitor: PerfMonitor;
 
   private dashboardEl: HTMLElement | null = null;
   private validationEl: HTMLElement | null = null;
@@ -29,6 +31,11 @@ export class DevToolkit {
     if (!e.shiftKey && e.key === 'F8') {
       e.preventDefault();
       this.gameplayDebugger.toggle();
+      return;
+    }
+    if (!e.shiftKey && e.key === 'F7') {
+      e.preventDefault();
+      this.perfMonitor.toggle();
     }
   };
 
@@ -37,6 +44,7 @@ export class DevToolkit {
     this.uiManager = uiManager;
     this.stageEditor = new StageEditor(app);
     this.gameplayDebugger = new GameplayDebugger(app);
+    this.perfMonitor = new PerfMonitor(app);
 
     this.stageEditor.onReturnToDashboard = () => {
       this.openDashboard();
@@ -46,8 +54,9 @@ export class DevToolkit {
       this.startPlaytestFromEditor(snapshot);
     };
 
-    this.app.setPostRenderCallback((_dt, now) => {
+    this.app.setPostRenderCallback((dt, now, info) => {
       this.gameplayDebugger.onFrameTick(now);
+      this.perfMonitor.onFrame(dt, now, info);
     });
 
     this.mountDashboardDOM();
@@ -90,7 +99,7 @@ export class DevToolkit {
           <button id="dev-card-perf" class="dev-dash-tile">
             <div class="dev-dash-tile-title">📊 Performance Monitor</div>
             <div class="dev-dash-tile-desc">Monitor FPS, 16.67 ms frame-time budget, draw calls, triangles, and run repeatable stress-test benchmarks.</div>
-            <div class="dev-dash-tile-meta" id="dev-dash-perf-meta">Phase 6 Module</div>
+            <div class="dev-dash-tile-meta" id="dev-dash-perf-meta">Real-Time Telemetry &amp; 8 Benchmarks [F7]</div>
           </button>
 
           <button id="dev-card-validate" class="dev-dash-tile">
@@ -128,7 +137,9 @@ export class DevToolkit {
     });
 
     el.querySelector('#dev-card-perf')?.addEventListener('click', () => {
-      this.uiManager.showPickupNotification('Performance Monitor will be enabled in Phase 6.');
+      this.closeDashboard();
+      this.app.exitPointerLock();
+      this.perfMonitor.open();
     });
 
     el.querySelector('#dev-card-validate')?.addEventListener('click', () => {
@@ -150,6 +161,7 @@ export class DevToolkit {
       <span class="dev-pt-tag">▶ PLAYTEST</span>
       <span id="dev-pt-snapshot-badge" class="dev-pt-snap">In-Memory Layout</span>
       <button id="btn-playtest-debugger" class="sci-btn dev-ed-btn">🧪 Debugger [F8]</button>
+      <button id="btn-playtest-perf" class="sci-btn dev-ed-btn">📊 Perf [F7]</button>
       <button id="btn-playtest-return" class="sci-btn primary-gold dev-ed-btn">← Return to Editor (Shift+F8)</button>
     `;
     document.body.appendChild(bar);
@@ -158,6 +170,10 @@ export class DevToolkit {
     bar.querySelector('#btn-playtest-debugger')?.addEventListener('click', () => {
       this.app.exitPointerLock();
       this.gameplayDebugger.toggle();
+    });
+    bar.querySelector('#btn-playtest-perf')?.addEventListener('click', () => {
+      this.app.exitPointerLock();
+      this.perfMonitor.toggle();
     });
     bar.querySelector('#btn-playtest-return')?.addEventListener('click', () => {
       this.returnToEditorFromPlaytest();
