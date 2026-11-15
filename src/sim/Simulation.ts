@@ -59,6 +59,11 @@ export class Simulation {
   private navCalcsThisTick: number = 0;
   private stage1BossCycle: number = 0;
 
+  // Development Debugger Toggles (off by default in normal gameplay)
+  public devPlayerInvulnerable: boolean = false;
+  public devEnemyAiPaused: boolean = false;
+  public devBossAiPaused: boolean = false;
+
   public isCorruptionActive(): boolean {
     for (let i = 0; i < this.state.worldEvents.length; i++) {
       if (this.state.worldEvents[i].type === 'void_corruption' && this.state.worldEvents[i].isActive) {
@@ -341,12 +346,26 @@ export class Simulation {
     if (!this.state.isPausedForBuffChoice) return;
     if (!this.state.currentBuffChoices.includes(buffId)) return;
 
+    this.applyBuffToPlayer(buffId);
+
+    if (this.state.pendingBuffDrafts > 0) {
+      this.state.pendingBuffDrafts--;
+      const nextFilter = this.pendingDraftFilters.shift();
+      this.state.currentBuffChoices = rollThreeBuffChoices(this.state.rng, nextFilter, this.state.player.heroId);
+    } else {
+      this.state.isPausedForBuffChoice = false;
+      this.state.currentBuffChoices = [];
+    }
+  }
+
+  /** Applies a buff, passive stack, replacement skill, or slot augment directly to the active player. */
+  public applyBuffToPlayer(buffId: BuffId): void {
     const p = this.state.player;
     const def = BUFF_REGISTRY[buffId];
+    if (!def) return;
     p.buffs[buffId] = (p.buffs[buffId] || 0) + 1;
 
-    // If this buff is linked to one of the 3 core passive items, stack it in player.items too
-    if (def && def.linkedItemId) {
+    if (def.linkedItemId) {
       const itemId = def.linkedItemId;
       p.items[itemId] = (p.items[itemId] || 0) + 1;
       this.state.events.push({
@@ -360,8 +379,7 @@ export class Simulation {
       });
     }
 
-    // If this buff replaces an active skill slot (Primary, Secondary, Utility, Ultimate)
-    if (def && def.replacesSkillSlot && def.replacementSkillId) {
+    if (def.replacesSkillSlot && def.replacementSkillId) {
       const newSkill = SKILL_REGISTRY[def.replacementSkillId];
       if (newSkill) {
         p.equippedSkills[def.replacesSkillSlot] = newSkill;
@@ -376,14 +394,12 @@ export class Simulation {
       }
     }
 
-    // If this buff augments an existing skill slot without replacing its base identity
-    if (def && def.enhancesSkillSlot && def.enhancementId) {
+    if (def.enhancesSkillSlot && def.enhancementId) {
       if (!p.skillEnhancements) {
         p.skillEnhancements = {};
       }
       p.skillEnhancements[def.enhancesSkillSlot] = def.enhancementId;
 
-      // Clean up any previously active enhancement buff for this slot
       for (const [existingBuffId] of Object.entries(p.buffs)) {
         if (existingBuffId !== buffId) {
           const existingDef = BUFF_REGISTRY[existingBuffId as BuffId];
@@ -393,7 +409,6 @@ export class Simulation {
         }
       }
 
-      // Slot-specific state cleanups
       if (def.enhancesSkillSlot === 'secondary' && def.enhancementId !== 'orbiting_blade') {
         p.orbitingBladeActive = false;
         p.orbitingBladeTimer = 0;
@@ -403,7 +418,6 @@ export class Simulation {
         p.slashComboTimer = 0;
       }
 
-      // Preserve the base skill's id and baseDamage while updating HUD metadata and augment cooldown overrides
       const baseSkill = p.equippedSkills[def.enhancesSkillSlot];
       if (baseSkill) {
         p.equippedSkills[def.enhancesSkillSlot] = {
@@ -426,15 +440,157 @@ export class Simulation {
         stackCount: p.buffs[buffId]
       }
     });
+  }
 
-    if (this.state.pendingBuffDrafts > 0) {
-      this.state.pendingBuffDrafts--;
-      const nextFilter = this.pendingDraftFilters.shift();
-      this.state.currentBuffChoices = rollThreeBuffChoices(this.state.rng, nextFilter, p.heroId);
-    } else {
-      this.state.isPausedForBuffChoice = false;
-      this.state.currentBuffChoices = [];
+  public devGrantItem(itemId: ItemId, count: number = 1): void {
+    const p = this.state.player;
+    const def = ITEM_REGISTRY[itemId];
+    if (!def) return;
+    p.items[itemId] = (p.items[itemId] || 0) + count;
+    this.state.updateCalculatedStats();
+    if (itemId === 'vital_core') {
+      p.health = Math.min(p.calculatedStats.maxHealth, p.health + 35 * count);
     }
+    this.state.events.push({
+      type: 'item_acquired',
+      data: { item: itemId, name: def.name, stackCount: p.items[itemId], source: 'dev' }
+    });
+  }
+
+  public devResetCooldowns(): void {
+    const p = this.state.player;
+    p.primaryCooldownRemaining = 0;
+    p.secondaryCooldownRemaining = 0;
+    p.utilityCooldownRemaining = 0;
+    p.ultimateCooldownRemaining = 0;
+  }
+
+  public devHealPlayer(): void {
+    const p = this.state.player;
+    p.health = p.calculatedStats.maxHealth;
+    p.energyShield = p.maxEnergyShield;
+  }
+
+  public devResetPlayerState(): void {
+    const p = this.state.player;
+    p.items = { overdrive: 0, vital_core: 0, chain_spark: 0 };
+    p.buffs = ALL_BUFF_IDS.reduce((acc, id) => {
+      acc[id] = 0;
+      return acc;
+    }, {} as Record<BuffId, number>);
+    p.skillEnhancements = {};
+    const baseSkills = p.heroId === 'doctor' ? DOCTOR_SKILLS : COMMANDER_SKILLS;
+    p.equippedSkills = { ...baseSkills };
+    p.level = 1;
+    p.xp = 0;
+    p.xpNeeded = 100;
+    p.currency = 0;
+    this.devResetCooldowns();
+    this.state.updateCalculatedStats();
+    this.devHealPlayer();
+  }
+
+  public devSpawnEnemy(type: EnemyType, count: number = 1, nearPlayer: boolean = true): EnemyState[] {
+    if (type === 'boss') {
+      this.spawnStage1Titan(this.state.artifact.pos);
+      const boss = this.state.enemies.find((e) => e.isStage1Titan);
+      return boss ? [boss] : [];
+    }
+    const p = this.state.player;
+    const { tierDef } = getDifficultyTier(this.state.gameTime);
+    const cfg = ENEMY_CONFIGS[type];
+    if (!cfg) return [];
+    const spawned: EnemyState[] = [];
+    for (let i = 0; i < count; i++) {
+      const ang = (i / Math.max(1, count)) * Math.PI * 2 + this.state.rng.range(-0.25, 0.25);
+      const dist = nearPlayer ? this.state.rng.range(240, 380) : this.state.rng.range(480, 680);
+      const sx = Math.max(60, Math.min(this.state.worldWidth - 60, p.pos.x + Math.cos(ang) * dist));
+      const sy = Math.max(60, Math.min(this.state.worldHeight - 60, p.pos.y + Math.sin(ang) * dist));
+      const elev = this.state.terrain.getElevation(sx, sy).height;
+      const enemy: EnemyState = {
+        id: `enemy_${this.nextEnemyId++}`,
+        type,
+        pos: { x: sx, y: sy },
+        velocity: { x: 0, y: 0 },
+        z: elev,
+        groundZ: elev,
+        health: Math.round(cfg.maxHealth * tierDef.hpMultiplier),
+        maxHealth: Math.round(cfg.maxHealth * tierDef.hpMultiplier),
+        speed: cfg.speed * tierDef.speedMultiplier,
+        touchDamage: Math.round(cfg.touchDamage * tierDef.damageMultiplier),
+        attackCooldown: cfg.attackCooldown,
+        attackCooldownRemaining: 0.6,
+        attackRange: cfg.attackRange,
+        isElite: cfg.isElite || type === 'elite',
+        isBoss: false,
+        currencyReward: cfg.currencyReward,
+        xpReward: cfg.xpReward,
+        radius: cfg.radius,
+        isSpawning: false,
+        spawnProgress: 1,
+        spawnDuration: 0,
+        isAlerted: true
+      };
+      this.state.enemies.push(enemy);
+      spawned.push(enemy);
+    }
+    return spawned;
+  }
+
+  public devClearEnemies(): void {
+    this.state.enemies = [];
+    if (this.state.artifact) {
+      this.state.artifact.isBossSpawned = false;
+    }
+  }
+
+  public devTriggerBossAttack(attack: 'laser' | 'tentacle' | 'elemental'): boolean {
+    const boss = this.state.enemies.find((e) => e.isStage1Titan && e.titanState !== 'dying');
+    if (!boss) return false;
+    const p = this.state.player;
+    const dx = p.pos.x - boss.pos.x;
+    const dy = p.pos.y - boss.pos.y;
+    boss.velocity.x = 0;
+    boss.velocity.y = 0;
+
+    if (attack === 'laser') {
+      boss.titanState = 'laser_sweep';
+      boss.titanTimer = STAGE1_BOSS_CONFIG.laser.duration;
+      boss.titanLaserSweepDir = 1;
+      boss.titanLaserAngle = Math.atan2(dy, dx) - 0.75;
+      this.state.events.push({
+        type: 'stage1_boss_laser_sweep',
+        data: { id: boss.id, start: true, duration: STAGE1_BOSS_CONFIG.laser.duration, thickness: STAGE1_BOSS_CONFIG.laser.thickness }
+      });
+    } else if (attack === 'tentacle') {
+      boss.titanState = 'tentacle_strike';
+      boss.titanTentaclePhase = 'telegraph';
+      boss.titanTentacleTarget = { x: p.pos.x, y: p.pos.y };
+      boss.titanTimer = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration;
+      boss.titanTentacleHitApplied = false;
+      this.state.events.push({
+        type: 'stage1_boss_tentacle_strike',
+        data: { id: boss.id, phase: 'telegraph', target: { ...boss.titanTentacleTarget } }
+      });
+    } else {
+      boss.titanState = 'elemental_barrage';
+      boss.titanTimer = STAGE1_BOSS_CONFIG.elemental.chargeDuration;
+      boss.titanElementalCharged = false;
+      this.state.events.push({
+        type: 'stage1_boss_elemental_charge',
+        data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.elemental.chargeDuration }
+      });
+    }
+    return true;
+  }
+
+  public devResetBossEncounter(): void {
+    this.state.enemies = this.state.enemies.filter((e) => !e.isBoss && !e.isStage1Titan);
+    if (this.state.artifact) {
+      this.state.artifact.isBossSpawned = false;
+      this.state.artifact.isBossDefeated = false;
+    }
+    this.spawnStage1Titan(this.state.artifact.pos);
   }
 
   private syncSkillSlotAfterEnhancementChange(slot: SkillSlot): void {
@@ -5457,6 +5613,7 @@ export class Simulation {
 
   private damagePlayer(amount: number, bypassInvuln: boolean = false): void {
     const p = this.state.player;
+    if (this.devPlayerInvulnerable) return;
     if (p.isDashing || (p.phaseBarrierTimer ?? 0) > 0 || p.health <= 0) return;
     if (!bypassInvuln && (p.hurtInvulnTimer ?? 0) > 0) return;
 
@@ -5806,9 +5963,17 @@ export class Simulation {
 
       if (e.isStage1Titan) {
         // --- 0. STAGE 1 MAIN BOSS (TITAN COLOSSUS) ---
-        this.updateStage1Titan(e, dt);
+        if (!this.devBossAiPaused || (e.titanState && e.titanState !== 'idle' && e.titanState !== 'walk')) {
+          this.updateStage1Titan(e, dt);
+        } else {
+          e.velocity.x = 0;
+          e.velocity.y = 0;
+        }
         moveVx = e.velocity.x;
         moveVy = e.velocity.y;
+      } else if (this.devEnemyAiPaused) {
+        moveVx = 0;
+        moveVy = 0;
       } else if (!e.isAlerted) {
         // Unalerted: gently wander and patrol locally at 25% speed
         e.wanderTimer = (e.wanderTimer ?? 2) - dt;

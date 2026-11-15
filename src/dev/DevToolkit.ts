@@ -1,6 +1,7 @@
 import type { ThreeApp } from '../render/ThreeApp';
 import type { UIManager } from '../ui/UIManager';
 import { StageEditor } from './StageEditor';
+import { GameplayDebugger } from './GameplayDebugger';
 import type { StageConfig, StageProfileKey } from './StageConfig';
 import { cloneStageConfig, validateStageProfile } from './StageConfig';
 
@@ -8,6 +9,7 @@ export class DevToolkit {
   private app: ThreeApp;
   private uiManager: UIManager;
   public stageEditor: StageEditor;
+  public gameplayDebugger: GameplayDebugger;
 
   private dashboardEl: HTMLElement | null = null;
   private validationEl: HTMLElement | null = null;
@@ -22,6 +24,11 @@ export class DevToolkit {
     if (e.shiftKey && e.key === 'F8' && this.isInPlaytest) {
       e.preventDefault();
       this.returnToEditorFromPlaytest();
+      return;
+    }
+    if (!e.shiftKey && e.key === 'F8') {
+      e.preventDefault();
+      this.gameplayDebugger.toggle();
     }
   };
 
@@ -29,6 +36,7 @@ export class DevToolkit {
     this.app = app;
     this.uiManager = uiManager;
     this.stageEditor = new StageEditor(app);
+    this.gameplayDebugger = new GameplayDebugger(app);
 
     this.stageEditor.onReturnToDashboard = () => {
       this.openDashboard();
@@ -37,6 +45,10 @@ export class DevToolkit {
     this.stageEditor.onPlaytestRequested = (snapshot) => {
       this.startPlaytestFromEditor(snapshot);
     };
+
+    this.app.setPostRenderCallback((_dt, now) => {
+      this.gameplayDebugger.onFrameTick(now);
+    });
 
     this.mountDashboardDOM();
     this.mountPlaytestBarDOM();
@@ -72,7 +84,7 @@ export class DevToolkit {
           <button id="dev-card-debugger" class="dev-dash-tile">
             <div class="dev-dash-tile-title">🧪 Gameplay Debugger</div>
             <div class="dev-dash-tile-desc">Test heroes, items, buffs, augments, enemies, Stage 1 Titan attacks, and teleporter events in real time.</div>
-            <div class="dev-dash-tile-meta" id="dev-dash-dbg-meta">Phase 5 Module</div>
+            <div class="dev-dash-tile-meta" id="dev-dash-dbg-meta">Live Sim &amp; Visual Overlays [F8]</div>
           </button>
 
           <button id="dev-card-perf" class="dev-dash-tile">
@@ -106,7 +118,13 @@ export class DevToolkit {
     });
 
     el.querySelector('#dev-card-debugger')?.addEventListener('click', () => {
-      this.uiManager.showPickupNotification('Gameplay Debugger will be enabled in Phase 5.');
+      this.closeDashboard();
+      if (!this.app.getSimulation().state.isGameStarted) {
+        this.uiManager.hideAllGameModalsForDev();
+        this.app.startRun();
+      }
+      this.app.exitPointerLock();
+      this.gameplayDebugger.open();
     });
 
     el.querySelector('#dev-card-perf')?.addEventListener('click', () => {
@@ -131,11 +149,16 @@ export class DevToolkit {
     bar.innerHTML = `
       <span class="dev-pt-tag">▶ PLAYTEST</span>
       <span id="dev-pt-snapshot-badge" class="dev-pt-snap">In-Memory Layout</span>
+      <button id="btn-playtest-debugger" class="sci-btn dev-ed-btn">🧪 Debugger [F8]</button>
       <button id="btn-playtest-return" class="sci-btn primary-gold dev-ed-btn">← Return to Editor (Shift+F8)</button>
     `;
     document.body.appendChild(bar);
     this.playtestBarEl = bar;
 
+    bar.querySelector('#btn-playtest-debugger')?.addEventListener('click', () => {
+      this.app.exitPointerLock();
+      this.gameplayDebugger.toggle();
+    });
     bar.querySelector('#btn-playtest-return')?.addEventListener('click', () => {
       this.returnToEditorFromPlaytest();
     });
@@ -182,6 +205,7 @@ export class DevToolkit {
   public returnToEditorFromPlaytest(): void {
     if (!this.isInPlaytest) return;
     this.isInPlaytest = false;
+    this.gameplayDebugger.close();
     this.playtestBarEl?.classList.add('hidden');
     this.app.stopPlaytestAndClear();
     this.uiManager.hideAllGameModalsForDev();

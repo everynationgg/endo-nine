@@ -3376,6 +3376,105 @@ body.pointer-locked .hud-click-to-lock {
   font-family: monospace;
 }
 
+/* Gameplay Debugger & Debug Canvas Overlay */
+.dev-dbg-overlay-canvas {
+  position: fixed;
+  inset: 0;
+  z-index: 10035;
+  pointer-events: none;
+}
+
+.dev-dbg-panel {
+  position: fixed;
+  top: 54px;
+  right: 14px;
+  width: 340px;
+  max-height: calc(100vh - 80px);
+  z-index: 10070;
+  background: rgba(10, 15, 28, 0.94);
+  border: 1px solid rgba(56, 189, 248, 0.5);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.7);
+  border-radius: 8px;
+  color: #e2e8f0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  font-family: 'Segoe UI', system-ui, sans-serif;
+}
+
+.dev-dbg-panel.hidden {
+  display: none !important;
+}
+
+.dev-dbg-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: rgba(15, 28, 48, 0.9);
+  border-bottom: 1px solid rgba(56, 189, 248, 0.3);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #38bdf8;
+}
+
+.dev-dbg-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 2px;
+  padding: 6px;
+  background: rgba(8, 13, 24, 0.7);
+}
+
+.dev-dbg-tab {
+  background: rgba(15, 23, 42, 0.75);
+  border: 1px solid rgba(148, 163, 184, 0.22);
+  border-radius: 4px;
+  padding: 5px 4px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.dev-dbg-tab.active {
+  background: rgba(56, 189, 248, 0.24);
+  border-color: #38bdf8;
+  color: #f8fafc;
+}
+
+.dev-dbg-body {
+  padding: 10px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.dev-dbg-section {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dev-dbg-readout {
+  font-family: monospace;
+  font-size: 10px;
+  padding: 6px 8px;
+  background: rgba(15, 23, 42, 0.9);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 4px;
+  color: #7dd3fc;
+  line-height: 1.4;
+}
+
+.dev-dbg-btn-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
 
 
 
