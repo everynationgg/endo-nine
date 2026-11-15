@@ -6987,4 +6987,13 @@ export class ThreeApp {
       envObjects: this.podMap.size + this.worldEventMap.size + this.obstacleEntries.length + (this.artifactGroup ? 1 : 0)
     };
   }
+
+  public stopPlaytestAndClear(): void {
+    this.exitPointerLock();
+    this.simulation.state.isGameStarted = false;
+    this.simulation.state.isPaused = false;
+    this.simulation.state.enemies = [];
+    this.simulation.state.projectiles = [];
+    this.clearRenderEntities();
+  }
 }

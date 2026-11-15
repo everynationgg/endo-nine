@@ -1,14 +1,29 @@
 import type { ThreeApp } from '../render/ThreeApp';
 import type { UIManager } from '../ui/UIManager';
 import { StageEditor } from './StageEditor';
-import { validateStageProfile } from './StageConfig';
+import type { StageConfig, StageProfileKey } from './StageConfig';
+import { cloneStageConfig, validateStageProfile } from './StageConfig';
 
 export class DevToolkit {
   private app: ThreeApp;
   private uiManager: UIManager;
   public stageEditor: StageEditor;
+
   private dashboardEl: HTMLElement | null = null;
   private validationEl: HTMLElement | null = null;
+  private playtestBarEl: HTMLElement | null = null;
+
+  private isInPlaytest: boolean = false;
+  private playtestSnapshot: StageConfig | null = null;
+  private playtestWasDirty: boolean = false;
+  private playtestProfileKey: StageProfileKey = 'procedural';
+
+  private readonly boundGlobalKey = (e: KeyboardEvent) => {
+    if (e.shiftKey && e.key === 'F8' && this.isInPlaytest) {
+      e.preventDefault();
+      this.returnToEditorFromPlaytest();
+    }
+  };
 
   constructor(app: ThreeApp, uiManager: UIManager) {
     this.app = app;
@@ -19,7 +34,13 @@ export class DevToolkit {
       this.openDashboard();
     };
 
+    this.stageEditor.onPlaytestRequested = (snapshot) => {
+      this.startPlaytestFromEditor(snapshot);
+    };
+
     this.mountDashboardDOM();
+    this.mountPlaytestBarDOM();
+    window.addEventListener('keydown', this.boundGlobalKey);
 
     this.uiManager.onOpenDeveloperModeCallback = () => {
       this.openDashboard();
@@ -100,6 +121,80 @@ export class DevToolkit {
       this.closeDashboard();
       document.getElementById('screen-main-menu')?.classList.remove('hidden');
     });
+  }
+
+  private mountPlaytestBarDOM(): void {
+    document.getElementById('dev-playtest-bar')?.remove();
+    const bar = document.createElement('div');
+    bar.id = 'dev-playtest-bar';
+    bar.className = 'dev-playtest-bar interactive hidden';
+    bar.innerHTML = `
+      <span class="dev-pt-tag">▶ PLAYTEST</span>
+      <span id="dev-pt-snapshot-badge" class="dev-pt-snap">In-Memory Layout</span>
+      <button id="btn-playtest-return" class="sci-btn primary-gold dev-ed-btn">← Return to Editor (Shift+F8)</button>
+    `;
+    document.body.appendChild(bar);
+    this.playtestBarEl = bar;
+
+    bar.querySelector('#btn-playtest-return')?.addEventListener('click', () => {
+      this.returnToEditorFromPlaytest();
+    });
+  }
+
+  public startPlaytestFromEditor(snapshot: StageConfig): void {
+    const sim = this.app.getSimulation();
+    const profileKey = this.stageEditor.getActiveProfileKey();
+    const profile = snapshot.profiles?.[profileKey];
+    const issues = validateStageProfile(profile, sim.state.terrain, sim.state.worldWidth, sim.state.worldHeight);
+    const errors = issues.filter((i) => i.severity === 'error');
+    if (errors.length > 0) {
+      this.uiManager.showPickupNotification(`Playtest blocked: ${errors[0].message}`);
+      return;
+    }
+
+    // Hold temporary snapshot strictly in memory (do NOT write disk)
+    this.playtestSnapshot = cloneStageConfig(snapshot);
+    this.playtestWasDirty = this.stageEditor.getIsDirty();
+    this.playtestProfileKey = profileKey;
+    this.isInPlaytest = true;
+
+    this.stageEditor.close();
+    this.closeDashboard();
+    this.uiManager.hideAllGameModalsForDev();
+
+    // Apply in-memory config so startRun spawns at edited playerSpawnPos with edited layout
+    sim.state.applyStageConfig(this.playtestSnapshot, this.playtestProfileKey);
+    this.app.startRun();
+
+    const snapBadge = this.playtestBarEl?.querySelector('#dev-pt-snapshot-badge');
+    if (snapBadge) {
+      snapBadge.textContent = this.playtestWasDirty
+        ? `● Temporary Unsaved Edit (${sim.state.selectedHeroId})`
+        : `Saved Layout (${sim.state.selectedHeroId})`;
+    }
+    this.playtestBarEl?.classList.remove('hidden');
+
+    if (issues.length > 0) {
+      this.uiManager.showPickupNotification(`Playtest started with ${issues.length} validation warning(s). Press Shift+F8 to return.`);
+    }
+  }
+
+  public returnToEditorFromPlaytest(): void {
+    if (!this.isInPlaytest) return;
+    this.isInPlaytest = false;
+    this.playtestBarEl?.classList.add('hidden');
+    this.app.stopPlaytestAndClear();
+    this.uiManager.hideAllGameModalsForDev();
+
+    // Re-open Stage Editor preserving temporary unsaved edits and dirty flag intact!
+    const snap = this.playtestSnapshot;
+    const wasDirty = this.playtestWasDirty;
+    this.playtestSnapshot = null;
+    this.stageEditor.open(snap, wasDirty);
+  }
+
+  public getIsInPlaytest(): boolean {
+    return this.isInPlaytest;
   }
 
   public openDashboard(): void {

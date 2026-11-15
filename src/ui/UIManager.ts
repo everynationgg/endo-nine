@@ -596,6 +596,18 @@ export class UIManager {
     this.onExitToMenuCallback?.();
   }
 
+  public hideAllGameModalsForDev(): void {
+    this.elPauseModal?.classList.add('hidden');
+    this.elGameOverModal?.classList.add('hidden');
+    this.elStageClearModal?.classList.add('hidden');
+    this.elBuffChoiceModal?.classList.add('hidden');
+    this.elInventoryModal?.classList.add('hidden');
+    this.elCodexModal?.classList.add('hidden');
+    this.elHudContainer?.classList.add('hidden');
+    this.elMainMenu?.classList.add('hidden');
+    document.getElementById('screen-hero-select')?.classList.add('hidden');
+  }
+
   public updateAudioIcon(isMuted: boolean): void {
     const icon = document.getElementById('audio-icon');
     if (icon) {
