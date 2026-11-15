@@ -1,0 +1,21 @@
+# Dependencies & build output
+node_modules/
+dist/
+.vite/
+
+# Environment & secrets
+.env
+.env.*
+*.local
+
+# Stage editor backups & temporary files
+public/stages/.backups/
+*.tmp
+
+# Scratch & debug captures
+scratch/
+exports/*.png
+
+# OS / editor artifacts
+.DS_Store
+Thumbs.db

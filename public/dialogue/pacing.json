@@ -1,0 +1,8 @@
+{
+  "quietAfterEssentialSec": 22,
+  "quietAfterContextualSec": 12,
+  "quietAfterBanterSec": 32,
+  "initialQuietSec": 1.0,
+  "maxBanterPerStageRun": 3,
+  "defaultPauseAfterTurnSec": 0.32
+}

@@ -1,0 +1,24 @@
+{
+  "name": "endo-nine",
+  "version": "1.0.0",
+  "description": "ENDO NINE - Browser-first 2.5D isometric action roguelike",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview",
+    "play": "npm run build && vite preview --port 4173",
+    "dialogue:tts": "node scripts/generate-dialogue-audio.mjs"
+  },
+  "dependencies": {
+    "@types/three": "^0.187.0",
+    "phaser": "^3.90.0",
+    "three": "^0.187.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "sharp": "^0.35.5",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.5"
+  }
+}

@@ -1,0 +1,322 @@
+{
+  "boss_walk_front": {
+    "anim": "walk",
+    "direction": "front",
+    "frameCount": 8,
+    "frameWidth": 443,
+    "frameHeight": 443,
+    "stripWidth": 3544,
+    "stripHeight": 443,
+    "file": "boss_walk_front.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_walk_back": {
+    "anim": "walk",
+    "direction": "back",
+    "frameCount": 8,
+    "frameWidth": 443,
+    "frameHeight": 443,
+    "stripWidth": 3544,
+    "stripHeight": 443,
+    "file": "boss_walk_back.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_walk_right": {
+    "anim": "walk",
+    "direction": "right",
+    "frameCount": 8,
+    "frameWidth": 443,
+    "frameHeight": 443,
+    "stripWidth": 3544,
+    "stripHeight": 443,
+    "file": "boss_walk_right.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_walk_left": {
+    "anim": "walk",
+    "direction": "left",
+    "frameCount": 8,
+    "frameWidth": 440,
+    "frameHeight": 441,
+    "stripWidth": 3520,
+    "stripHeight": 441,
+    "file": "boss_walk_left.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_laser_front": {
+    "anim": "laser",
+    "direction": "front",
+    "frameCount": 4,
+    "frameWidth": 378,
+    "frameHeight": 249,
+    "stripWidth": 1512,
+    "stripHeight": 249,
+    "file": "boss_laser_front.png",
+    "delays": [
+      250,
+      250,
+      250,
+      250
+    ]
+  },
+  "boss_laser_back": {
+    "anim": "laser",
+    "direction": "back",
+    "frameCount": 4,
+    "frameWidth": 378,
+    "frameHeight": 249,
+    "stripWidth": 1512,
+    "stripHeight": 249,
+    "file": "boss_laser_back.png",
+    "delays": [
+      250,
+      250,
+      250,
+      250
+    ]
+  },
+  "boss_laser_left": {
+    "anim": "laser",
+    "direction": "left",
+    "frameCount": 4,
+    "frameWidth": 378,
+    "frameHeight": 249,
+    "stripWidth": 1512,
+    "stripHeight": 249,
+    "file": "boss_laser_left.png",
+    "delays": [
+      250,
+      250,
+      250,
+      250
+    ]
+  },
+  "boss_laser_right": {
+    "anim": "laser",
+    "direction": "right",
+    "frameCount": 4,
+    "frameWidth": 378,
+    "frameHeight": 249,
+    "stripWidth": 1512,
+    "stripHeight": 249,
+    "file": "boss_laser_right.png",
+    "delays": [
+      250,
+      250,
+      250,
+      250
+    ]
+  },
+  "boss_tentacle_front": {
+    "anim": "tentacle",
+    "direction": "front",
+    "frameCount": 8,
+    "frameWidth": 512,
+    "frameHeight": 341,
+    "stripWidth": 4096,
+    "stripHeight": 341,
+    "file": "boss_tentacle_front.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_tentacle_back": {
+    "anim": "tentacle",
+    "direction": "back",
+    "frameCount": 8,
+    "frameWidth": 418,
+    "frameHeight": 418,
+    "stripWidth": 3344,
+    "stripHeight": 418,
+    "file": "boss_tentacle_back.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_tentacle_left": {
+    "anim": "tentacle",
+    "direction": "left",
+    "frameCount": 8,
+    "frameWidth": 416,
+    "frameHeight": 416,
+    "stripWidth": 3328,
+    "stripHeight": 416,
+    "file": "boss_tentacle_left.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_tentacle_right": {
+    "anim": "tentacle",
+    "direction": "right",
+    "frameCount": 8,
+    "frameWidth": 418,
+    "frameHeight": 418,
+    "stripWidth": 3344,
+    "stripHeight": 418,
+    "file": "boss_tentacle_right.png",
+    "delays": [
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140,
+      140
+    ]
+  },
+  "boss_elemental_front": {
+    "anim": "elemental",
+    "direction": "front",
+    "frameCount": 12,
+    "frameWidth": 362,
+    "frameHeight": 362,
+    "stripWidth": 4344,
+    "stripHeight": 362,
+    "file": "boss_elemental_front.png",
+    "delays": [
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180
+    ]
+  },
+  "boss_elemental_back": {
+    "anim": "elemental",
+    "direction": "back",
+    "frameCount": 12,
+    "frameWidth": 364,
+    "frameHeight": 362,
+    "stripWidth": 4368,
+    "stripHeight": 362,
+    "file": "boss_elemental_back.png",
+    "delays": [
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180
+    ]
+  },
+  "boss_elemental_left": {
+    "anim": "elemental",
+    "direction": "left",
+    "frameCount": 12,
+    "frameWidth": 364,
+    "frameHeight": 362,
+    "stripWidth": 4368,
+    "stripHeight": 362,
+    "file": "boss_elemental_left.png",
+    "delays": [
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180
+    ]
+  },
+  "boss_elemental_right": {
+    "anim": "elemental",
+    "direction": "right",
+    "frameCount": 12,
+    "frameWidth": 362,
+    "frameHeight": 362,
+    "stripWidth": 4344,
+    "stripHeight": 362,
+    "file": "boss_elemental_right.png",
+    "delays": [
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180,
+      180
+    ]
+  }
+}

@@ -1,0 +1,1017 @@
+{
+  "version": "0.2",
+  "stageNumber": 1,
+  "conversations": [
+    {
+      "id": "scene_01_first_steps",
+      "title": "Scene 01 — First Steps",
+      "trigger": "left_crash_site",
+      "enabled": true,
+      "category": "essential",
+      "priority": 1,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "before_boss_spawned",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "commander": [
+          {
+            "id": "s01_cmd_01",
+            "speaker": "doctor",
+            "text": "Mander, you hear me?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_01.wav",
+            "durationSec": 1.87,
+            "direction": "Warm, casual radio check with a hint of teasing familiarity"
+          },
+          {
+            "id": "s01_cmd_02",
+            "speaker": "commander",
+            "text": "Yes, ma'am. Although I was enjoying the silence.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_02.wav",
+            "durationSec": 3.07,
+            "direction": "Relaxed, dryly humorous military confidence"
+          },
+          {
+            "id": "s01_cmd_03",
+            "speaker": "doctor",
+            "text": "Cute. Try not to die. We're running low on medical supplies, and we still have people out there to find.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_03.wav",
+            "durationSec": 5.83,
+            "direction": "Quick playful comeback shifting into grounded urgency"
+          },
+          {
+            "id": "s01_cmd_04",
+            "speaker": "commander",
+            "text": "Any sign of them?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_04.wav",
+            "durationSec": 1.87,
+            "direction": "Focused, grounded field check"
+          },
+          {
+            "id": "s01_cmd_05",
+            "speaker": "doctor",
+            "text": "Nothing yet. And the ship's still missing parts. We're not going anywhere until we find what we need.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_05.wav",
+            "durationSec": 5.98,
+            "direction": "Analytical, matter-of-fact, slightly weary"
+          },
+          {
+            "id": "s01_cmd_06",
+            "speaker": "overseer",
+            "text": "I strongly advise against exploring without a comprehensive environmental assessment.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_06.wav",
+            "durationSec": 5.71,
+            "direction": "Composed, formal, measured synthetic precision"
+          },
+          {
+            "id": "s01_cmd_07",
+            "speaker": "commander",
+            "text": "Great. The floating Christmas ornament has concerns.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_07.wav",
+            "durationSec": 3.43,
+            "direction": "Deadpan sarcasm"
+          },
+          {
+            "id": "s01_cmd_08",
+            "speaker": "overseer",
+            "text": "I am beginning to understand why your species has such a high mortality rate.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_cmd_08.wav",
+            "durationSec": 5.14,
+            "direction": "Quietly biting, ultra-polite dry sarcasm"
+          }
+        ],
+        "doctor": [
+          {
+            "id": "s01_doc_01",
+            "speaker": "commander",
+            "text": "Doc, how's it looking out there?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_01.wav",
+            "durationSec": 1.87,
+            "direction": "Authoritative, protective radio check"
+          },
+          {
+            "id": "s01_doc_02",
+            "speaker": "doctor",
+            "text": "Cold, hostile, and biologically fascinating. So, basically, my dream vacation.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_02.wav",
+            "durationSec": 6.31,
+            "direction": "Bright, amused, slightly chaotic scientific enthusiasm"
+          },
+          {
+            "id": "s01_doc_03",
+            "speaker": "commander",
+            "text": "Keep your eyes open for our people. Any sign of them, you call it in.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_03.wav",
+            "durationSec": 4.13,
+            "direction": "Steady, decisive, caring field command"
+          },
+          {
+            "id": "s01_doc_04",
+            "speaker": "doctor",
+            "text": "Mander, I know. Missing crew, missing ship parts, questionable survival odds. I've got the list.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_04.wav",
+            "durationSec": 6.94,
+            "direction": "Fondly exasperated, brisk and capable"
+          },
+          {
+            "id": "s01_doc_05",
+            "speaker": "overseer",
+            "text": "Your enthusiasm is concerning.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_05.wav",
+            "durationSec": 3.05,
+            "direction": "Cool, clinical disapproval"
+          },
+          {
+            "id": "s01_doc_06",
+            "speaker": "doctor",
+            "text": "Oh, shut up. I literally brought you back to life.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_01_first_steps/s01_doc_06.wav",
+            "durationSec": 3.77,
+            "direction": "Breezy, unapologetic snap-back with dry humor"
+          }
+        ]
+      },
+      "onComplete": {
+        "codexEntryId": "lore_stage1_crash_objectives",
+        "codexTitle": "Crash Perimeter — Initial Objectives",
+        "codexSummary": "With the spacecraft crippled in Sector 1's crater, the survivors must locate missing crewmates, salvage replacement parts, and stabilize the nearby Overseer artifact."
+      }
+    },
+    {
+      "id": "scene_02_planet_waking_up",
+      "title": "Scene 02 — The Planet Is Waking Up",
+      "trigger": "flora_discovered",
+      "enabled": true,
+      "category": "essential",
+      "priority": 1,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "same_stage",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "s02_01",
+            "speaker": "doctor",
+            "text": "Wait. Those organisms... they're actually growing?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_01.wav",
+            "durationSec": 3.62,
+            "direction": "Sudden scientific astonishment"
+          },
+          {
+            "id": "s02_02",
+            "speaker": "overseer",
+            "text": "That should not be possible. This region remained frozen for an extensive period.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_02.wav",
+            "durationSec": 6.29,
+            "direction": "Measured surprise restrained beneath formal composure"
+          },
+          {
+            "id": "s02_03",
+            "speaker": "commander",
+            "text": "Well, somebody forgot to tell the plants.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_03.wav",
+            "durationSec": 2.59,
+            "direction": "Dry, grounded quip"
+          },
+          {
+            "id": "s02_04",
+            "speaker": "doctor",
+            "text": "No, seriously. Something changed here. And I want to know what.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_04.wav",
+            "durationSec": 4.7,
+            "direction": "Intrigued, insistent analytical focus"
+          },
+          {
+            "id": "s02_05",
+            "speaker": "overseer",
+            "text": "Curiosity without caution is frequently fatal.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_05.wav",
+            "durationSec": 3.89,
+            "direction": "Calm, solemn warning"
+          },
+          {
+            "id": "s02_06",
+            "speaker": "doctor",
+            "text": "And being mysterious instead of helpful is frequently annoying.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_02_planet_waking_up/s02_06.wav",
+            "durationSec": 4.15,
+            "direction": "Sharp, witty retort"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_03_first_hostile_encounter",
+      "title": "Scene 03 — First Hostile Encounter",
+      "trigger": "first_hostile_encounter",
+      "enabled": true,
+      "category": "contextual",
+      "priority": 1,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 4,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "before_boss_spawned",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "s03_01",
+            "speaker": "commander",
+            "text": "Contact! We've got movement!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_03_first_hostile_encounter/s03_01.wav",
+            "durationSec": 2.21,
+            "direction": "Sharp combat alert"
+          },
+          {
+            "id": "s03_02",
+            "speaker": "overseer",
+            "text": "Hostile organism detected. Exercise extreme caution.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_03_first_hostile_encounter/s03_02.wav",
+            "durationSec": 5.54,
+            "direction": "Crisp tactical warning"
+          },
+          {
+            "id": "s03_03",
+            "speaker": "doctor",
+            "text": "Wait, I want to see how it reacts—",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_03_first_hostile_encounter/s03_03.wav",
+            "durationSec": 2.3,
+            "direction": "Eager, reckless curiosity cut short"
+          },
+          {
+            "id": "s03_04",
+            "speaker": "commander",
+            "text": "Doc, it's trying to kill me!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_03_first_hostile_encounter/s03_04.wav",
+            "durationSec": 1.87,
+            "direction": "Urgent, incredulous combat shout"
+          },
+          {
+            "id": "s03_05",
+            "speaker": "doctor",
+            "text": "Well, that's one reaction.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_03_first_hostile_encounter/s03_05.wav",
+            "durationSec": 2.54,
+            "direction": "Unfazed, dryly amused"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_04_something_in_the_water",
+      "title": "Scene 04 — Something In The Water",
+      "trigger": "water_discovered",
+      "enabled": true,
+      "category": "contextual",
+      "priority": 2,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "same_stage",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "s04_01",
+            "speaker": "doctor",
+            "text": "Interesting. There's liquid water here. I want a sample.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_04_something_in_the_water/s04_01.wav",
+            "durationSec": 4.03,
+            "direction": "Curious, fascinated"
+          },
+          {
+            "id": "s04_02",
+            "speaker": "commander",
+            "text": "Can we make sure it doesn't dissolve my boots first?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_04_something_in_the_water/s04_02.wav",
+            "durationSec": 2.81,
+            "direction": "Pragmatic, dry humor"
+          },
+          {
+            "id": "s04_03",
+            "speaker": "overseer",
+            "text": "Its composition has not been established.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_04_something_in_the_water/s04_03.wav",
+            "durationSec": 3.41,
+            "direction": "Clinical neutrality"
+          },
+          {
+            "id": "s04_04",
+            "speaker": "doctor",
+            "text": "Finally. Something we agree on.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_04_something_in_the_water/s04_04.wav",
+            "durationSec": 2.59,
+            "direction": "Playful mock-celebration"
+          },
+          {
+            "id": "s04_05",
+            "speaker": "commander",
+            "text": "You two agreeing on something is somehow more disturbing than the water.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_04_something_in_the_water/s04_05.wav",
+            "durationSec": 5.06,
+            "direction": "Wryly deadpan"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_05_biological_sacs",
+      "title": "Scene 05 — The Biological Sacs",
+      "trigger": "first_pod_opened",
+      "enabled": true,
+      "category": "contextual",
+      "priority": 2,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "same_stage",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "s05_01",
+            "speaker": "doctor",
+            "text": "You just ripped that thing open?!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_01.wav",
+            "durationSec": 1.92,
+            "direction": "Appalled, amused shock"
+          },
+          {
+            "id": "s05_02",
+            "speaker": "commander",
+            "text": "There was something inside.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_02.wav",
+            "durationSec": 1.87,
+            "direction": "Blunt, unapologetic"
+          },
+          {
+            "id": "s05_03",
+            "speaker": "doctor",
+            "text": "That's not an answer! What if it was an egg?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_03.wav",
+            "durationSec": 3.07,
+            "direction": "Expressive, half-scolding disbelief"
+          },
+          {
+            "id": "s05_04",
+            "speaker": "commander",
+            "text": "Then congratulations. We just became parents.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_04.wav",
+            "durationSec": 3.46,
+            "direction": "Deadpan sarcasm"
+          },
+          {
+            "id": "s05_05",
+            "speaker": "overseer",
+            "text": "I strongly recommend against reproducing under these circumstances.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_05.wav",
+            "durationSec": 4.82,
+            "direction": "Completely literal, bone-dry delivery"
+          },
+          {
+            "id": "s05_06",
+            "speaker": "doctor",
+            "text": "Oh my God.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_05_biological_sacs/s05_06.wav",
+            "durationSec": 1.87,
+            "direction": "Exasperated laugh-sigh"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_06_first_enhancement",
+      "title": "Scene 06 — The First Enhancement",
+      "trigger": "first_enhancement_completed",
+      "enabled": true,
+      "category": "contextual",
+      "priority": 2,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "same_stage",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "s06_01",
+            "speaker": "doctor",
+            "text": "Okay, that was interesting. Something just altered your equipment's output.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_06_first_enhancement/s06_01.wav",
+            "durationSec": 4.42,
+            "direction": "Alert, fascinated analysis"
+          },
+          {
+            "id": "s06_02",
+            "speaker": "commander",
+            "text": "I'm choosing to interpret that as a good thing.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_06_first_enhancement/s06_02.wav",
+            "durationSec": 2.74,
+            "direction": "Calm, wry optimism"
+          },
+          {
+            "id": "s06_03",
+            "speaker": "overseer",
+            "text": "You are utilizing technology whose operating principles you do not understand.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_06_first_enhancement/s06_03.wav",
+            "durationSec": 5.5,
+            "direction": "Stiffly disapproving"
+          },
+          {
+            "id": "s06_04",
+            "speaker": "doctor",
+            "text": "That's literally how half of science starts.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_06_first_enhancement/s06_04.wav",
+            "durationSec": 2.45,
+            "direction": "Cheeky, cheerful"
+          },
+          {
+            "id": "s06_05",
+            "speaker": "overseer",
+            "text": "That is not a reassuring statement.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_06_first_enhancement/s06_05.wav",
+            "durationSec": 3.14,
+            "direction": "Dry, exhausted precision"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_07_first_artifact_clue",
+      "title": "Scene 07 — The First Artifact Clue",
+      "trigger": "artifact_discovered",
+      "enabled": true,
+      "category": "essential",
+      "priority": 1,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "before_boss_spawned",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "commander": [
+          {
+            "id": "s07_cmd_01",
+            "speaker": "commander",
+            "text": "Chandy, you recognize this?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_01.wav",
+            "durationSec": 2.4,
+            "direction": "Casual, slightly teasing prompt"
+          },
+          {
+            "id": "s07_cmd_02",
+            "speaker": "overseer",
+            "text": "I do not answer to that name.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_02.wav",
+            "durationSec": 2.66,
+            "direction": "Dignified, irritated"
+          },
+          {
+            "id": "s07_cmd_03",
+            "speaker": "doctor",
+            "text": "You just did.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_03.wav",
+            "durationSec": 1.87,
+            "direction": "Quick, gleeful tease"
+          },
+          {
+            "id": "s07_cmd_04",
+            "speaker": "overseer",
+            "text": "...Yes. Although its present condition is unexpected.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_04.wav",
+            "durationSec": 4.92,
+            "direction": "Reluctant pause followed by serious concern"
+          },
+          {
+            "id": "s07_cmd_05",
+            "speaker": "doctor",
+            "text": "Unexpected how?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_05.wav",
+            "durationSec": 1.87,
+            "direction": "Sharp, curious"
+          },
+          {
+            "id": "s07_cmd_06",
+            "speaker": "overseer",
+            "text": "I do not possess sufficient information to explain the discrepancy.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_06.wav",
+            "durationSec": 4.49,
+            "direction": "Guarded, clinical unease"
+          },
+          {
+            "id": "s07_cmd_07",
+            "speaker": "commander",
+            "text": "First time for everything, Chandy.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_07.wav",
+            "durationSec": 2.11,
+            "direction": "Dry, amused smirk"
+          }
+        ],
+        "doctor": [
+          {
+            "id": "s07_doc_01",
+            "speaker": "commander",
+            "text": "Chandy, you recognize what Doc found?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_doc_01.wav",
+            "durationSec": 2.57,
+            "direction": "Casual, slightly teasing prompt"
+          },
+          {
+            "id": "s07_doc_02",
+            "speaker": "overseer",
+            "text": "I do not answer to that name.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_02.wav",
+            "durationSec": 2.66,
+            "direction": "Dignified, irritated"
+          },
+          {
+            "id": "s07_doc_03",
+            "speaker": "doctor",
+            "text": "You just did.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_03.wav",
+            "durationSec": 1.87,
+            "direction": "Quick, gleeful tease"
+          },
+          {
+            "id": "s07_doc_04",
+            "speaker": "overseer",
+            "text": "...Yes. Although its present condition is unexpected.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_04.wav",
+            "durationSec": 4.92,
+            "direction": "Reluctant pause followed by serious concern"
+          },
+          {
+            "id": "s07_doc_05",
+            "speaker": "doctor",
+            "text": "Unexpected how?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_05.wav",
+            "durationSec": 1.87,
+            "direction": "Sharp, curious"
+          },
+          {
+            "id": "s07_doc_06",
+            "speaker": "overseer",
+            "text": "I do not possess sufficient information to explain the discrepancy.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_06.wav",
+            "durationSec": 4.49,
+            "direction": "Guarded, clinical unease"
+          },
+          {
+            "id": "s07_doc_07",
+            "speaker": "commander",
+            "text": "First time for everything, Chandy.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_07_first_artifact_clue/s07_cmd_07.wav",
+            "durationSec": 2.11,
+            "direction": "Dry, amused smirk"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_08_why_attacking",
+      "title": "Scene 08 — Why Is Everything Attacking Us?",
+      "trigger": "extended_hostility_quiet",
+      "enabled": true,
+      "category": "essential",
+      "priority": 2,
+      "persistenceScope": "once_per_run",
+      "retention": "run_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "always",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "s08_01",
+            "speaker": "commander",
+            "text": "Is everything on this planet trying to kill us?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_01.wav",
+            "durationSec": 2.71,
+            "direction": "Tired, exasperated question"
+          },
+          {
+            "id": "s08_02",
+            "speaker": "overseer",
+            "text": "The indigenous organisms represent a significant threat.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_02.wav",
+            "durationSec": 4.25,
+            "direction": "Formal, guarded"
+          },
+          {
+            "id": "s08_03",
+            "speaker": "doctor",
+            "text": "That's an observation, not an explanation.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_03.wav",
+            "durationSec": 3.12,
+            "direction": "Pointed, analytical pushback"
+          },
+          {
+            "id": "s08_04",
+            "speaker": "overseer",
+            "text": "Their behavior is consistent with hostile biological activity.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_04.wav",
+            "durationSec": 4.61,
+            "direction": "Slightly stiffer, defensive precision"
+          },
+          {
+            "id": "s08_05",
+            "speaker": "doctor",
+            "text": "You just used more words to tell me the exact same thing.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_05.wav",
+            "durationSec": 3.14,
+            "direction": "Dryly irritated"
+          },
+          {
+            "id": "s08_06",
+            "speaker": "commander",
+            "text": "Doc, I think you're breaking our GPS.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_08_why_attacking/s08_06.wav",
+            "durationSec": 2.54,
+            "direction": "Deadpan tease"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_09_teleporter_ready",
+      "title": "Scene 09 — The Teleporter Is Ready",
+      "trigger": "teleporter_charged",
+      "enabled": true,
+      "category": "essential",
+      "priority": 1,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 10,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "teleporter_ready_only",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "s09_01",
+            "speaker": "overseer",
+            "text": "The teleporter has accumulated sufficient energy for activation.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_09_teleporter_ready/s09_01.wav",
+            "durationSec": 4.54,
+            "direction": "Formal, focused announcement"
+          },
+          {
+            "id": "s09_02",
+            "speaker": "commander",
+            "text": "Finally. Something that works.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_09_teleporter_ready/s09_02.wav",
+            "durationSec": 2.23,
+            "direction": "Relieved, dry"
+          },
+          {
+            "id": "s09_03",
+            "speaker": "doctor",
+            "text": "Don't celebrate yet. We still don't know what happens when you activate it.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_09_teleporter_ready/s09_03.wav",
+            "durationSec": 3.94,
+            "direction": "Cautious, perceptive"
+          },
+          {
+            "id": "s09_04",
+            "speaker": "overseer",
+            "text": "I anticipate a substantial defensive response.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_09_teleporter_ready/s09_04.wav",
+            "durationSec": 3.86,
+            "direction": "Calmly understated"
+          },
+          {
+            "id": "s09_05",
+            "speaker": "commander",
+            "text": "You couldn't have mentioned that earlier?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_09_teleporter_ready/s09_05.wav",
+            "durationSec": 1.85,
+            "direction": "Exasperated disbelief"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_10_stage1_boss",
+      "title": "Scene 10 — The Stage 1 Boss",
+      "trigger": "boss_emerged",
+      "enabled": true,
+      "category": "essential",
+      "priority": 0,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 4,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "boss_active",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "s10_01",
+            "speaker": "doctor",
+            "text": "What the FUCK is that?!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_01.wav",
+            "durationSec": 2.09,
+            "direction": "Raw, visceral shock"
+          },
+          {
+            "id": "s10_02",
+            "speaker": "overseer",
+            "text": "Commander, withdraw immediately!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_02.wav",
+            "durationSec": 3.14,
+            "direction": "Rare, urgent alarm beneath synthetic poise"
+          },
+          {
+            "id": "s10_03",
+            "speaker": "commander",
+            "text": "A little late for that!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_03.wav",
+            "durationSec": 1.87,
+            "direction": "Decisive combat grit under fire"
+          },
+          {
+            "id": "s10_04",
+            "speaker": "doctor",
+            "text": "Look at the size of that thing!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_04.wav",
+            "durationSec": 1.87,
+            "direction": "Breathless awe and alarm"
+          },
+          {
+            "id": "s10_05",
+            "speaker": "overseer",
+            "text": "This is considerably worse than I anticipated.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_05.wav",
+            "durationSec": 3.67,
+            "direction": "Tight, grave understatement"
+          },
+          {
+            "id": "s10_06",
+            "speaker": "commander",
+            "text": "YOU ANTICIPATED THIS?!",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_10_stage1_boss/s10_06.wav",
+            "durationSec": 2.04,
+            "direction": "Furious, stressed shout mid-fight"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_11_after_the_battle",
+      "title": "Scene 11 — After The Battle",
+      "trigger": "boss_defeated",
+      "enabled": true,
+      "category": "essential",
+      "priority": 0,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_deferred",
+      "resumable": true,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "boss_defeated_before_exit",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "s11_01",
+            "speaker": "commander",
+            "text": "Is it dead?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_01.wav",
+            "durationSec": 1.87,
+            "direction": "Catching breath, wary"
+          },
+          {
+            "id": "s11_02",
+            "speaker": "doctor",
+            "text": "Give me a second. I'm trying to read the biological signals.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_02.wav",
+            "durationSec": 3.72,
+            "direction": "Focused, intense concentration"
+          },
+          {
+            "id": "s11_03",
+            "speaker": "overseer",
+            "text": "The immediate threat has been neutralized.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_03.wav",
+            "durationSec": 3.24,
+            "direction": "Calm, formal closure"
+          },
+          {
+            "id": "s11_04",
+            "speaker": "doctor",
+            "text": "You know what bothers me? Some of its readings don't make sense.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_04.wav",
+            "durationSec": 3.84,
+            "direction": "Puzzled, lingering unease"
+          },
+          {
+            "id": "s11_05",
+            "speaker": "commander",
+            "text": "Doc, please. Can we have one moment where nothing tries to kill us?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_05.wav",
+            "durationSec": 4.85,
+            "direction": "Exhausted, pleading humor"
+          },
+          {
+            "id": "s11_06",
+            "speaker": "doctor",
+            "text": "Fine. But we're coming back to this.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_11_after_the_battle/s11_06.wav",
+            "durationSec": 2.47,
+            "direction": "Reluctant concession, lingering curiosity"
+          }
+        ]
+      }
+    },
+    {
+      "id": "scene_12_leaving_the_wreckage",
+      "title": "Scene 12 — Leaving The Wreckage",
+      "trigger": "stage_leaving",
+      "enabled": true,
+      "category": "essential",
+      "priority": 0,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 4,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "during_stage_clear",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "s12_01",
+            "speaker": "commander",
+            "text": "Chandy, this thing takes us to another artifact, right?",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_01.wav",
+            "durationSec": 3.5,
+            "direction": "Grounded, brisk confirmation"
+          },
+          {
+            "id": "s12_02",
+            "speaker": "overseer",
+            "text": "Correct. It connects to another location on this planet.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_02.wav",
+            "durationSec": 4.99,
+            "direction": "Precise, calm"
+          },
+          {
+            "id": "s12_03",
+            "speaker": "doctor",
+            "text": "So we're still looking for our people, still missing ship parts, and now we're teleporting into more alien bullshit.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_03.wav",
+            "durationSec": 6.31,
+            "direction": "Dry, chaotic exasperation"
+          },
+          {
+            "id": "s12_04",
+            "speaker": "commander",
+            "text": "Pretty much.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_04.wav",
+            "durationSec": 1.87,
+            "direction": "Resigned deadpan"
+          },
+          {
+            "id": "s12_05",
+            "speaker": "overseer",
+            "text": "Remaining here will not improve your circumstances.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_05.wav",
+            "durationSec": 4.08,
+            "direction": "Clinical, undeniable logic"
+          },
+          {
+            "id": "s12_06",
+            "speaker": "doctor",
+            "text": "I hate that he has a point.",
+            "audioUrl": "/assets/audio/dialogue/stage1/scene_12_leaving_the_wreckage/s12_06.wav",
+            "durationSec": 1.87,
+            "direction": "Grudging amusement"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ambient_a_doctors_curiosity",
+      "title": "Ambient A — Doctor's Curiosity",
+      "trigger": "ambient_exploration",
+      "enabled": true,
+      "category": "banter",
+      "priority": 3,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 2,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "before_boss_spawned",
+      "needsHeroVariantReview": false,
+      "variants": {
+        "default": [
+          {
+            "id": "amb_a_01",
+            "speaker": "doctor",
+            "text": "You know, I'd love to get a sample from one of these creatures back to the ship.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_a_doctors_curiosity/amb_a_01.wav",
+            "durationSec": 4.44,
+            "direction": "Cheerful, slightly dangerous curiosity"
+          },
+          {
+            "id": "amb_a_02",
+            "speaker": "commander",
+            "text": "Absolutely not.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_a_doctors_curiosity/amb_a_02.wav",
+            "durationSec": 1.87,
+            "direction": "Instant firm shutdown"
+          },
+          {
+            "id": "amb_a_03",
+            "speaker": "doctor",
+            "text": "I haven't even told you what I want to do with it.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_a_doctors_curiosity/amb_a_03.wav",
+            "durationSec": 2.42,
+            "direction": "Playfully defensive"
+          },
+          {
+            "id": "amb_a_04",
+            "speaker": "commander",
+            "text": "That's exactly why I said no.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_a_doctors_curiosity/amb_a_04.wav",
+            "durationSec": 1.87,
+            "direction": "Dry, knowing finality"
+          }
+        ]
+      }
+    },
+    {
+      "id": "ambient_b_overseers_patience",
+      "title": "Ambient B — Overseer's Patience",
+      "trigger": "ambient_exploration",
+      "enabled": true,
+      "category": "banter",
+      "priority": 3,
+      "persistenceScope": "once_per_run",
+      "retention": "stage_immediate",
+      "ttlSec": 2,
+      "resumable": false,
+      "prerequisiteRule": "stage1_campaign_only",
+      "relevanceRule": "before_boss_spawned",
+      "needsHeroVariantReview": true,
+      "variants": {
+        "default": [
+          {
+            "id": "amb_b_01",
+            "speaker": "overseer",
+            "text": "Your current approach appears unnecessarily dangerous.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_b_overseers_patience/amb_b_01.wav",
+            "durationSec": 4.2,
+            "direction": "Formal disapproval"
+          },
+          {
+            "id": "amb_b_02",
+            "speaker": "commander",
+            "text": "Got a better idea?",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_b_overseers_patience/amb_b_02.wav",
+            "durationSec": 1.87,
+            "direction": "Blunt, relaxed challenge"
+          },
+          {
+            "id": "amb_b_03",
+            "speaker": "overseer",
+            "text": "Several.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_b_overseers_patience/amb_b_03.wav",
+            "durationSec": 1.87,
+            "direction": "Clipped, dry certainty"
+          },
+          {
+            "id": "amb_b_04",
+            "speaker": "commander",
+            "text": "Great. Keep them to yourself.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_b_overseers_patience/amb_b_04.wav",
+            "durationSec": 2.16,
+            "direction": "Deadpan brush-off"
+          },
+          {
+            "id": "amb_b_05",
+            "speaker": "doctor",
+            "text": "I'm actually with the floating chandelier on this one.",
+            "audioUrl": "/assets/audio/dialogue/stage1/ambient_b_overseers_patience/amb_b_05.wav",
+            "durationSec": 3.1,
+            "direction": "Amused, siding playfully with Overseer"
+          }
+        ]
+      }
+    }
+  ]
+}

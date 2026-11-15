@@ -1,0 +1,26 @@
+{
+  "seed": 133799,
+  "worldWidth": 3600,
+  "worldHeight": 3600,
+  "gridResolution": 361,
+  "minHeight": -19.803688049316406,
+  "maxHeight": 1577.0155029296875,
+  "heightSpan": 1596.819190979004,
+  "middlePlateauCenter": {
+    "x": 2431.9712253613397,
+    "y": 1823.3228312525898
+  },
+  "upperPlateauCenter": {
+    "x": 1425.6776219047606,
+    "y": 1037.24034759216
+  },
+  "spawnPos": {
+    "x": 1800,
+    "y": 2480
+  },
+  "shipPos": {
+    "x": 1800,
+    "y": 2960
+  },
+  "blenderTip": "Import stage1_map.glb directly in Blender (File -> Import -> glTF 2.0). Scene coordinates are 1:1 in game units (3600x3600). In Blender, press Home or adjust Clip End to 20000 in the N-panel View tab so the full 3600x3600 map stays visible."
+}
