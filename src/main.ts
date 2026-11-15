@@ -4,12 +4,14 @@ import { UIManager, GameSettings } from './ui/UIManager';
 import { SoundManager } from './render/SoundManager';
 import { NarrativeObserver } from './narrative/NarrativeObserver';
 import { DialogueDirector } from './narrative/DialogueDirector';
+import { loadStageConfigFromServer } from './dev/StageConfig';
 
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
   const container = document.getElementById('game-container') || document.body;
   const soundManager = new SoundManager();
   const uiManager = new UIManager();
-  const simulation = new Simulation();
+  const stageConfig = await loadStageConfigFromServer('stage1');
+  const simulation = new Simulation(undefined, stageConfig);
 
   const app = new ThreeApp(container, simulation, soundManager, uiManager);
   const narrativeObserver = new NarrativeObserver();
@@ -118,4 +120,15 @@ window.addEventListener('DOMContentLoaded', () => {
       app.restartRun();
     }
   );
+
+  if (import.meta.env.DEV) {
+    import('./dev/DevToolkit')
+      .then(({ DevToolkit }) => {
+        const devToolkit = new DevToolkit(app, uiManager);
+        (window as any).__devToolkit = devToolkit;
+      })
+      .catch((err) => {
+        console.warn('[DevToolkit] Failed to initialize developer mode:', err);
+      });
+  }
 });

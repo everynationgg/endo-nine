@@ -41,6 +41,7 @@ import {
 } from './ItemDefs';
 import { getDifficultyTier } from './DifficultyDefs';
 import { STAGE1_BOSS_CONFIG } from './Stage1BossConfig';
+import type { StageConfig } from '../dev/StageConfig';
 
 export class Simulation {
   public state: GameState;
@@ -67,11 +68,11 @@ export class Simulation {
     return false;
   }
 
-  constructor(stateOrSeed?: GameState | number) {
+  constructor(stateOrSeed?: GameState | number, initialStageConfig?: StageConfig | null) {
     if (typeof stateOrSeed === 'number') {
-      this.state = new GameState(stateOrSeed);
+      this.state = new GameState(stateOrSeed, 'commander', initialStageConfig);
     } else {
-      this.state = stateOrSeed || new GameState();
+      this.state = stateOrSeed || new GameState(undefined, 'commander', initialStageConfig);
     }
     this.spatialGrid = new SpatialGrid(160);
   }
@@ -246,6 +247,11 @@ export class Simulation {
     this.nextDropId = 1;
     this.nextItemDropId = 1;
 
+    // Re-apply active stage config so pods, events, obstacles, and spawns reflect latest saved/playtest layout
+    if (this.state.activeStageConfig) {
+      this.state.applyStageConfig(this.state.activeStageConfig);
+    }
+
     // Reset hero stats and equipped skills cleanly without run-to-run leakage
     this.state.selectHero(this.state.selectedHeroId);
 
@@ -253,7 +259,7 @@ export class Simulation {
     const p = this.state.player;
     p.pos = (this.state.terrain.isCustomTestMap && this.state.terrain.testSpawnPos)
       ? { ...this.state.terrain.testSpawnPos }
-      : { x: this.state.worldWidth / 2, y: 2480 };
+      : { ...this.state.playerSpawnPos };
     p.velocity = { x: 0, y: 0 };
     p.facing = 'front';
     p.castFacingLockTimer = 0;
@@ -1542,7 +1548,7 @@ export class Simulation {
       const fallbackPos =
         terrain.isCustomTestMap && terrain.testSpawnPos
           ? terrain.testSpawnPos
-          : { x: this.state.worldWidth / 2, y: 2480 };
+          : this.state.playerSpawnPos;
       const fallbackHeight = terrain.calculateHeight(fallbackPos.x, fallbackPos.y);
       target = { x: fallbackPos.x, y: fallbackPos.y, z: fallbackHeight };
     }
@@ -6418,7 +6424,7 @@ export class Simulation {
     // or at the custom test map's designated Boss Spawn marker when testing
     const bossPos = (this.state.terrain.isCustomTestMap && this.state.terrain.testBossSpawnPos)
       ? this.state.terrain.testBossSpawnPos
-      : { x: 1800, y: 2600 };
+      : this.state.bossSpawnPos;
     const sx = bossPos.x;
     const sy = bossPos.y;
     const spawnElev = this.state.terrain.getElevation(sx, sy);

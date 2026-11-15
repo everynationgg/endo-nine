@@ -93,6 +93,7 @@ export class UIManager {
   public onLoadTestMapCallback: ((file: File, scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
   public onQuickLoadSketchupCallback: ((scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
   public onClearTestMapCallback: (() => void) | null = null;
+  public onOpenDeveloperModeCallback: (() => void) | null = null;
   private settingsReturnScreenId: string = 'screen-main-menu';
 
   // DOM elements cache
@@ -664,6 +665,7 @@ export class UIManager {
         <div style="display: flex; flex-direction: column; gap: 14px; width: 300px; align-items: stretch;">
           <button id="btn-enter-selection" class="sci-btn primary-gold">Deploy Vanguard</button>
           <button id="btn-main-settings" class="sci-btn">⚙ Tactical Settings</button>
+          ${import.meta.env.DEV ? '<button id="btn-main-dev-mode" class="sci-btn" style="border-color: rgba(56, 189, 248, 0.65); color: #7dd3fc;">🛠 DEVELOPER MODE</button>' : ''}
 
           <!-- Non-Destructive Test Map Loader (SketchUp / Blender Sandbox) -->
           <div style="margin-top: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.28); background: rgba(15, 23, 42, 0.72); display: flex; flex-direction: column; gap: 8px;">
@@ -1608,6 +1610,12 @@ export class UIManager {
     document.getElementById('btn-main-settings')?.addEventListener('click', () => {
       this.openSettings('screen-main-menu');
     });
+
+    if (import.meta.env.DEV) {
+      document.getElementById('btn-main-dev-mode')?.addEventListener('click', () => {
+        this.onOpenDeveloperModeCallback?.();
+      });
+    }
 
     // Test Map Sandbox Loader (Main Menu)
     const testMapInput = document.getElementById('input-test-map-file') as HTMLInputElement | null;

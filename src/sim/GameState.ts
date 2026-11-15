@@ -28,6 +28,13 @@ import { calculateStats, SeededRandom, ALL_BUFF_IDS } from './ItemDefs';
 import { COMMANDER_DEFAULT_SKILLS, DOCTOR_DEFAULT_SKILLS } from './SkillDefs';
 import { DOCTOR_CONFIG } from './DoctorConfig';
 import { TerrainSystem } from './TerrainSystem';
+import type {
+  StageConfig,
+  StageEnemySpawnRegionConfig,
+  StageLayoutProfile,
+  StageProfileKey
+} from '../dev/StageConfig';
+import { formatObstacleDisplayName } from '../dev/StageConfig';
 
 export class GameState {
   // Compact, vertically layered 3D world (RoR2 scale: 3600x3600, 600+ unit verticality)
@@ -76,8 +83,21 @@ export class GameState {
   public isPaused: boolean = false;
   public events: SimEvent[] = [];
 
-  constructor(seed?: number, heroId: HeroId = 'commander') {
-    const actualSeed = seed !== undefined ? seed : (Date.now() ^ (Math.floor(Math.random() * 0x7fffffff))) >>> 0;
+  // Stage Config & Spawn Metadata (Single source of truth with Visual Stage Editor)
+  public activeStageConfig: StageConfig | null = null;
+  public playerSpawnPos: { x: number; y: number } = { x: 1800, y: 2480 };
+  public bossSpawnPos: { x: number; y: number } = { x: 1800, y: 2600 };
+  public enemySpawnRegions: StageEnemySpawnRegionConfig[] = [];
+  public customStageEnvironment: Record<string, unknown> | null = null;
+
+  constructor(seed?: number, heroId: HeroId = 'commander', initialStageConfig?: StageConfig | null) {
+    const configSeed = initialStageConfig?.profiles?.procedural?.terrainSeed;
+    const actualSeed =
+      seed !== undefined
+        ? seed
+        : configSeed !== undefined
+          ? configSeed
+          : (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
     this.seed = actualSeed;
     this.rng = new SeededRandom(actualSeed);
     this.selectedHeroId = heroId;
@@ -174,6 +194,10 @@ export class GameState {
     this.generateWorldEvents();
     this.generateOrganicPods();
     this.generateMapObstacles();
+
+    if (initialStageConfig) {
+      this.applyStageConfig(initialStageConfig, 'procedural');
+    }
   }
 
   public selectHero(heroId: HeroId): void {
@@ -663,5 +687,230 @@ export class GameState {
     if (this.player.maxHealth > prevMax) {
       this.player.health += this.player.maxHealth - prevMax;
     }
+  }
+
+  public getActiveProfileKey(): StageProfileKey {
+    return this.terrain.isCustomTestMap ? 'untitled_crater' : 'procedural';
+  }
+
+  public applyStageConfig(config: StageConfig, profileKey?: StageProfileKey): boolean {
+    this.activeStageConfig = config;
+    this.stageNumber = config.stageNumber || 1;
+    const key = profileKey || this.getActiveProfileKey();
+    const profile = config.profiles?.[key];
+    if (!profile) return false;
+    this.applyStageProfile(profile);
+    return true;
+  }
+
+  public applyStageProfile(profile: StageLayoutProfile): void {
+    if (profile.environment?.stageName) {
+      this.stageName = profile.environment.stageName;
+    }
+
+    if (profile.playerSpawn && profile.playerSpawn.enabled) {
+      this.playerSpawnPos = { x: profile.playerSpawn.x, y: profile.playerSpawn.y };
+      if (this.terrain.isCustomTestMap) {
+        this.terrain.testSpawnPos = { ...this.playerSpawnPos };
+      }
+      const elev = this.terrain.getElevation(this.playerSpawnPos.x, this.playerSpawnPos.y).height;
+      const zOff = profile.playerSpawn.zOffset ?? 0;
+      this.player.pos.x = this.playerSpawnPos.x;
+      this.player.pos.y = this.playerSpawnPos.y;
+      this.player.z = elev + zOff;
+      this.player.groundZ = elev;
+    }
+
+    if (profile.bossSpawn && profile.bossSpawn.enabled) {
+      this.bossSpawnPos = { x: profile.bossSpawn.x, y: profile.bossSpawn.y };
+      if (this.terrain.isCustomTestMap) {
+        this.terrain.testBossSpawnPos = { ...this.bossSpawnPos };
+      }
+    }
+
+    if (profile.teleporter && this.artifact) {
+      this.artifact.pos = { x: profile.teleporter.x, y: profile.teleporter.y };
+      this.artifact.zOffset = profile.teleporter.zOffset ?? 0;
+      this.artifact.rotationY = profile.teleporter.rotationY ?? 0;
+      this.artifact.scale = profile.teleporter.scale ?? 1;
+      this.artifact.radius = profile.teleporter.radius ?? 55;
+      if (profile.teleporter.chargePerKill !== undefined) {
+        this.artifact.chargePerKill = profile.teleporter.chargePerKill;
+      }
+    }
+
+    if (Array.isArray(profile.worldEvents)) {
+      this.worldEvents = profile.worldEvents
+        .filter((ev) => ev.enabled !== false)
+        .map((ev) => ({
+          id: ev.id,
+          type: ev.type,
+          name: ev.name,
+          description: ev.description,
+          pos: { x: ev.x, y: ev.y },
+          zOffset: ev.zOffset ?? 0,
+          rotationY: ev.rotationY ?? 0,
+          scale: ev.scale ?? 1,
+          radius: ev.radius || 110,
+          chargeProgress: 0,
+          isActive: false,
+          isCompleted: false,
+          pulseTimer: 0,
+          elevation: this.terrain.getElevation(ev.x, ev.y).height + (ev.zOffset ?? 0)
+        }));
+    }
+
+    if (Array.isArray(profile.pods)) {
+      this.pods = profile.pods
+        .filter((pod) => pod.enabled !== false)
+        .map((pod) => ({
+          id: pod.id,
+          name: pod.name,
+          pos: { x: pod.x, y: pod.y },
+          zOffset: pod.zOffset ?? 0,
+          rotationY: pod.rotationY ?? 0,
+          scale: pod.scale ?? 1,
+          cost: pod.cost,
+          isOpened: false,
+          radius: pod.radius || 36
+        }));
+    }
+
+    if (Array.isArray(profile.obstacles)) {
+      this.obstacles = profile.obstacles
+        .filter((obs) => obs.enabled !== false)
+        .map((obs) => ({
+          id: obs.id,
+          name: obs.name,
+          type: obs.type,
+          subtype: obs.subtype,
+          variant: obs.variant,
+          pos: { x: obs.x, y: obs.y },
+          zOffset: obs.zOffset ?? 0,
+          rotationY: obs.rotationY ?? 0,
+          radius: obs.radius,
+          scaleVar: obs.scaleVar || 1,
+          placementRule: obs.placementRule
+        }));
+    }
+
+    this.enemySpawnRegions = Array.isArray(profile.enemySpawnRegions)
+      ? profile.enemySpawnRegions.map((r) => ({ ...r, allowedTypes: [...r.allowedTypes] }))
+      : [];
+  }
+
+  public exportCurrentProfile(): StageLayoutProfile {
+    const bossPos =
+      this.terrain.isCustomTestMap && this.terrain.testBossSpawnPos
+        ? this.terrain.testBossSpawnPos
+        : this.bossSpawnPos;
+    const spawnPos =
+      this.terrain.isCustomTestMap && this.terrain.testSpawnPos
+        ? this.terrain.testSpawnPos
+        : this.playerSpawnPos;
+
+    return {
+      terrainSeed: this.terrain.seed,
+      environment: {
+        stageName: this.stageName,
+        terrainAsset: this.terrain.isCustomTestMap ? '/assets/models/Untitled.glb' : 'procedural_heightfield',
+        waterLevel: this.terrain.isCustomTestMap ? 105 : 5.2,
+        narrativeTriggersEnabled: !this.terrain.isCustomTestMap || this.terrain.allowTestMapNarrative
+      },
+      playerSpawn: {
+        id: 'player_spawn',
+        name: 'Player Spawn',
+        x: Math.round(spawnPos.x * 100) / 100,
+        y: Math.round(spawnPos.y * 100) / 100,
+        zOffset: 0,
+        rotationY: 0,
+        enabled: true
+      },
+      bossSpawn: {
+        id: 'boss_spawn',
+        name: 'Stage 1 Titan Boss Spawn',
+        x: Math.round(bossPos.x * 100) / 100,
+        y: Math.round(bossPos.y * 100) / 100,
+        zOffset: 0,
+        rotationY: 0,
+        enabled: true
+      },
+      teleporter: {
+        id: 'overseer_teleporter',
+        name: 'Overseer Artifact (Teleporter)',
+        x: Math.round(this.artifact.pos.x * 100) / 100,
+        y: Math.round(this.artifact.pos.y * 100) / 100,
+        zOffset: this.artifact.zOffset ?? 0,
+        rotationY: this.artifact.rotationY ?? 0,
+        scale: this.artifact.scale ?? 1,
+        radius: this.artifact.radius,
+        chargePerKill: this.artifact.chargePerKill,
+        enabled: true
+      },
+      worldEvents: this.worldEvents.map((ev) => ({
+        id: ev.id,
+        type: ev.type,
+        name: ev.name,
+        description: ev.description,
+        x: Math.round(ev.pos.x * 100) / 100,
+        y: Math.round(ev.pos.y * 100) / 100,
+        zOffset: ev.zOffset ?? 0,
+        rotationY: ev.rotationY ?? 0,
+        scale: ev.scale ?? 1,
+        radius: ev.radius,
+        enabled: true
+      })),
+      pods: this.pods.map((pod, idx) => ({
+        id: pod.id,
+        name: pod.name || `Bio-Chest #${idx + 1} (${pod.cost}G)`,
+        x: Math.round(pod.pos.x * 100) / 100,
+        y: Math.round(pod.pos.y * 100) / 100,
+        zOffset: pod.zOffset ?? 0,
+        rotationY: pod.rotationY ?? 0,
+        scale: pod.scale ?? 1,
+        cost: pod.cost,
+        radius: pod.radius,
+        enabled: true
+      })),
+      obstacles: this.obstacles.map((obs) => ({
+        id: obs.id,
+        name: obs.name || formatObstacleDisplayName(obs.type, obs.id, obs.variant),
+        type: obs.type,
+        subtype: obs.subtype,
+        variant: obs.variant,
+        x: Math.round(obs.pos.x * 100) / 100,
+        y: Math.round(obs.pos.y * 100) / 100,
+        zOffset: obs.zOffset ?? 0,
+        rotationY: obs.rotationY ?? 0,
+        scaleVar: Math.round((obs.scaleVar || 1) * 1000) / 1000,
+        radius: obs.radius,
+        enabled: true,
+        placementRule: obs.placementRule || (obs.type === 'flora' ? 'water' : 'terrain')
+      })),
+      enemySpawnRegions:
+        this.enemySpawnRegions.length > 0
+          ? this.enemySpawnRegions.map((r) => ({ ...r, allowedTypes: [...r.allowedTypes] }))
+          : [
+              {
+                id: 'region_default_stage1',
+                name: 'Stage 1 Default Crater Spawn Zone',
+                shape: 'circle',
+                x: 1800,
+                y: 1800,
+                zOffset: 0,
+                radius: 1700,
+                width: 3400,
+                height: 3400,
+                allowedTypes: ['crawler', 'spitter', 'wasp', 'elite'],
+                spawnDensity: 1.0,
+                maxActiveEnemies: 40,
+                minPlayerDistance: 420,
+                terrainRestriction: 'walkable',
+                minElevation: 0,
+                maxElevation: 680,
+                enabled: false
+              }
+            ]
+    };
   }
 }

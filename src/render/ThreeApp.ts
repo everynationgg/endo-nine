@@ -257,6 +257,7 @@ interface EnemyRenderEntry {
 }
 
 interface ObstacleRenderEntry {
+  id: string;
   mesh: THREE.Object3D;
   shadow: THREE.Mesh;
 }
@@ -520,6 +521,11 @@ export class ThreeApp {
 
   private raycaster: THREE.Raycaster = new THREE.Raycaster();
   private groundPlane: THREE.Plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+
+  // Developer Mode / Stage Editor & Perf Hooks
+  public isEditorMode: boolean = false;
+  private editorTickCallback: ((dt: number, now: number) => void) | null = null;
+  private postRenderCallback: ((dt: number, now: number, info: THREE.WebGLInfo) => void) | null = null;
 
   private lastTime: number = 0;
   private isRunning: boolean = true;
@@ -978,14 +984,16 @@ export class ThreeApp {
 
     // 2. Click or pointer down on canvas or game area to lock cursor (instant on click/down)
     const handleTryLock = (e: MouseEvent | PointerEvent) => {
+      if (this.isEditorMode) return;
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('.interactive, button, .buff-card, .screen-modal, input, select')) return;
+      if (target && target.closest('.interactive, button, .buff-card, .screen-modal, input, select, #dev-editor-root, #dev-debugger-drawer, #dev-perf-overlay')) return;
       if (this.simulation.state.isPausedForBuffChoice || this.simulation.state.isGameOver || this.simulation.state.isStageCleared) return;
 
       const heroSelectOpen = !document.getElementById('screen-hero-select')?.classList.contains('hidden');
       const mainMenuOpen = !document.getElementById('screen-main-menu')?.classList.contains('hidden');
       const settingsOpen = !document.getElementById('screen-settings')?.classList.contains('hidden');
-      if (heroSelectOpen || mainMenuOpen || settingsOpen || !this.simulation.state.isGameStarted) return;
+      const devDashOpen = !document.getElementById('screen-dev-dashboard')?.classList.contains('hidden');
+      if (heroSelectOpen || mainMenuOpen || settingsOpen || devDashOpen || !this.simulation.state.isGameStarted) return;
 
       this.requestPointerLock();
     };
@@ -996,12 +1004,14 @@ export class ThreeApp {
 
     // 3. Direct Mouse Movement Camera Steering (No click-and-drag required!)
     window.addEventListener('mousemove', (e) => {
+      if (this.isEditorMode) return;
       // Don't steer camera when navigating menus or paused for tactical rank up
       if (this.simulation.state.isPausedForBuffChoice) return;
       const heroSelectOpen = !document.getElementById('screen-hero-select')?.classList.contains('hidden');
       const mainMenuOpen = !document.getElementById('screen-main-menu')?.classList.contains('hidden');
       const settingsOpen = !document.getElementById('screen-settings')?.classList.contains('hidden');
-      if (heroSelectOpen || mainMenuOpen || settingsOpen) return;
+      const devDashOpen = !document.getElementById('screen-dev-dashboard')?.classList.contains('hidden');
+      if (heroSelectOpen || mainMenuOpen || settingsOpen || devDashOpen) return;
 
       let dx = 0;
       let dy = 0;
@@ -1045,6 +1055,7 @@ export class ThreeApp {
 
     // 4. Mouse Wheel Zoom Distance
     window.addEventListener('wheel', (e) => {
+      if (this.isEditorMode) return;
       this.targetDistance = Math.max(220, Math.min(680, this.targetDistance + Math.sign(e.deltaY) * 36));
     }, { passive: true });
   }
@@ -1271,7 +1282,9 @@ export class ThreeApp {
     const art = this.simulation.state.artifact;
     const elev = this.simulation.state.terrain.getElevation(art.pos.x, art.pos.y).height;
     const grp = new THREE.Group();
-    grp.position.set(art.pos.x, elev, art.pos.y);
+    grp.position.set(art.pos.x, elev + (art.zOffset ?? 0), art.pos.y);
+    grp.rotation.y = art.rotationY ?? 0;
+    grp.scale.setScalar(art.scale ?? 1);
 
     // Stage 1 Overseer Monolith Obelisk Sprite
     const artMat = new THREE.SpriteMaterial({
@@ -1362,7 +1375,24 @@ export class ThreeApp {
     this.artifactBeacon.position.set(0, 1200, 0);
     grp.add(this.artifactBeacon);
 
+    this.tagEditorRef(grp, 'teleporter', 'overseer_teleporter');
     return grp;
+  }
+
+  private tagEditorRef(root: THREE.Object3D, category: string, id: string): void {
+    root.userData.editorRef = { category, id };
+    root.traverse((child) => {
+      child.userData.editorRef = { category, id };
+    });
+  }
+
+  private syncArtifactTransform(): void {
+    if (!this.artifactGroup) return;
+    const art = this.simulation.state.artifact;
+    const elev = this.simulation.state.terrain.getElevation(art.pos.x, art.pos.y).height;
+    this.artifactGroup.position.set(art.pos.x, elev + (art.zOffset ?? 0), art.pos.y);
+    this.artifactGroup.rotation.y = art.rotationY ?? 0;
+    this.artifactGroup.scale.setScalar(art.scale ?? 1);
   }
 
   private createPods(): void {
@@ -1429,7 +1459,9 @@ export class ThreeApp {
       const elevation = this.simulation.state.terrain.getElevation(pod.pos.x, pod.pos.y).height;
 
       const podGroup = new THREE.Group();
-      podGroup.position.set(pod.pos.x, elevation, pod.pos.y);
+      podGroup.position.set(pod.pos.x, elevation + (pod.zOffset ?? 0), pod.pos.y);
+      podGroup.rotation.y = pod.rotationY ?? 0;
+      podGroup.scale.setScalar(pod.scale ?? 1);
 
       // 1. Closed State Sub-Group (uses shared pre-compiled standard material)
       const closedGroup = new THREE.Group();
@@ -1477,6 +1509,7 @@ export class ThreeApp {
       ring.visible = !pod.isOpened;
       podGroup.add(ring);
 
+      this.tagEditorRef(podGroup, 'pod', pod.id);
       this.scene.add(podGroup);
       this.podMap.set(pod.id, {
         group: podGroup,
@@ -1601,7 +1634,9 @@ export class ThreeApp {
     for (const ev of events) {
       const elevation = this.simulation.state.terrain.getElevation(ev.pos.x, ev.pos.y).height;
       const grp = new THREE.Group();
-      grp.position.set(ev.pos.x, elevation, ev.pos.y);
+      grp.position.set(ev.pos.x, elevation + (ev.zOffset ?? 0), ev.pos.y);
+      grp.rotation.y = ev.rotationY ?? 0;
+      grp.scale.setScalar(ev.scale ?? 1);
 
       let entry: WorldEventRenderEntry;
 
@@ -1968,6 +2003,7 @@ export class ThreeApp {
         };
       }
 
+      this.tagEditorRef(grp, 'world_event', ev.id);
       this.scene.add(grp);
       this.worldEventMap.set(ev.id, entry);
     }
@@ -2040,90 +2076,63 @@ export class ThreeApp {
       const obs = obsList[i];
       // Skip spaceship collision boundaries: the crashed colony ship landmark is rendered by ThreeTerrain or the test GLB
       if (obs.id.startsWith('ship_') || obs.id.startsWith('test_ship_')) continue;
-      const elevation = this.simulation.state.terrain.getElevation(obs.pos.x, obs.pos.y).height;
+      const elevation = this.simulation.state.terrain.getElevation(obs.pos.x, obs.pos.y).height + (obs.zOffset ?? 0);
+
+      let tex: THREE.Texture | undefined;
+      let wMult = 3.0;
+      let hMult = 3.0;
+      let yAnchor = 0.5;
+      let shadowDiv = 14;
 
       if (obs.type === 'tree') {
-        // Distinctive Alien Trees (Crimson Canopy, Crimson Veins, Bioluminescent Coral)
-        const treeTex = (obs.variant === 1)
+        tex = (obs.variant === 1)
           ? this.textures['tree_crimson_veins']
           : (obs.variant === 2)
             ? this.textures['tree_coral']
             : this.textures['tree_crimson_canopy'];
-        const sprMat = new THREE.SpriteMaterial({ map: treeTex, toneMapped: false, alphaTest: 0.05 });
-        const spr = new THREE.Sprite(sprMat);
-        const w = obs.radius * 3.4 * (obs.scaleVar || 1.0);
-        const h = obs.radius * 4.4 * (obs.scaleVar || 1.0);
-        spr.scale.set(w, h, 1);
-        spr.position.set(obs.pos.x, elevation + h * 0.46, obs.pos.y);
-        this.scene.add(spr);
-
-        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
-        shadow.rotation.x = -Math.PI / 2;
-        shadow.position.set(obs.pos.x, elevation + 0.2, obs.pos.y);
-        shadow.scale.set(obs.radius / 12, obs.radius / 12, 1);
-        this.scene.add(shadow);
-
-        this.obstacleEntries.push({ mesh: spr, shadow });
+        wMult = 3.4;
+        hMult = 4.4;
+        yAnchor = 0.46;
+        shadowDiv = 12;
       } else if (obs.type === 'crystal') {
-        // Rare, Distinct Crystal Formations (Violet, Cyan, Amber, Crimson)
         const v = (obs.variant ?? 0) % 4;
-        const cTex = v === 1 ? this.textures['crystal_cyan']
+        tex = v === 1 ? this.textures['crystal_cyan']
           : v === 2 ? this.textures['crystal_amber']
             : v === 3 ? this.textures['crystal_crimson']
               : this.textures['crystal_violet'];
-        const sprMat = new THREE.SpriteMaterial({ map: cTex, toneMapped: false, alphaTest: 0.05 });
-        const spr = new THREE.Sprite(sprMat);
-        const w = obs.radius * 3.0 * (obs.scaleVar || 1.0);
-        const h = obs.radius * 3.0 * (obs.scaleVar || 1.0);
-        spr.scale.set(w, h, 1);
-        spr.position.set(obs.pos.x, elevation + h / 2, obs.pos.y);
-        this.scene.add(spr);
-
-        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
-        shadow.rotation.x = -Math.PI / 2;
-        shadow.position.set(obs.pos.x, elevation + 0.2, obs.pos.y);
-        shadow.scale.set(obs.radius / 14, obs.radius / 14, 1);
-        this.scene.add(shadow);
-
-        this.obstacleEntries.push({ mesh: spr, shadow });
       } else if (obs.type === 'rock') {
-        // Varied Alien Geology (Using High-Res Sliced Reference Assets)
         const rIdx = ((obs.variant ?? i) % 8) + 1;
-        const rTex = this.textures[`rock_var_${rIdx}`] || this.textures['alien_rock'];
-        const sprMat = new THREE.SpriteMaterial({ map: rTex, toneMapped: false, alphaTest: 0.05 });
-        const spr = new THREE.Sprite(sprMat);
-        const w = obs.radius * 3.0 * (obs.scaleVar || 1.0);
-        const h = obs.radius * 2.8 * (obs.scaleVar || 1.0);
-        spr.scale.set(w, h, 1);
-        spr.position.set(obs.pos.x, elevation + h * 0.44, obs.pos.y);
-        this.scene.add(spr);
-
-        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
-        shadow.rotation.x = -Math.PI / 2;
-        shadow.position.set(obs.pos.x, elevation + 0.2, obs.pos.y);
-        shadow.scale.set(obs.radius / 14, obs.radius / 14, 1);
-        this.scene.add(shadow);
-
-        this.obstacleEntries.push({ mesh: spr, shadow });
+        tex = this.textures[`rock_var_${rIdx}`] || this.textures['alien_rock'];
+        hMult = 2.8;
+        yAnchor = 0.44;
       } else {
-        // Moist Alien Mushrooms & Shoreline Flora
-        const fTex = this.textures['alien_mushrooms'] || this.textures['alien_mushroom'];
-        const sprMat = new THREE.SpriteMaterial({ map: fTex, toneMapped: false, alphaTest: 0.05 });
-        const spr = new THREE.Sprite(sprMat);
-        const w = obs.radius * 2.8 * (obs.scaleVar || 1.0);
-        const h = obs.radius * 2.8 * (obs.scaleVar || 1.0);
-        spr.scale.set(w, h, 1);
-        spr.position.set(obs.pos.x, elevation + h / 2, obs.pos.y);
-        this.scene.add(spr);
-
-        const shadow = new THREE.Mesh(shadowGeo, shadowMat);
-        shadow.rotation.x = -Math.PI / 2;
-        shadow.position.set(obs.pos.x, elevation + 0.2, obs.pos.y);
-        shadow.scale.set(obs.radius / 14, obs.radius / 14, 1);
-        this.scene.add(shadow);
-
-        this.obstacleEntries.push({ mesh: spr, shadow });
+        tex = this.textures['alien_mushrooms'] || this.textures['alien_mushroom'];
+        wMult = 2.8;
+        hMult = 2.8;
       }
+
+      const sprMat = new THREE.SpriteMaterial({
+        map: tex,
+        toneMapped: false,
+        alphaTest: 0.05,
+        rotation: obs.rotationY ?? 0
+      });
+      const spr = new THREE.Sprite(sprMat);
+      const w = obs.radius * wMult * (obs.scaleVar || 1.0);
+      const h = obs.radius * hMult * (obs.scaleVar || 1.0);
+      spr.scale.set(w, h, 1);
+      spr.position.set(obs.pos.x, elevation + h * yAnchor, obs.pos.y);
+      this.tagEditorRef(spr, 'obstacle', obs.id);
+      this.scene.add(spr);
+
+      const shadow = new THREE.Mesh(shadowGeo, shadowMat);
+      shadow.rotation.x = -Math.PI / 2;
+      shadow.position.set(obs.pos.x, elevation + 0.2, obs.pos.y);
+      shadow.scale.set((obs.radius * (obs.scaleVar || 1.0)) / shadowDiv, (obs.radius * (obs.scaleVar || 1.0)) / shadowDiv, 1);
+      this.tagEditorRef(shadow, 'obstacle', obs.id);
+      this.scene.add(shadow);
+
+      this.obstacleEntries.push({ id: obs.id, mesh: spr, shadow });
     }
   }
 
@@ -2146,6 +2155,23 @@ export class ThreeApp {
 
     const dt = Math.min((now - this.lastTime) / 1000, 0.1);
     this.lastTime = now;
+
+    if (this.isEditorMode) {
+      if (this.isPointerLocked) {
+        this.exitPointerLock();
+      }
+      if (this.artifactRing1 && this.artifactRing2) {
+        this.artifactRing1.rotation.y += 0.025;
+        this.artifactRing1.rotation.z += 0.012;
+        this.artifactRing2.rotation.x += 0.018;
+        this.artifactRing2.rotation.y -= 0.022;
+      }
+      this.editorTickCallback?.(dt, now);
+      this.terrain.update(dt, now, this.camera);
+      this.renderer.render(this.scene, this.camera);
+      this.postRenderCallback?.(dt, now, this.renderer.info);
+      return;
+    }
 
     // 1. Keyboard Camera Orbit Shortcuts (Q / E or Left/Right Arrow to spin, C to reset)
     if (this.inputManager.keys['q'] || this.inputManager.keys['arrowleft']) {
@@ -2296,6 +2322,7 @@ export class ThreeApp {
 
     // 8. Render Scene
     this.renderer.render(this.scene, this.camera);
+    this.postRenderCallback?.(dt, now, this.renderer.info);
   }
 
   public addCameraTrauma(amount: number): void {
@@ -6432,9 +6459,7 @@ export class ThreeApp {
     this.createPods();
     this.createWorldEvents();
     this.createObstacles();
-    const art = this.simulation.state.artifact;
-    const elev = this.simulation.state.terrain.getElevation(art.pos.x, art.pos.y).height;
-    this.artifactGroup.position.set(art.pos.x, elev, art.pos.y);
+    this.syncArtifactTransform();
     this.spriteAnimator.reset();
     this.commander3D.resetDeath();
     if (this.orbitingBladeGroup) this.orbitingBladeGroup.visible = false;
@@ -6458,9 +6483,7 @@ export class ThreeApp {
     this.createPods();
     this.createWorldEvents();
     this.createObstacles();
-    const art = this.simulation.state.artifact;
-    const elev = this.simulation.state.terrain.getElevation(art.pos.x, art.pos.y).height;
-    this.artifactGroup.position.set(art.pos.x, elev, art.pos.y);
+    this.syncArtifactTransform();
     this.spriteAnimator.reset();
     this.commander3D.resetDeath();
     if (this.orbitingBladeGroup) this.orbitingBladeGroup.visible = false;
@@ -6653,12 +6676,22 @@ export class ThreeApp {
 
     // Position Player at green PLAYER SPAWN outside the ship
     const p = this.simulation.state.player;
-    const spawnElev = this.simulation.state.terrain.getElevation(loaded.spawnPos.x, loaded.spawnPos.y).height;
-    p.pos.x = loaded.spawnPos.x;
-    p.pos.y = loaded.spawnPos.y;
+    this.simulation.state.playerSpawnPos = { ...loaded.spawnPos };
+    this.simulation.state.bossSpawnPos = { ...loaded.bossSpawnPos };
+
+    // Apply saved untitled_crater profile overrides if present in active stage config
+    if (loaded.isUntitledCraterMap && this.simulation.state.activeStageConfig?.profiles?.untitled_crater) {
+      this.simulation.state.applyStageConfig(this.simulation.state.activeStageConfig, 'untitled_crater');
+      this.syncArtifactTransform();
+    }
+
+    const spawnPos = this.simulation.state.playerSpawnPos;
+    const spawnElev = this.simulation.state.terrain.getElevation(spawnPos.x, spawnPos.y).height;
+    p.pos.x = spawnPos.x;
+    p.pos.y = spawnPos.y;
     p.z = spawnElev;
     p.groundZ = spawnElev;
-    this.cameraFocus.set(loaded.spawnPos.x, spawnElev, loaded.spawnPos.y);
+    this.cameraFocus.set(spawnPos.x, spawnElev, spawnPos.y);
 
     this.createPods();
     this.createWorldEvents();
@@ -6858,20 +6891,100 @@ export class ThreeApp {
     this.simulation.state.terrain.setCustomHeightGrid(null);
     this.terrain.setTestMapGroup(null);
 
-    const art = this.simulation.state.artifact;
-    const artElev = this.simulation.state.terrain.getElevation(art.pos.x, art.pos.y).height;
-    this.artifactGroup.position.set(art.pos.x, artElev, art.pos.y);
+    if (this.simulation.state.activeStageConfig?.profiles?.procedural) {
+      this.simulation.state.applyStageConfig(this.simulation.state.activeStageConfig, 'procedural');
+    } else {
+      this.simulation.state.playerSpawnPos = { x: 1800, y: 2480 };
+      this.simulation.state.bossSpawnPos = { x: 1800, y: 2600 };
+    }
+
+    this.syncArtifactTransform();
 
     const p = this.simulation.state.player;
-    const spawnElev = this.simulation.state.terrain.getElevation(1800, 2480).height;
-    p.pos.x = 1800;
-    p.pos.y = 2480;
+    const sp = this.simulation.state.playerSpawnPos;
+    const spawnElev = this.simulation.state.terrain.getElevation(sp.x, sp.y).height;
+    p.pos.x = sp.x;
+    p.pos.y = sp.y;
     p.z = spawnElev;
     p.groundZ = spawnElev;
-    this.cameraFocus.set(1800, spawnElev, 2480);
+    this.cameraFocus.set(sp.x, spawnElev, sp.y);
 
     this.createPods();
     this.createWorldEvents();
     this.createObstacles();
+  }
+
+  // --- Developer Mode / Visual Stage Editor & Performance Hooks ---
+
+  public setEditorMode(enabled: boolean, tickCallback?: ((dt: number, now: number) => void) | null): void {
+    this.isEditorMode = enabled;
+    this.editorTickCallback = enabled ? (tickCallback ?? null) : null;
+    if (enabled) {
+      this.exitPointerLock();
+    } else {
+      const p = this.simulation.state.player;
+      this.cameraFocus.set(p.pos.x, p.z, p.pos.y);
+    }
+  }
+
+  public setPostRenderCallback(cb: ((dt: number, now: number, info: THREE.WebGLInfo) => void) | null): void {
+    this.postRenderCallback = cb;
+  }
+
+  public rebuildStageVisualsFromState(): void {
+    this.syncArtifactTransform();
+    this.createPods();
+    this.createWorldEvents();
+    this.createObstacles();
+
+    // Keep player preview aligned with playerSpawnPos while in editor
+    if (this.isEditorMode) {
+      const sp = this.simulation.state.playerSpawnPos;
+      const elev = this.simulation.state.terrain.getElevation(sp.x, sp.y).height;
+      this.playerGroup.position.set(sp.x, elev, sp.y);
+      this.playerShadow.position.set(sp.x, elev + 0.15, sp.y);
+    }
+  }
+
+  public getEditorObjectMesh(category: string, id: string): THREE.Object3D | null {
+    if (category === 'teleporter') return this.artifactGroup;
+    if (category === 'pod') return this.podMap.get(id)?.group || null;
+    if (category === 'world_event') return this.worldEventMap.get(id)?.group || null;
+    if (category === 'obstacle') {
+      return this.obstacleEntries.find((e) => e.id === id)?.mesh || null;
+    }
+    return null;
+  }
+
+  public getScene(): THREE.Scene {
+    return this.scene;
+  }
+
+  public getCamera(): THREE.PerspectiveCamera {
+    return this.camera;
+  }
+
+  public getRenderer(): THREE.WebGLRenderer {
+    return this.renderer;
+  }
+
+  public getThreeTerrain(): ThreeTerrain {
+    return this.terrain;
+  }
+
+  public getSimulation(): Simulation {
+    return this.simulation;
+  }
+
+  public getInputManager(): InputManager {
+    return this.inputManager;
+  }
+
+  public getVFXCounts(): { projectiles: number; particles: number; envObjects: number } {
+    return {
+      projectiles: this.simulation.state.projectiles.length,
+      particles: (this.vfx as any)?.particles?.length ?? 0,
+      envObjects: this.podMap.size + this.worldEventMap.size + this.obstacleEntries.length + (this.artifactGroup ? 1 : 0)
+    };
   }
 }

@@ -602,7 +602,11 @@ export interface FallingCrossState {
 
 export interface OrganicPodState {
   id: string;
+  name?: string;
   pos: Vector2;
+  zOffset?: number;
+  rotationY?: number;
+  scale?: number;
   cost: number;
   isOpened: boolean;
   dissolveTimer?: number;
@@ -615,6 +619,9 @@ export interface OrganicPodState {
 
 export interface OverseerArtifactState {
   pos: Vector2;
+  zOffset?: number;
+  rotationY?: number;
+  scale?: number;
   chargeProgress: number; // 0 to 100
   chargePerKill: number;
   isCharged: boolean;
@@ -652,12 +659,16 @@ export interface ItemDropState {
 
 export interface MapObstacle {
   id: string;
+  name?: string;
   type: 'rock' | 'crystal' | 'flora' | 'mushroom' | 'tree';
   subtype?: string;
   variant?: number;
   pos: Vector2;
+  zOffset?: number;
+  rotationY?: number;
   radius: number;
   scaleVar: number;
+  placementRule?: 'terrain' | 'water' | 'free';
 }
 
 export type WorldEventType =
@@ -673,6 +684,9 @@ export interface WorldEventState {
   name: string;
   description: string;
   pos: Vector2;
+  zOffset?: number;
+  rotationY?: number;
+  scale?: number;
   radius: number;
   chargeProgress: number; // 0 to 100
   isActive: boolean;
