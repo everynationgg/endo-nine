@@ -6305,12 +6305,63 @@ export class Simulation {
       // Enemy batch count increases with difficulty
       const count = Math.min(5, Math.floor(1 + this.state.gameTime / 45) + tierDef.batchBonus);
       const restrictedCells = this.state.terrain.testEnemySpawnCells;
+      const enabledRegions = (this.state.enemySpawnRegions || []).filter((r) => r.enabled && r.allowedTypes.length > 0);
       for (let k = 0; k < count; k++) {
         let sx = 0;
         let sy = 0;
         let angle = this.state.rng.range(0, Math.PI * 2);
+        let regionForcedType: EnemyType | null = null;
+        let usedCustomRegion = false;
 
-        if (restrictedCells.length > 0) {
+        if (enabledRegions.length > 0) {
+          // Pick weighted region respecting maxActiveEnemies
+          const eligible = enabledRegions.filter((reg) => {
+            const activeInReg = this.state.enemies.filter(
+              (en) => Math.abs(en.pos.x - reg.x) <= reg.width * 0.5 && Math.abs(en.pos.y - reg.y) <= reg.height * 0.5
+            ).length;
+            return activeInReg < reg.maxActiveEnemies;
+          });
+          if (eligible.length > 0) {
+            const totalWeight = eligible.reduce((sum, r) => sum + Math.max(0.05, r.spawnDensity), 0);
+            let pick = this.state.rng.next() * totalWeight;
+            let chosen = eligible[0];
+            for (const reg of eligible) {
+              pick -= Math.max(0.05, reg.spawnDensity);
+              if (pick <= 0) {
+                chosen = reg;
+                break;
+              }
+            }
+            for (let attempt = 0; attempt < 16; attempt++) {
+              const cx = Math.max(40, Math.min(this.state.worldWidth - 40, chosen.x + this.state.rng.range(-chosen.width * 0.5, chosen.width * 0.5)));
+              const cy = Math.max(40, Math.min(this.state.worldHeight - 40, chosen.y + this.state.rng.range(-chosen.height * 0.5, chosen.height * 0.5)));
+              if (Math.hypot(cx - p.pos.x, cy - p.pos.y) < chosen.minPlayerDistance) continue;
+              const elev = this.state.terrain.getElevation(cx, cy);
+              if (chosen.terrainRestriction === 'walkable' && (!elev.isWalkable || elev.surfaceType === 'chasm')) continue;
+              if (chosen.terrainRestriction === 'near_water' && !this.state.terrain.isPointNearWater(cx, cy)) continue;
+              if (chosen.minElevation !== undefined && elev.height < chosen.minElevation) continue;
+              if (chosen.maxElevation !== undefined && elev.height > chosen.maxElevation) continue;
+              if (restrictedCells.length > 0 && !this.state.terrain.isPointValidEnemySpawn(cx, cy)) continue;
+              let blocked = false;
+              for (let oi = 0; oi < this.state.obstacles.length; oi++) {
+                const obs = this.state.obstacles[oi];
+                if (Math.hypot(cx - obs.pos.x, cy - obs.pos.y) < obs.radius + 26) {
+                  blocked = true;
+                  break;
+                }
+              }
+              if (blocked) continue;
+              sx = cx;
+              sy = cy;
+              angle = Math.atan2(p.pos.y - sy, p.pos.x - sx);
+              regionForcedType = chosen.allowedTypes[Math.floor(this.state.rng.next() * chosen.allowedTypes.length)] as EnemyType;
+              usedCustomRegion = true;
+              break;
+            }
+          }
+        }
+
+        if (!usedCustomRegion && restrictedCells.length > 0) {
           // Stage 1 custom map constraint: spawn normal enemies strictly on valid walkable LIGHT-BROWN terrain
           // (excluding dark-brown southern terrain, water, tower cliffs, and obstacles). Prefer points reasonably near player when possible.
           let foundCell = false;
@@ -6352,7 +6403,7 @@ export class Simulation {
           }
           if (blockedByObs) continue;
           angle = Math.atan2(p.pos.y - sy, p.pos.x - sx);
-        } else {
+        } else if (!usedCustomRegion) {
           const forwardBias = this.state.rng.next() < 0.68;
           angle = forwardBias
             ? this.state.rng.range(-Math.PI * 0.88, -Math.PI * 0.12)
@@ -6366,14 +6417,18 @@ export class Simulation {
         const spawnElevation = this.state.terrain.getElevation(sx, sy);
         if (!spawnElevation.isWalkable) continue; // Don't spawn inside chasms
 
-        const roll = this.state.rng.next();
         let type: EnemyType = 'crawler';
-        if (roll < tierDef.eliteChance) {
-          type = 'elite'; // Void Goliath
-        } else if (roll < tierDef.eliteChance + 0.32) {
-          type = 'spitter'; // Toxic Spitter
-        } else if (roll < tierDef.eliteChance + 0.58) {
-          type = 'wasp'; // Void Wasp
+        if (regionForcedType) {
+          type = regionForcedType;
+        } else {
+          const roll = this.state.rng.next();
+          if (roll < tierDef.eliteChance) {
+            type = 'elite'; // Void Goliath
+          } else if (roll < tierDef.eliteChance + 0.32) {
+            type = 'spitter'; // Toxic Spitter
+          } else if (roll < tierDef.eliteChance + 0.58) {
+            type = 'wasp'; // Void Wasp
+          }
         }
 
         const cfg = ENEMY_CONFIGS[type];

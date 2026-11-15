@@ -12,6 +12,7 @@ export class InputManager {
     middle: false
   };
   public zoomDelta: number = 0;
+  public inputSuppressed: boolean = false;
 
   // Single-frame triggers
   private shiftPressed: boolean = false;
@@ -21,8 +22,16 @@ export class InputManager {
   private lmbPressed: boolean = false;
   private rmbPressed: boolean = false;
 
+  private isFormElement(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    const tag = el.tagName;
+    return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+  }
+
   constructor() {
     window.addEventListener('keydown', (e) => {
+      if (this.inputSuppressed || this.isFormElement(e.target)) return;
       const k = e.key.toLowerCase();
       this.keys[k] = true;
       if (e.key === 'Shift') this.shiftPressed = true;
@@ -43,6 +52,7 @@ export class InputManager {
     });
 
     window.addEventListener('mousedown', (e) => {
+      if (this.inputSuppressed) return;
       const target = e.target as HTMLElement | null;
       if (target && target.closest('.interactive, button, .buff-card, .screen-modal')) {
         return;
@@ -80,6 +90,9 @@ export class InputManager {
     });
 
     window.addEventListener('wheel', (e) => {
+      if (this.inputSuppressed) return;
+      const target = e.target as HTMLElement | null;
+      if (target && target.closest('.interactive, .screen-modal')) return;
       this.zoomDelta += Math.sign(e.deltaY) * -0.04;
     }, { passive: true });
   }

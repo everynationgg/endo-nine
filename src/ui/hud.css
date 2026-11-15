@@ -3206,6 +3206,144 @@ body.pointer-locked .hud-click-to-lock {
   line-height: 1.45;
 }
 
+.dev-ed-toolgroup {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  padding-right: 6px;
+  border-right: 1px solid rgba(56, 189, 248, 0.2);
+}
+
+.dev-ed-toolgroup:last-child {
+  border-right: none;
+  padding-right: 0;
+}
+
+.dev-ed-btn.active-tool {
+  background: rgba(56, 189, 248, 0.28) !important;
+  border-color: #38bdf8 !important;
+  color: #fff !important;
+}
+
+.dev-ed-btn.valid-ok {
+  border-color: rgba(16, 185, 129, 0.5) !important;
+  color: #6ee7b7 !important;
+}
+
+.dev-ed-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+}
+
+.dev-ed-tab {
+  background: rgba(15, 23, 42, 0.7);
+  border: 1px solid rgba(56, 189, 248, 0.24);
+  border-radius: 4px;
+  padding: 6px;
+  color: #94a3b8;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.dev-ed-tab.active {
+  background: rgba(56, 189, 248, 0.22);
+  border-color: #38bdf8;
+  color: #f8fafc;
+}
+
+.dev-ed-tab-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  flex: 1;
+  min-height: 0;
+}
+
+.dev-ed-tab-pane.hidden,
+.dev-ed-val-drawer.hidden {
+  display: none !important;
+}
+
+.dev-ed-lib-cat {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #38bdf8;
+  text-transform: uppercase;
+  margin-top: 6px;
+  margin-bottom: 2px;
+}
+
+.dev-ed-lib-item {
+  width: 100%;
+  text-align: left;
+  background: rgba(15, 28, 48, 0.72);
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 4px;
+  padding: 5px 8px;
+  color: #e2e8f0;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.dev-ed-lib-item:hover {
+  border-color: #38bdf8;
+  background: rgba(24, 46, 78, 0.9);
+}
+
+.dev-ed-lib-item.active {
+  background: rgba(16, 185, 129, 0.24);
+  border-color: #34d399;
+  color: #ecfdf5;
+}
+
+.dev-ed-chk-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: #cbd5e1;
+  cursor: pointer;
+}
+
+.dev-ed-type-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px;
+}
+
+.dev-ed-list-item.disabled-item {
+  opacity: 0.55;
+}
+
+.dev-ed-val-drawer {
+  position: absolute;
+  top: 56px;
+  left: 278px;
+  right: 308px;
+  max-height: 170px;
+  overflow-y: auto;
+  background: rgba(10, 15, 28, 0.95);
+  border: 1px solid rgba(250, 204, 21, 0.45);
+  border-radius: 6px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dev-ed-val-row {
+  text-align: left;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  cursor: pointer;
+}
+
+.dev-ed-val-row:hover {
+  filter: brightness(1.2);
+}
+
 
 
 

@@ -1,6 +1,8 @@
 import type { EnemyType, Vector2, WorldEventType } from '../sim/types';
 import type { TerrainSystem } from '../sim/TerrainSystem';
 
+export type { EnemyType, WorldEventType };
+
 export type StageProfileKey = 'procedural' | 'untitled_crater';
 
 export type StageObstacleType = 'rock' | 'crystal' | 'flora' | 'mushroom' | 'tree';
@@ -387,3 +389,55 @@ export function clampWorldPos(pos: Vector2, pad: number = 20, worldW: number = 3
     y: Math.max(pad, Math.min(worldH - pad, pos.y))
   };
 }
+
+export interface StageCatalogItem {
+  key: string;
+  label: string;
+  categoryLabel:
+    | 'Spawns & Regions'
+    | 'Events'
+    | 'Biological Chests'
+    | 'Trees & Vegetation'
+    | 'Rocks & Crystals'
+    | 'Water Objects';
+  kind: 'obstacle' | 'pod' | 'world_event' | 'enemy_region' | 'singleton';
+  obstacleType?: StageObstacleType;
+  variant?: number;
+  radius?: number;
+  scaleVar?: number;
+  placementRule?: 'terrain' | 'water' | 'free';
+  podCost?: number;
+  eventType?: WorldEventType;
+  singletonCategory?: 'player_spawn' | 'teleporter' | 'boss_spawn';
+  hint: string;
+}
+
+export const STAGE_OBJECT_CATALOG: StageCatalogItem[] = [
+  { key: 'singleton_player_spawn', label: 'Player Spawn (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'player_spawn', hint: 'Unique start spawn point for playable hero.' },
+  { key: 'singleton_teleporter', label: 'Overseer Teleporter (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'teleporter', hint: 'Primary Stage 1 objective teleporter.' },
+  { key: 'singleton_boss_spawn', label: 'Stage Boss Spawn (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'boss_spawn', hint: 'Emergence location for Stage 1 Colossus / Titan.' },
+  { key: 'region_enemy_zone', label: 'Enemy Spawn Region', categoryLabel: 'Spawns & Regions', kind: 'enemy_region', hint: 'Configurable rectangular zone constraining enemy types, density, and elevation.' },
+
+  { key: 'ev_primal', label: 'Primary Enhancement Totem', categoryLabel: 'Events', kind: 'world_event', eventType: 'primal_totem', hint: 'Primary attack (LMB) enhancement shrine event.' },
+  { key: 'ev_secondary', label: 'Secondary Enhancement Totem', categoryLabel: 'Events', kind: 'world_event', eventType: 'secondary_totem', hint: 'Secondary skill (RMB) enhancement shrine event.' },
+  { key: 'ev_dash', label: 'Mobility / Dash Totem', categoryLabel: 'Events', kind: 'world_event', eventType: 'dash_totem', hint: 'Utility / dash enhancement shrine event.' },
+  { key: 'ev_orbital', label: 'Orbital Uplink Shrine', categoryLabel: 'Events', kind: 'world_event', eventType: 'orbital_uplink', hint: 'Ultimate skill (R) enhancement uplink encounter.' },
+
+  { key: 'pod_standard', label: 'Biological Pod (25 Biomass)', categoryLabel: 'Biological Chests', kind: 'pod', podCost: 25, hint: 'Standard biological loot pod containing an item/upgrade.' },
+  { key: 'pod_free', label: 'Biological Pod (Free)', categoryLabel: 'Biological Chests', kind: 'pod', podCost: 0, hint: 'Zero-cost early-stage starter biological pod.' },
+  { key: 'pod_heavy', label: 'Biological Pod (45 Biomass)', categoryLabel: 'Biological Chests', kind: 'pod', podCost: 45, hint: 'Higher-cost risk/reward biological pod.' },
+
+  { key: 'obs_tree_0', label: 'Alien Tree (Variant A)', categoryLabel: 'Trees & Vegetation', kind: 'obstacle', obstacleType: 'tree', variant: 0, radius: 26, scaleVar: 1.05, placementRule: 'terrain', hint: 'Canonical thawing alien tree.' },
+  { key: 'obs_tree_1', label: 'Alien Tree (Variant B)', categoryLabel: 'Trees & Vegetation', kind: 'obstacle', obstacleType: 'tree', variant: 1, radius: 26, scaleVar: 1.15, placementRule: 'terrain', hint: 'Tall alien canopy variant.' },
+  { key: 'obs_tree_2', label: 'Alien Tree (Variant C)', categoryLabel: 'Trees & Vegetation', kind: 'obstacle', obstacleType: 'tree', variant: 2, radius: 24, scaleVar: 0.95, placementRule: 'terrain', hint: 'Twisted alien flora tree.' },
+  { key: 'obs_mushroom', label: 'Alien Mushroom Cluster', categoryLabel: 'Trees & Vegetation', kind: 'obstacle', obstacleType: 'mushroom', variant: 0, radius: 16, scaleVar: 1.0, placementRule: 'terrain', hint: 'Bioluminescent alien fungal cluster.' },
+  { key: 'obs_flora', label: 'Thawing Alien Flora', categoryLabel: 'Trees & Vegetation', kind: 'obstacle', obstacleType: 'flora', variant: 0, radius: 12, scaleVar: 1.0, placementRule: 'terrain', hint: 'Low-profile cultivated biological ground flora.' },
+
+  { key: 'obs_rock_0', label: 'Crater Boulder', categoryLabel: 'Rocks & Crystals', kind: 'obstacle', obstacleType: 'rock', variant: 0, radius: 28, scaleVar: 1.05, placementRule: 'terrain', hint: 'Exposed crater basalt boulder.' },
+  { key: 'obs_rock_1', label: 'Frost-Veined Rock', categoryLabel: 'Rocks & Crystals', kind: 'obstacle', obstacleType: 'rock', variant: 1, radius: 24, scaleVar: 0.95, placementRule: 'terrain', hint: 'Smaller crater stone outcrop.' },
+  { key: 'obs_crystal_0', label: 'Energy Crystal Shard', categoryLabel: 'Rocks & Crystals', kind: 'obstacle', obstacleType: 'crystal', variant: 0, radius: 22, scaleVar: 1.0, placementRule: 'terrain', hint: 'Resonant alien mineral crystal.' },
+  { key: 'obs_crystal_1', label: 'Deep Crystal Cluster', categoryLabel: 'Rocks & Crystals', kind: 'obstacle', obstacleType: 'crystal', variant: 1, radius: 25, scaleVar: 1.2, placementRule: 'terrain', hint: 'Large faceted crystal spire.' },
+
+  { key: 'water_flora', label: 'Riverbank Alien Flora (Water)', categoryLabel: 'Water Objects', kind: 'obstacle', obstacleType: 'flora', variant: 1, radius: 12, scaleVar: 1.05, placementRule: 'water', hint: 'Water-affiliated flora; validates against river/waterline placement.' },
+  { key: 'water_crystal', label: 'Submerged Crystal (Water)', categoryLabel: 'Water Objects', kind: 'obstacle', obstacleType: 'crystal', variant: 2, radius: 22, scaleVar: 0.95, placementRule: 'water', hint: 'Aquatic crystal formation; validates near water surface.' }
+];
