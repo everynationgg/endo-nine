@@ -129,6 +129,32 @@ export interface StageLayoutProfile {
   enemySpawnRegions: StageEnemySpawnRegionConfig[];
 }
 
+export interface StageDefinition {
+  id: string;
+  stageNumber: number;
+  name: string;
+  configPath: string;
+  supportedProfiles: StageProfileKey[];
+}
+
+/**
+ * Reusable stage registry. Future stages (e.g., stage2) register metadata and config paths here
+ * so Simulation, UI, and Visual Stage Editor share a single extensible loader pipeline.
+ */
+export const STAGE_REGISTRY: Record<string, StageDefinition> = {
+  stage1: {
+    id: 'stage1',
+    stageNumber: 1,
+    name: 'The Wreckage',
+    configPath: '/stages/stage1.config.json',
+    supportedProfiles: ['procedural', 'untitled_crater']
+  }
+};
+
+export function getStageDefinition(stageId: string = 'stage1'): StageDefinition {
+  return STAGE_REGISTRY[stageId] || STAGE_REGISTRY.stage1;
+}
+
 export interface StageConfig {
   schemaVersion: 1;
   stageId: string;

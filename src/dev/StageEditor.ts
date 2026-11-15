@@ -17,6 +17,7 @@ import {
   clampWorldPos,
   cloneStageConfig,
   formatObstacleDisplayName,
+  getStageDefinition,
   loadStageConfigFromServer,
   saveStageConfigToServer,
   validateStageProfile
@@ -62,6 +63,7 @@ export class StageEditor {
   private isDirty: boolean = false;
 
   private workingConfig!: StageConfig;
+  private currentStageId: string = 'stage1';
   private activeProfileKey: StageProfileKey = 'procedural';
   private selectedRefs: SelectedObjectRef[] = [];
 
@@ -275,8 +277,10 @@ export class StageEditor {
     return this.activeProfileKey;
   }
 
-  public open(existingConfig?: StageConfig | null, preserveDirtyState: boolean = false): void {
+  public open(existingConfig?: StageConfig | null, preserveDirtyState: boolean = false, stageId: string = 'stage1'): void {
     const state = this.app.getSimulation().state;
+    const def = getStageDefinition(stageId);
+    this.currentStageId = existingConfig?.stageId || def.id;
     this.activeProfileKey = state.getActiveProfileKey();
 
     if (existingConfig) {
@@ -287,9 +291,9 @@ export class StageEditor {
       const currentProfile = state.exportCurrentProfile();
       this.workingConfig = {
         schemaVersion: 1,
-        stageId: 'stage1',
-        stageNumber: 1,
-        stageName: state.stageName || 'The Wreckage',
+        stageId: def.id,
+        stageNumber: def.stageNumber,
+        stageName: state.stageName || def.name,
         profiles: {
           [this.activeProfileKey]: currentProfile
         }
@@ -1603,8 +1607,8 @@ export class StageEditor {
     }
 
     this.workingConfig.updatedAt = new Date().toISOString();
-    this.setStatus('Saving to public/stages/stage1.config.json...', false);
-    const res = await saveStageConfigToServer('stage1', this.workingConfig);
+    this.setStatus(`Saving to public/stages/${this.currentStageId}.config.json...`, false);
+    const res = await saveStageConfigToServer(this.currentStageId, this.workingConfig);
     if (!res.ok) {
       this.setStatus(`Save failed: ${res.error || 'Unknown error'}`, true);
       return;
@@ -1618,9 +1622,9 @@ export class StageEditor {
   }
 
   private async handleReload(): Promise<void> {
-    const fresh = await loadStageConfigFromServer('stage1');
+    const fresh = await loadStageConfigFromServer(this.currentStageId);
     if (!fresh) {
-      this.setStatus('Reload failed: could not read stage1.config.json from dev server.', true);
+      this.setStatus(`Reload failed: could not read ${this.currentStageId}.config.json from dev server.`, true);
       return;
     }
     this.undoStack = [];
@@ -1636,7 +1640,7 @@ export class StageEditor {
     this.refreshSelectionUI();
     this.refreshValidationUI();
     this.updateUndoRedoButtons();
-    this.setStatus('Reloaded saved stage1.config.json from disk.', false);
+    this.setStatus(`Reloaded saved ${this.currentStageId}.config.json from disk.`, false);
   }
 
   private setStatus(msg: string, isError: boolean): void {
@@ -1655,7 +1659,7 @@ export class StageEditor {
       <div class="dev-ed-topbar interactive">
         <div class="dev-ed-brand">
           <span class="dev-ed-title">STAGE EDITOR</span>
-          <span class="dev-ed-profile">Stage 1 [${this.activeProfileKey}]</span>
+          <span class="dev-ed-profile">Stage ${this.workingConfig.stageNumber}: ${this.workingConfig.stageName} [${this.activeProfileKey}]</span>
           <span id="dev-ed-dirty-badge" class="dev-ed-badge ${this.isDirty ? 'dirty' : 'clean'}">${this.isDirty ? '● Unsaved Changes' : '✓ Saved'}</span>
         </div>
         <div class="dev-ed-actions">
