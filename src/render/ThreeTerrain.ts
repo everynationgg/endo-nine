@@ -24,11 +24,12 @@ export class ThreeTerrain {
   constructor(terrain: TerrainSystem, textureLoader?: THREE.TextureLoader) {
     this.group = new THREE.Group();
     this.stage1Group = new THREE.Group();
+    this.stage1Group.visible = false;
     this.testMapGroup = new THREE.Group();
     this.testMapGroup.visible = false;
     this.group.add(this.stage1Group, this.testMapGroup);
     this.textureLoader = textureLoader || new THREE.TextureLoader();
-    this.buildTerrain(terrain);
+    void terrain;
   }
 
   public setTestMapGroup(

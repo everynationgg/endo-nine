@@ -148,37 +148,63 @@ window.addEventListener('DOMContentLoaded', async () => {
   uiManager.onToggleCameraPanCallback = () => app.toggleInvertCameraPan();
   uiManager.onLoadTestMapCallback = async (file, scaleMode) => {
     const res = await app.loadTestMap(file, scaleMode);
+    uiManager.updateActiveMapStatus(res.fileName, true);
     return `${res.fileName} (${res.triangleCount.toLocaleString()} tris)`;
   };
-  uiManager.onLoadBigMapCallback = async (scaleMode) => {
-    const res = await app.loadTestMapUrl('/assets/maps/Blenderrr.glb', 'Blenderrr.glb', scaleMode);
-    return `${res.fileName} (${res.worldWidth}x${res.worldHeight}, ${res.triangleCount.toLocaleString()} tris)`;
-  };
-  uiManager.onClearTestMapCallback = () => {
-    app.clearTestMap();
+  uiManager.onResetDefaultMapCallback = async () => {
+    const res = await app.loadDefaultStage1Map('auto');
+    uiManager.updateActiveMapStatus(res.fileName, false);
+    return `${res.fileName} (${res.triangleCount.toLocaleString()} tris)`;
   };
 
+  let defaultMapPromise: Promise<void> | null = null;
+  const ensureDefaultMapLoaded = (): Promise<void> => {
+    if (app.isTestMapActive) return Promise.resolve();
+    if (!defaultMapPromise) {
+      defaultMapPromise = app
+        .loadDefaultStage1Map('auto')
+        .then(() => {
+          uiManager.updateActiveMapStatus(app.activeMapFileName, false);
+        })
+        .catch((err) => {
+          console.error('[Main] Failed to load default Blenderrr.glb map:', err);
+          defaultMapPromise = null;
+          uiManager.showPickupNotification(err?.message || 'Failed to load Blenderrr.glb');
+          throw err;
+        });
+    }
+    return defaultMapPromise;
+  };
+  void ensureDefaultMapLoaded();
+
   uiManager.setCallbacks(
-    () => {
+    async () => {
+      await ensureDefaultMapLoaded();
       // Start run - begin simulation cleanly at 00:00 [VERY EASY]
       window.focus();
       app.startRun();
     },
-    () => {
+    async () => {
+      await ensureDefaultMapLoaded();
       // Restart run & lock mouse aim
       window.focus();
       app.restartRun();
     }
   );
 
-  if (import.meta.env.DEV) {
-    import('./dev/DevToolkit')
-      .then(({ DevToolkit }) => {
-        const devToolkit = new DevToolkit(app, uiManager);
-        (window as any).__devToolkit = devToolkit;
-      })
-      .catch((err) => {
-        console.warn('[DevToolkit] Failed to initialize developer mode:', err);
-      });
-  }
+  const devToolkitPromise = import('./dev/DevToolkit')
+    .then(({ DevToolkit }) => {
+      const devToolkit = new DevToolkit(app, uiManager, ensureDefaultMapLoaded);
+      (window as any).__devToolkit = devToolkit;
+      return devToolkit;
+    })
+    .catch((err) => {
+      console.warn('[DevToolkit] Failed to initialize developer mode:', err);
+      return null;
+    });
+
+  uiManager.onOpenDeveloperModeCallback = async () => {
+    const devToolkit = await devToolkitPromise;
+    await devToolkit?.openDashboard();
+  };
 });

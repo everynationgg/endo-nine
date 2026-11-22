@@ -65,7 +65,7 @@ export class StageEditor {
 
   private workingConfig!: StageConfig;
   private currentStageId: string = 'stage1';
-  private activeProfileKey: StageProfileKey = 'procedural';
+  private activeProfileKey: StageProfileKey = 'custom_map';
   private selectedRefs: SelectedObjectRef[] = [];
 
   // Tool & Gizmo State
@@ -1794,9 +1794,8 @@ export class StageEditor {
             <button id="dev-ed-validate-btn" class="sci-btn dev-ed-btn">Validation</button>
           </div>
           <div class="dev-ed-toolgroup">
-            <button id="dev-ed-load-big-map" class="sci-btn dev-ed-btn" title="Load Big Map Stage 1 GLB into custom_map profile">🏔 Big Map</button>
-            <button id="dev-ed-load-map" class="sci-btn dev-ed-btn" title="Load a custom 3D map (.glb/.gltf/.dae/.obj/.stl) to edit">📂 Load Map</button>
-            <button id="dev-ed-reset-map" class="sci-btn dev-ed-btn ${this.app.isTestMapActive ? '' : 'hidden'}" title="Revert to default procedural Stage 1 terrain">↩ Default Map</button>
+            <button id="dev-ed-load-map" class="sci-btn dev-ed-btn" title="Upload a custom 3D map (.glb/.gltf/.dae/.obj/.stl) to edit">📂 Upload Map</button>
+            <button id="dev-ed-reset-map" class="sci-btn dev-ed-btn ${this.app.isCustomUploadedMap ? '' : 'hidden'}" title="Revert to default Blenderrr.glb Stage 1 terrain">↩ Reset to Blenderrr.glb</button>
             <input id="dev-ed-map-file" type="file" accept=".glb,.gltf,.dae,.obj,.stl" style="display:none;" />
             <button id="dev-ed-save" class="sci-btn primary-gold dev-ed-btn">💾 Save</button>
             <button id="dev-ed-reload" class="sci-btn dev-ed-btn">↻ Reload</button>
@@ -1908,22 +1907,12 @@ export class StageEditor {
       this.updateUndoRedoButtons();
       const profEl = this.rootEl?.querySelector('.dev-ed-profile');
       if (profEl) profEl.textContent = `Stage ${this.workingConfig.stageNumber}: ${this.workingConfig.stageName} [${this.activeProfileKey}]`;
-      this.rootEl?.querySelector('#dev-ed-reset-map')?.classList.remove('hidden');
+      this.rootEl?.querySelector('#dev-ed-reset-map')?.classList.toggle('hidden', !this.app.isCustomUploadedMap);
       const sp = this.getActiveProfile().playerSpawn;
       const spElev = state.terrain.getElevation(sp.x, sp.y).height;
       this.camFocus.set(sp.x, spElev, sp.y - 160);
       this.setStatus(`Loaded "${fileName}" (${triangleCount.toLocaleString()} tris) into [${this.activeProfileKey}].`, false);
     };
-
-    root.querySelector('#dev-ed-load-big-map')?.addEventListener('click', async () => {
-      this.setStatus('Loading Blenderrr.glb Stage 1...', false);
-      try {
-        const loaded = await this.app.loadTestMapUrl('/assets/maps/Blenderrr.glb', 'Blenderrr.glb', 'auto');
-        syncAfterMapLoad(loaded.fileName, loaded.triangleCount);
-      } catch (err: any) {
-        this.setStatus(err?.message || 'Failed to load Blenderrr.glb.', true);
-      }
-    });
 
     const mapFileInput = root.querySelector('#dev-ed-map-file') as HTMLInputElement | null;
     root.querySelector('#dev-ed-load-map')?.addEventListener('click', () => mapFileInput?.click());
@@ -1940,29 +1929,15 @@ export class StageEditor {
         mapFileInput.value = '';
       }
     });
-    root.querySelector('#dev-ed-reset-map')?.addEventListener('click', () => {
-      this.app.clearTestMap();
-      const state = this.app.getSimulation().state;
-      this.activeProfileKey = state.getActiveProfileKey();
-      this.workingConfig.stageName = state.stageName;
-      if (!this.workingConfig.profiles[this.activeProfileKey]) {
-        this.workingConfig.profiles[this.activeProfileKey] = state.exportCurrentProfile();
-      } else {
-        state.applyStageConfig(this.workingConfig, this.activeProfileKey);
+    root.querySelector('#dev-ed-reset-map')?.addEventListener('click', async () => {
+      this.setStatus('Restoring default Blenderrr.glb Stage 1 map...', false);
+      try {
+        const loaded = await this.app.loadDefaultStage1Map('auto');
+        syncAfterMapLoad(loaded.fileName, loaded.triangleCount);
+        this.setStatus('Restored default Blenderrr.glb Stage 1 map.', false);
+      } catch (err: any) {
+        this.setStatus(err?.message || 'Failed to restore Blenderrr.glb.', true);
       }
-      this.selectedRefs = [{ category: 'player_spawn', id: 'player_spawn' }];
-      this.app.rebuildStageVisualsFromState();
-      this.rebuildSpawnRegionHelpers();
-      this.rebuildCollisionOverlay();
-      this.syncMarkers();
-      this.syncGizmoAttachment();
-      this.refreshHierarchyUI();
-      this.refreshSelectionUI();
-      this.refreshValidationUI();
-      const profEl = this.rootEl?.querySelector('.dev-ed-profile');
-      if (profEl) profEl.textContent = `Stage ${this.workingConfig.stageNumber}: ${this.workingConfig.stageName} [${this.activeProfileKey}]`;
-      this.rootEl?.querySelector('#dev-ed-reset-map')?.classList.add('hidden');
-      this.setStatus('Restored default procedural Stage 1 map.', false);
     });
 
     root.querySelector('#dev-ed-save')?.addEventListener('click', () => void this.handleSave());

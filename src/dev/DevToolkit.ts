@@ -20,7 +20,8 @@ export class DevToolkit {
   private isInPlaytest: boolean = false;
   private playtestSnapshot: StageConfig | null = null;
   private playtestWasDirty: boolean = false;
-  private playtestProfileKey: StageProfileKey = 'procedural';
+  private playtestProfileKey: StageProfileKey = 'custom_map';
+  private ensureDefaultMapLoaded?: () => Promise<void>;
 
   private readonly boundGlobalKey = (e: KeyboardEvent) => {
     if (e.shiftKey && e.key === 'F8' && this.isInPlaytest) {
@@ -46,15 +47,16 @@ export class DevToolkit {
     }
   };
 
-  constructor(app: ThreeApp, uiManager: UIManager) {
+  constructor(app: ThreeApp, uiManager: UIManager, ensureDefaultMapLoaded?: () => Promise<void>) {
     this.app = app;
     this.uiManager = uiManager;
+    this.ensureDefaultMapLoaded = ensureDefaultMapLoaded;
     this.stageEditor = new StageEditor(app);
     this.gameplayDebugger = new GameplayDebugger(app);
     this.perfMonitor = new PerfMonitor(app);
 
     this.stageEditor.onReturnToDashboard = () => {
-      this.openDashboard();
+      void this.openDashboard();
     };
 
     this.stageEditor.onPlaytestRequested = (snapshot) => {
@@ -75,7 +77,7 @@ export class DevToolkit {
     window.addEventListener('keydown', this.boundGlobalKey);
 
     this.uiManager.onOpenDeveloperModeCallback = () => {
-      this.openDashboard();
+      void this.openDashboard();
     };
   }
 
@@ -89,16 +91,16 @@ export class DevToolkit {
         <div class="dev-dash-header">
           <div>
             <h2>DEVELOPER MODE</h2>
-            <div class="dev-dash-sub">Local Development Toolkit — Stage 1 &amp; Engine Utilities</div>
+            <div class="dev-dash-sub">Developer Toolkit — Stage 1 (Blenderrr.glb) &amp; Engine Utilities</div>
           </div>
-          <span class="dev-dash-env-badge">LOCAL DEV ONLY</span>
+          <span class="dev-dash-env-badge">${import.meta.env.DEV ? 'LOCAL DEV' : 'DEV TOOLKIT'}</span>
         </div>
 
         <div class="dev-dash-grid">
           <button id="dev-card-stage-editor" class="dev-dash-tile">
             <div class="dev-dash-tile-title">🗺 Visual Stage Editor</div>
-            <div class="dev-dash-tile-desc">Visually inspect and reposition Stage 1 objects, spawns, events, and chests on the live 3D terrain and save directly to local config.</div>
-            <div class="dev-dash-tile-meta" id="dev-dash-stage-meta">Stage 1: The Wreckage</div>
+            <div class="dev-dash-tile-desc">Visually inspect and reposition Stage 1 objects, spawns, events, and chests on the live 3D terrain.</div>
+            <div class="dev-dash-tile-meta" id="dev-dash-stage-meta">Stage 1: Blenderrr.glb</div>
           </button>
 
           <button id="dev-card-debugger" class="dev-dash-tile">
@@ -120,9 +122,28 @@ export class DevToolkit {
           </button>
         </div>
 
+        <div class="dev-dash-map-panel">
+          <div class="dev-dash-map-header">
+            <span>CUSTOM 3D MAP UPLOAD</span>
+            <span id="dev-dash-map-badge" class="dev-dash-map-badge">Default: Blenderrr.glb</span>
+          </div>
+          <div class="dev-dash-map-controls">
+            <select id="dev-dash-map-scale" class="sci-btn dev-ed-btn" style="text-align: left;">
+              <option value="auto">Scale: Full Native (×25)</option>
+              <option value="x25">Scale: ×25 (1m = 25u)</option>
+              <option value="x100">Scale: ×100</option>
+              <option value="x1">Scale: 1:1 (×1)</option>
+            </select>
+            <button id="dev-dash-upload-map" class="sci-btn dev-ed-btn" style="border-color: rgba(56, 189, 248, 0.55);">📂 Upload Custom Map</button>
+            <button id="dev-dash-reset-map" class="sci-btn dev-ed-btn hidden" style="border-color: rgba(248, 113, 113, 0.5); color: #fca5a5;">↩ Reset to Blenderrr.glb</button>
+            <input id="dev-dash-map-file" type="file" accept=".glb,.gltf,.dae,.obj,.stl" style="display: none;" />
+          </div>
+        </div>
+
         <div id="dev-dash-validation-box" class="dev-dash-val-box hidden"></div>
 
         <div class="dev-dash-footer">
+          <button id="btn-dev-dash-dialogue" class="sci-btn" style="border-color: rgba(167, 139, 250, 0.45); color: #ddd6fe;">🎙 Dialogue Tester [F9]</button>
           <button id="btn-dev-dash-back" class="sci-btn">← Return to Main Menu</button>
         </div>
       </div>
@@ -131,13 +152,64 @@ export class DevToolkit {
     this.dashboardEl = el;
     this.validationEl = el.querySelector('#dev-dash-validation-box');
 
-    el.querySelector('#dev-card-stage-editor')?.addEventListener('click', () => {
+    const mapBadge = el.querySelector('#dev-dash-map-badge') as HTMLElement | null;
+    const mapScaleSelect = el.querySelector('#dev-dash-map-scale') as HTMLSelectElement | null;
+    const mapFileInput = el.querySelector('#dev-dash-map-file') as HTMLInputElement | null;
+    const btnResetMap = el.querySelector('#dev-dash-reset-map') as HTMLElement | null;
+
+    el.querySelector('#dev-dash-upload-map')?.addEventListener('click', () => {
+      mapFileInput?.click();
+    });
+
+    mapFileInput?.addEventListener('change', async () => {
+      const file = mapFileInput.files?.[0];
+      if (!file) return;
+      const mode = (mapScaleSelect?.value || 'auto') as 'auto' | 'x100' | 'x25' | 'x1';
+      if (mapBadge) {
+        mapBadge.textContent = `Loading ${file.name}...`;
+        mapBadge.style.color = '#facc15';
+      }
+      try {
+        const res = await this.app.loadTestMap(file, mode);
+        this.uiManager.updateActiveMapStatus(res.fileName, true);
+        this.syncDashboardMapUI();
+        this.uiManager.showPickupNotification(`Custom Map Loaded: ${res.fileName}`);
+      } catch (err: any) {
+        if (mapBadge) {
+          mapBadge.textContent = 'Load failed';
+          mapBadge.style.color = '#f87171';
+        }
+        this.uiManager.showPickupNotification(err?.message || 'Failed to load custom map');
+      } finally {
+        mapFileInput.value = '';
+      }
+    });
+
+    btnResetMap?.addEventListener('click', async () => {
+      if (mapBadge) {
+        mapBadge.textContent = 'Restoring Blenderrr.glb...';
+        mapBadge.style.color = '#facc15';
+      }
+      try {
+        const res = await this.app.loadDefaultStage1Map('auto');
+        this.uiManager.updateActiveMapStatus(res.fileName, false);
+        this.syncDashboardMapUI();
+        this.uiManager.showPickupNotification('Restored Default Stage 1 (Blenderrr.glb)');
+      } catch (err: any) {
+        this.uiManager.showPickupNotification(err?.message || 'Failed to restore Blenderrr.glb');
+        this.syncDashboardMapUI();
+      }
+    });
+
+    el.querySelector('#dev-card-stage-editor')?.addEventListener('click', async () => {
+      await this.ensureDefaultMapReady();
       this.closeDashboard();
       document.getElementById('screen-main-menu')?.classList.add('hidden');
       this.stageEditor.open();
     });
 
-    el.querySelector('#dev-card-debugger')?.addEventListener('click', () => {
+    el.querySelector('#dev-card-debugger')?.addEventListener('click', async () => {
+      await this.ensureDefaultMapReady();
       this.closeDashboard();
       this.app.isDevModeSession = true;
       const sim = this.app.getSimulation();
@@ -164,6 +236,10 @@ export class DevToolkit {
       this.runStageValidationReport();
     });
 
+    el.querySelector('#btn-dev-dash-dialogue')?.addEventListener('click', () => {
+      this.uiManager.toggleDevDialogueTester(true);
+    });
+
     el.querySelector('#btn-dev-dash-back')?.addEventListener('click', () => {
       this.closeDashboard();
       this.app.isDevModeSession = false;
@@ -171,6 +247,28 @@ export class DevToolkit {
       this.playtestBarEl?.classList.add('hidden');
       document.getElementById('screen-main-menu')?.classList.remove('hidden');
     });
+  }
+
+  private async ensureDefaultMapReady(): Promise<void> {
+    if (!this.app.isTestMapActive && this.ensureDefaultMapLoaded) {
+      await this.ensureDefaultMapLoaded();
+    }
+  }
+
+  private syncDashboardMapUI(): void {
+    const state = this.app.getSimulation().state;
+    const meta = this.dashboardEl?.querySelector('#dev-dash-stage-meta');
+    if (meta) {
+      meta.textContent = `Active: ${state.stageName} [${state.getActiveProfileKey()}]`;
+    }
+    const mapBadge = this.dashboardEl?.querySelector('#dev-dash-map-badge') as HTMLElement | null;
+    if (mapBadge) {
+      const name = this.app.activeMapFileName || 'Blenderrr.glb';
+      mapBadge.textContent = this.app.isCustomUploadedMap ? `Custom: ${name}` : `Default: ${name}`;
+      mapBadge.style.color = this.app.isCustomUploadedMap ? '#38bdf8' : '#6ee7b7';
+    }
+    const btnResetMap = this.dashboardEl?.querySelector('#dev-dash-reset-map');
+    btnResetMap?.classList.toggle('hidden', !this.app.isCustomUploadedMap);
   }
 
   private mountPlaytestBarDOM(): void {
@@ -213,7 +311,7 @@ export class DevToolkit {
       this.setDevPaused(true);
       this.gameplayDebugger.close();
       this.playtestBarEl?.classList.add('hidden');
-      this.openDashboard();
+      void this.openDashboard();
     });
   }
 
@@ -303,15 +401,12 @@ export class DevToolkit {
     return this.isInPlaytest;
   }
 
-  public openDashboard(): void {
+  public async openDashboard(): Promise<void> {
     document.getElementById('screen-main-menu')?.classList.add('hidden');
+    await this.ensureDefaultMapReady();
     this.app.isDevModeSession = true;
     this.setDevPaused(true);
-    const state = this.app.getSimulation().state;
-    const meta = this.dashboardEl?.querySelector('#dev-dash-stage-meta');
-    if (meta) {
-      meta.textContent = `Active: ${state.stageName} [${state.getActiveProfileKey()}]`;
-    }
+    this.syncDashboardMapUI();
     this.dashboardEl?.classList.remove('hidden');
   }
 

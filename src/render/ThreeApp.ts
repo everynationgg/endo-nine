@@ -22,6 +22,9 @@ import { SeededRandom } from '../sim/ItemDefs';
 import type { NarrativeObserver } from '../narrative/NarrativeObserver';
 import type { DialogueDirector } from '../narrative/DialogueDirector';
 
+export const DEFAULT_STAGE1_MAP_URL = '/assets/maps/Blenderrr.glb';
+export const DEFAULT_STAGE1_MAP_NAME = 'Blenderrr.glb';
+
 const BILLBOARD_25D_VERT = `
   #include <common>
   #include <fog_pars_vertex>
@@ -687,6 +690,8 @@ export class ThreeApp {
   private earthquakeIntensity: number = 0;
   private earthquakeIsMajor: boolean = false;
   public isTestMapActive: boolean = false;
+  public isCustomUploadedMap: boolean = false;
+  public activeMapFileName: string = DEFAULT_STAGE1_MAP_NAME;
   private savedStage1Obstacles: typeof this.simulation.state.obstacles | null = null;
   private savedStage1ArtifactPos: Vector2 | null = null;
   private savedStage1EventPositions: Array<{ pos: Vector2; elevation: number }> | null = null;
@@ -1385,8 +1390,9 @@ export class ThreeApp {
     const cx = this.simulation.state.worldWidth / 2;
     const cy = this.simulation.state.worldHeight / 2;
 
-    // 0b. Stage 1 Colossal Stone Arches, Ring, Moons & Horizon Ridges (hidden when SketchUp Test Map Skydome is active)
+    // 0b. Stage 1 Colossal Stone Arches, Ring, Moons & Horizon Ridges (legacy procedural scenery hidden by default)
     this.stage1SceneryGroup = new THREE.Group();
+    this.stage1SceneryGroup.visible = false;
     this.scene.add(this.stage1SceneryGroup);
 
     // Giant Glowing 3D Celestial Planetary Ring
@@ -7559,12 +7565,22 @@ export class ThreeApp {
 
   public async loadTestMap(file: File, scaleMode: TestMapScaleMode = 'auto'): Promise<LoadedTestMap> {
     const loaded = await loadTestMapFromFile(file, scaleMode);
-    return this.applyLoadedTestMap(loaded);
+    const applied = this.applyLoadedTestMap(loaded);
+    this.isCustomUploadedMap = true;
+    this.activeMapFileName = applied.fileName;
+    return applied;
   }
 
   public async loadTestMapUrl(url: string, fileName: string, scaleMode: TestMapScaleMode = 'auto'): Promise<LoadedTestMap> {
     const loaded = await loadTestMapFromUrl(url, fileName, scaleMode);
     return this.applyLoadedTestMap(loaded);
+  }
+
+  public async loadDefaultStage1Map(scaleMode: TestMapScaleMode = 'auto'): Promise<LoadedTestMap> {
+    const loaded = await this.loadTestMapUrl(DEFAULT_STAGE1_MAP_URL, DEFAULT_STAGE1_MAP_NAME, scaleMode);
+    this.isCustomUploadedMap = false;
+    this.activeMapFileName = loaded.fileName;
+    return loaded;
   }
 
   private applyLoadedTestMap(loaded: LoadedTestMap): LoadedTestMap {

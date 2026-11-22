@@ -76,8 +76,8 @@ function formatCommsTimestamp(sec: number): string {
 export class UIManager {
   private container: HTMLElement;
   private simulation: Simulation | null = null;
-  private onStartRunCallback: (() => void) | null = null;
-  private onRestartCallback: (() => void) | null = null;
+  private onStartRunCallback: (() => void | Promise<void>) | null = null;
+  private onRestartCallback: (() => void | Promise<void>) | null = null;
 
   // Settings State & Callbacks
   public settings: GameSettings = {
@@ -97,9 +97,10 @@ export class UIManager {
   public onExitToMenuCallback: (() => void) | null = null;
   private dialogueController: DialogueUIController | null = null;
   public onLoadTestMapCallback: ((file: File, scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
-  public onLoadBigMapCallback: ((scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
-  public onClearTestMapCallback: (() => void) | null = null;
-  public onOpenDeveloperModeCallback: (() => void) | null = null;
+  public onResetDefaultMapCallback: (() => Promise<string>) | null = null;
+  public onOpenDeveloperModeCallback: (() => void | Promise<void>) | null = null;
+  public activeMapName: string = 'Blenderrr.glb';
+  public isCustomUploadedMap: boolean = false;
   private settingsReturnScreenId: string = 'screen-main-menu';
 
   // DOM elements cache
@@ -650,9 +651,17 @@ export class UIManager {
     }
   }
 
-  public setCallbacks(onStart: () => void, onRestart: () => void): void {
+  public setCallbacks(
+    onStart: () => void | Promise<void>,
+    onRestart: () => void | Promise<void>
+  ): void {
     this.onStartRunCallback = onStart;
     this.onRestartCallback = onRestart;
+  }
+
+  public updateActiveMapStatus(fileName: string, isCustom: boolean): void {
+    this.activeMapName = fileName;
+    this.isCustomUploadedMap = isCustom;
   }
 
   public initGame(sim: Simulation): void {
@@ -703,35 +712,10 @@ export class UIManager {
           <div class="subtitle">Errant Night Chronicle — Sector 1: Permafrost</div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 14px; width: 300px; align-items: stretch;">
-          <button id="btn-enter-selection" class="sci-btn primary-gold">Deploy Vanguard</button>
-          <button id="btn-main-settings" class="sci-btn">⚙ Tactical Settings</button>
-          ${import.meta.env.DEV ? '<button id="btn-main-dev-mode" class="sci-btn" style="border-color: rgba(56, 189, 248, 0.65); color: #7dd3fc;">🛠 DEVELOPER MODE</button>' : ''}
-
-          <!-- Non-Destructive Test Map Loader (SketchUp / Blender Sandbox) -->
-          <div style="margin-top: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.28); background: rgba(15, 23, 42, 0.72); display: flex; flex-direction: column; gap: 8px;">
-            <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; letter-spacing: 0.8px; color: #7dd3fc; font-weight: 700;">
-              <span>CUSTOM MAP LOADER</span>
-              <span id="test-map-badge" style="color: #94a3b8; font-weight: 600;">Default Stage 1</span>
-            </div>
-            <div style="display: flex; gap: 6px; align-items: center;">
-              <select id="select-test-map-scale" class="sci-btn" style="flex: 1; padding: 6px 8px; font-size: 11px; text-align: left;">
-                <option value="auto">Scale: Full Native (×25)</option>
-                <option value="x25">Scale: ×25 (1m = 25u)</option>
-                <option value="x100">Scale: ×100</option>
-                <option value="x1">Scale: 1:1 (×1)</option>
-              </select>
-              <button id="btn-load-test-map" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(56, 189, 248, 0.45);">Load Map File</button>
-            </div>
-            <button id="btn-load-big-map" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7;">🏔 Load Big Map Stage 1</button>
-            <button id="btn-clear-test-map" class="sci-btn hidden" style="padding: 5px 8px; font-size: 11px; border-color: rgba(248, 113, 113, 0.45); color: #fca5a5;">↩ Reset to Default Stage 1</button>
-            <button id="btn-main-dev-dialogue" class="sci-btn" style="padding: 5px 8px; font-size: 11px; border-color: rgba(167, 139, 250, 0.45); color: #ddd6fe;">🎙 Dev Dialogue Tester [F9]</button>
-            <input id="input-test-map-file" type="file" accept=".glb,.gltf,.dae,.obj,.stl" style="display: none;" />
-          </div>
-
-          <div style="font-size: 12px; color: var(--text-muted); text-align: center; letter-spacing: 1px; margin-top: 2px;">
-            WASD Move | Space Jump/Glide | Shift Dash | R Tactical Blast | E Open Pod | 1-3 Augment
-          </div>
+          <button id="btn-enter-selection" class="sci-btn primary-gold">Play</button>
+          <button id="btn-main-settings" class="sci-btn">Settings</button>
         </div>
+        <button id="btn-main-dev-mode" class="dev-gear-btn" title="Developer Mode" aria-label="Developer Mode">⚙</button>
       </div>
 
       <!-- 2. SURVIVOR SELECTION SCREEN & PRE-GAME SKILLS/UPGRADES HUB -->
@@ -1678,81 +1662,8 @@ export class UIManager {
       this.openSettings('screen-main-menu');
     });
 
-    if (import.meta.env.DEV) {
-      document.getElementById('btn-main-dev-mode')?.addEventListener('click', () => {
-        this.onOpenDeveloperModeCallback?.();
-      });
-    }
-
-    // Test Map Sandbox Loader (Main Menu)
-    const testMapInput = document.getElementById('input-test-map-file') as HTMLInputElement | null;
-    const testMapScale = document.getElementById('select-test-map-scale') as HTMLSelectElement | null;
-    const testMapBadge = document.getElementById('test-map-badge');
-    const btnClearTestMap = document.getElementById('btn-clear-test-map');
-
-    document.getElementById('btn-load-test-map')?.addEventListener('click', () => {
-      testMapInput?.click();
-    });
-
-    document.getElementById('btn-load-big-map')?.addEventListener('click', async () => {
-      if (!this.onLoadBigMapCallback) return;
-      const mode = (testMapScale?.value || 'auto') as 'auto' | 'x100' | 'x25' | 'x1';
-      if (testMapBadge) {
-        testMapBadge.textContent = 'Loading Big Map...';
-        testMapBadge.style.color = '#facc15';
-      }
-      try {
-        const summary = await this.onLoadBigMapCallback(mode);
-        if (testMapBadge) {
-          testMapBadge.textContent = summary;
-          testMapBadge.style.color = '#34d399';
-        }
-        btnClearTestMap?.classList.remove('hidden');
-        this.showPickupNotification('Blender Map (Blenderrr.glb) Loaded!');
-      } catch (err: any) {
-        if (testMapBadge) {
-          testMapBadge.textContent = 'Load failed';
-          testMapBadge.style.color = '#f87171';
-        }
-        this.showPickupNotification(err?.message || 'Failed to load Blenderrr.glb');
-      }
-    });
-
-    testMapInput?.addEventListener('change', async () => {
-      const file = testMapInput.files?.[0];
-      if (!file || !this.onLoadTestMapCallback) return;
-      const mode = (testMapScale?.value || 'auto') as 'auto' | 'x100' | 'x25' | 'x1';
-      if (testMapBadge) {
-        testMapBadge.textContent = 'Loading...';
-        testMapBadge.style.color = '#facc15';
-      }
-      try {
-        const summary = await this.onLoadTestMapCallback(file, mode);
-        if (testMapBadge) {
-          testMapBadge.textContent = summary;
-          testMapBadge.style.color = '#34d399';
-        }
-        btnClearTestMap?.classList.remove('hidden');
-        this.showPickupNotification(`Test Map Loaded: ${file.name}`);
-      } catch (err: any) {
-        if (testMapBadge) {
-          testMapBadge.textContent = 'Load failed';
-          testMapBadge.style.color = '#f87171';
-        }
-        this.showPickupNotification(err?.message || 'Failed to load test map');
-      } finally {
-        testMapInput.value = '';
-      }
-    });
-
-    btnClearTestMap?.addEventListener('click', () => {
-      this.onClearTestMapCallback?.();
-      if (testMapBadge) {
-        testMapBadge.textContent = 'Stage 1 Active';
-        testMapBadge.style.color = '#94a3b8';
-      }
-      btnClearTestMap.classList.add('hidden');
-      this.showPickupNotification('Restored Stage 1 Map');
+    document.getElementById('btn-main-dev-mode')?.addEventListener('click', () => {
+      void this.onOpenDeveloperModeCallback?.();
     });
 
     document.getElementById('btn-hero-settings')?.addEventListener('click', () => {
@@ -1917,15 +1828,36 @@ export class UIManager {
       this.showPickupNotification(this.settings.isMuted ? 'Sound Muted [M]' : 'Sound Enabled [M]');
     });
 
-    document.getElementById('btn-start-run')?.addEventListener('click', () => {
-      this.elHeroSelect.classList.add('hidden');
-      this.elMainMenu.classList.add('hidden');
-      this.elHudContainer.classList.remove('hidden');
-      if (this.previewScene) {
-        this.previewScene.destroy();
-        this.previewScene = null;
+    document.getElementById('btn-start-run')?.addEventListener('click', async () => {
+      const startBtn = document.getElementById('btn-start-run') as HTMLButtonElement | null;
+      const prevLabel = startBtn?.textContent || '🚀 Initiate Drop';
+      let loadingHintTimer: number | null = null;
+      if (startBtn) {
+        startBtn.disabled = true;
+        loadingHintTimer = window.setTimeout(() => {
+          startBtn.textContent = '⏳ Loading Stage 1...';
+        }, 80);
       }
-      if (this.onStartRunCallback) this.onStartRunCallback();
+      try {
+        if (this.onStartRunCallback) {
+          await this.onStartRunCallback();
+        }
+        this.elHeroSelect.classList.add('hidden');
+        this.elMainMenu.classList.add('hidden');
+        this.elHudContainer.classList.remove('hidden');
+        if (this.previewScene) {
+          this.previewScene.destroy();
+          this.previewScene = null;
+        }
+      } catch (err: any) {
+        this.showPickupNotification(err?.message || 'Failed to start Stage 1');
+      } finally {
+        if (loadingHintTimer !== null) window.clearTimeout(loadingHintTimer);
+        if (startBtn) {
+          startBtn.disabled = false;
+          startBtn.textContent = prevLabel;
+        }
+      }
     });
 
     this.btnAutoPrimary.addEventListener('click', () => {
@@ -1969,10 +1901,6 @@ export class UIManager {
 
     this.btnPauseExit.addEventListener('click', () => {
       this.exitToMenuFromPause();
-    });
-
-    document.getElementById('btn-main-dev-dialogue')?.addEventListener('click', () => {
-      this.toggleDevDialogueTester(true);
     });
 
     document.getElementById('btn-pause-dev-dialogue')?.addEventListener('click', () => {

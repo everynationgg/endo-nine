@@ -351,9 +351,9 @@ export function validateStageConfig(config: StageConfig, terrain?: TerrainSystem
     issues.push({ severity: 'error', message: 'Invalid or missing StageConfig schemaVersion.' });
     return issues;
   }
-  const active = config.profiles?.procedural;
+  const active = config.profiles?.custom_map || config.profiles?.procedural;
   if (!active) {
-    issues.push({ severity: 'error', message: 'Missing "procedural" profile in StageConfig.' });
+    issues.push({ severity: 'error', message: 'Missing stage profile in StageConfig.' });
     return issues;
   }
   issues.push(...validateStageProfile(active, terrain));
