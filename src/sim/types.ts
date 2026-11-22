@@ -1,3 +1,5 @@
+import type { ArtifactPhase } from './StageProgressionPolicy';
+
 export interface Vector2 {
   x: number;
   y: number;
@@ -18,41 +20,7 @@ export type SkillSlot = 'primary' | 'secondary' | 'utility' | 'ultimate';
 export type ItemId = 'overdrive' | 'vital_core' | 'chain_spark';
 
 export type BuffId =
-  | 'buff_overdrive'
-  | 'buff_vital_core'
-  | 'buff_chain_spark'
-  | 'buff_pulse_power'
-  | 'buff_thrusters'
-  | 'buff_orbital_cap'
-  | 'buff_harvester'
-  | 'buff_crit_lens'
-  | 'buff_heavy_slugs'
-  | 'buff_multi_barrel'
-  | 'buff_cryo_rounds'
-  | 'buff_toxic_spores'
-  | 'buff_death_blossom'
-  | 'buff_energy_shield'
-  | 'buff_thorns_plating'
-  | 'buff_vampiric_siphon'
-  | 'buff_executioner'
-  | 'buff_combat_drone'
-  | 'buff_shock_trail'
-  | 'buff_speed_demon'
-  | 'buff_giant_slayer'
-  | 'buff_jet_overclock'
-  | 'buff_bouncing_slugs'
-  | 'buff_titanium_armor'
-  | 'buff_greedy_leech'
-  | 'buff_resonance_booster'
-  | 'buff_stun_rounds'
-  | 'buff_thermite_infusion'
-  | 'buff_berserker_stim'
-  | 'buff_frost_landing'
-  | 'buff_nanite_swarm'
-  | 'buff_superconductor'
-  | 'buff_lead_curtain'
-  | 'buff_second_wind'
-  // Commander 12 Approved Skill Enhancement Buffs (Exclusive to the 4 World Events)
+  // Commander 12 Approved Skill Enhancement Augments (Exclusive to World Events)
   | 'buff_chill_beam'
   | 'buff_piercing_laser'
   | 'buff_extended_slash'
@@ -65,7 +33,7 @@ export type BuffId =
   | 'buff_singularity'
   | 'buff_convergence_barrage'
   | 'buff_cryogenic_impact'
-  // Doctor 12 Approved Skill Enhancement Buffs (extended_dash is Universal Augment 1)
+  // Doctor 11 Approved Skill Enhancement Augments (extended_dash is Universal Augment)
   | 'buff_toxic_chain'
   | 'buff_cryogenic_scalpel'
   | 'buff_vital_extraction'
@@ -77,20 +45,136 @@ export type BuffId =
   | 'buff_mobile_sanctuary'
   | 'buff_divine_intervention'
   | 'buff_rain_of_crosses'
-  | 'buff_skill_scatter'
-  | 'buff_skill_arc'
-  | 'buff_skill_hyper_beam'
-  | 'buff_skill_gatling'
-  | 'buff_skill_cryo_grenade'
-  | 'buff_skill_gravity_vortex'
-  | 'buff_skill_blink'
-  | 'buff_skill_nuke'
-  | 'buff_skill_orbital_lance'
-  | 'buff_skill_singularity'
-  | 'buff_skill_chrono_stasis'
-  | 'buff_corruption_dominance'
-  | 'buff_corruption_chitin'
-  | 'buff_corruption_catalyst';
+  // Universal Buffs (18: U01–U18)
+  | 'buff_momentum'
+  | 'buff_thruster_core'
+  | 'buff_fuel_recycler'
+  | 'buff_aerial_boost'
+  | 'buff_overcharge'
+  | 'buff_precision'
+  | 'buff_critical_surge'
+  | 'buff_rapid_fire'
+  | 'buff_vitality'
+  | 'buff_reinforced_plating'
+  | 'buff_regeneration'
+  | 'buff_life_siphon'
+  | 'buff_thorns'
+  | 'buff_emergency_barrier'
+  | 'buff_accelerator'
+  | 'buff_magnetic_field'
+  | 'buff_fortune'
+  | 'buff_area_amplifier'
+  // Trigger Buffs (15: T01–T15)
+  | 'buff_chain_reaction'
+  | 'buff_blood_rush'
+  | 'buff_second_wind'
+  | 'buff_executioner'
+  | 'buff_combat_focus'
+  | 'buff_final_stand'
+  | 'buff_static_discharge'
+  | 'buff_aftershock'
+  | 'buff_retaliation'
+  | 'buff_cooldown_harvest'
+  | 'buff_fuel_harvest'
+  | 'buff_killing_momentum'
+  | 'buff_reactive_shield'
+  | 'buff_overkill'
+  | 'buff_survival_instinct'
+  // Commander Augment-Specific Buffs (24: C-LMB-01..06, C-RMB-01..06, C-DASH-01..06, C-ULT-01..06)
+  | 'buff_cmd_cryo_amplification'
+  | 'buff_cmd_thermal_focus'
+  | 'buff_cmd_penetration_core'
+  | 'buff_cmd_coherent_optics'
+  | 'buff_cmd_blade_reach'
+  | 'buff_cmd_heavy_swing'
+  | 'buff_cmd_twin_edge'
+  | 'buff_cmd_serrated_cut'
+  | 'buff_cmd_shatter_nova'
+  | 'buff_cmd_deep_freeze'
+  | 'buff_cmd_orbital_extension'
+  | 'buff_cmd_razor_satellites'
+  | 'buff_cmd_impulse_capacitor'
+  | 'buff_cmd_kinetic_stride'
+  | 'buff_cmd_kinetic_shell'
+  | 'buff_cmd_concussive_wave'
+  | 'buff_cmd_adrenal_extension'
+  | 'buff_cmd_velocity_surge'
+  | 'buff_cmd_gravitational_pull'
+  | 'buff_cmd_event_horizon'
+  | 'buff_cmd_concentrated_salvo'
+  | 'buff_cmd_pinpoint_collapse'
+  | 'buff_cmd_subzero_detonation'
+  | 'buff_cmd_permafrost_field'
+  // Doctor Augment-Specific Buffs (24: D-LMB-01..06, D-RMB-01..06, D-DASH-01..06, D-ULT-01..06)
+  | 'buff_doc_contagion_return'
+  | 'buff_doc_overdose_catalyst'
+  | 'buff_doc_surgical_edge'
+  | 'buff_doc_cryogenic_residue'
+  | 'buff_doc_vital_reach'
+  | 'buff_doc_siphon_efficiency'
+  | 'buff_doc_targeting_optics'
+  | 'buff_doc_calibrated_payload'
+  | 'buff_doc_toxic_diffusion'
+  | 'buff_doc_corrosive_residue'
+  | 'buff_doc_projection_integrity'
+  | 'buff_doc_caustic_reprisal'
+  | 'buff_doc_clinical_reach'
+  | 'buff_doc_impact_dosage'
+  | 'buff_doc_sterile_interval'
+  | 'buff_doc_protective_triage'
+  | 'buff_doc_rush_persistence'
+  | 'buff_doc_emergency_reflex'
+  | 'buff_doc_orbit_stabilizer'
+  | 'buff_doc_vital_rotation'
+  | 'buff_doc_celestial_endurance'
+  | 'buff_doc_consecrated_cross'
+  | 'buff_doc_sustained_rain'
+  | 'buff_doc_restorative_imprint'
+  // Projectile Buffs (2: P01–P02)
+  | 'buff_extra_lmb_projectile'
+  | 'buff_extra_rmb_projectile'
+  // Stage 1 Expanded Catalog (15: E01–E15)
+  | 'buff_projectile_mesh'
+  | 'buff_impact_harness'
+  | 'buff_meltwater_treads'
+  | 'buff_rangefinder_array'
+  | 'buff_point_blank_coil'
+  | 'buff_opening_pulse'
+  | 'buff_titanbreaker_matrix'
+  | 'buff_cryo_chem_catalyst'
+  | 'buff_surveyors_beacon'
+  | 'buff_dash_overclock'
+  | 'buff_first_contact_protocol'
+  | 'buff_aerial_focus'
+  | 'buff_pod_surge'
+  | 'buff_apex_barrier'
+  | 'buff_resonance_siphon';
+
+export type TimedEffectId =
+  | 'dash_overclock'
+  | 'first_contact_protocol'
+  | 'aerial_focus'
+  | 'pod_surge'
+  | 'apex_barrier'
+  | 'resonance_siphon';
+
+export interface ActiveTimedEffect {
+  id: TimedEffectId;
+  name: string;
+  icon: string;
+  remaining: number;
+  duration: number;
+  stacks: number;
+  sourceBuffId: BuffId;
+  color: string;
+}
+
+export interface BuffsBySource {
+  level: number;
+  pod: number;
+  elite: number;
+  event: number;
+}
 
 export interface ItemDef {
   id: ItemId;
@@ -165,6 +249,15 @@ export interface BuffDef {
   enhancementId?: SkillEnhancementId;
   exclusiveEvent?: ExclusiveEventPool;
   heroFilter?: HeroId;
+  requiredHero?: HeroId;
+  buffPool?: 'universal' | 'trigger' | 'augment_specific' | 'projectile';
+  dropWeight?: number;
+  maxStacks?: number;
+  isUncapped?: boolean;
+  isSpecial?: boolean;
+  isAdditionalJump?: boolean;
+  isExtraProjectile?: boolean;
+  requiredAugment?: SkillEnhancementId | SkillEnhancementId[];
   isAttributeUpgrade?: boolean;
   applyStack: (stats: CalculatedStats, stackCount: number) => void;
 }
@@ -174,17 +267,29 @@ export interface CalculatedStats {
   healthRegen: number;
   moveSpeed: number;
   attackSpeedMultiplier: number;
+  lmbAttackSpeedMultiplier: number;
   damageMultiplier: number;
   chainSparkChance: number;
   chainSparkDamage: number;
   damageReduction: number;
+  skillCooldownMultiplier: number;
   dashCooldownMultiplier: number;
   ultimateCooldownMultiplier: number;
   ultimateRadiusMultiplier: number;
+  ultimateRadiusBonusRaw: number;
   aoeRadiusMultiplier: number;
   healingMultiplier: number;
   skillDurationMultiplier: number;
   pickupRadius: number;
+  currencyMultiplier: number;
+  jetpackCapacityMultiplier: number;
+  jetpackRegenMultiplier: number;
+  extraAirJumps: number;
+  lifeSiphonPercent: number;
+  thornsReflectFraction: number;
+  emergencyBarrierFraction: number;
+  extraLmbProjectiles: number;
+  extraRmbProjectiles: number;
 
   critChance: number;
   critMultiplier: number;
@@ -209,6 +314,14 @@ export interface CalculatedStats {
   flatArmor: number;
   hasSecondWind: boolean;
   bouncingProjectiles: boolean;
+  projectileDamageMitigation?: number;
+  meleeDamageMitigation?: number;
+  waterSpeedBonus?: number;
+  longRangeDamageBonus?: number;
+  closeRangeDamageBonus?: number;
+  openingPulseBonus?: number;
+  statusSynergyDamageBonus?: number;
+  resonanceLmbDamageBonus?: number;
 }
 
 export interface SkillDef {
@@ -233,12 +346,17 @@ export interface PlayerState {
   maxHealth: number;
   baseMoveSpeed: number;
   moveSpeed: number;
+  baseLmbDamage: number;
+  baseDamageReduction: number;
+  baseHealthRegenPercent: number;
 
   // Passive Commander's Resolve
   defenseBonusTimer: number;
   defenseBonusDuration: number;
   defenseBonusReduction: number;
   hurtInvulnTimer?: number;
+  enemyProjectileGraceTimer?: number;
+  hitByEnemyAttackInstanceIds?: Map<number, number>;
 
   // Progression & Economy
   level: number;
@@ -279,12 +397,47 @@ export interface PlayerState {
   isGliding: boolean;
   jetpackFuel: number;
   maxJetpackFuel: number;
+  maxAirJumps: number;
+  airJumpsRemaining: number;
+  inWater: boolean;
   cameraYaw: number;
 
   // Stacking Passive Items & Selected Buffs
   items: Record<ItemId, number>;
   buffs: Record<BuffId, number>;
   calculatedStats: CalculatedStats;
+
+  // Trigger Buff Runtime Timers, Cooldowns, & Counters
+  tempShieldAmount: number;
+  tempShieldTimer: number;
+  emergencyBarrierCooldown: number;
+  chainReactionCooldown: number;
+  secondWindCooldown: number;
+  staticDischargeCooldown: number;
+  aftershockCooldown: number;
+  reactiveShieldCooldown: number;
+  survivalInstinctCooldown: number;
+  bloodRushTimer: number;
+  bloodRushRecentKills: number;
+  bloodRushKillWindowTimer: number;
+  combatFocusHitCount: number;
+  killingMomentumTimer: number;
+  killingMomentumStacks: number;
+  retaliationTimer: number;
+  survivalInstinctTimer: number;
+  stunImmunityTimer: number;
+  postDashSpeedTimer: number;
+  lifeSiphonSecondTimer: number;
+  lifeSiphonSecondAmount: number;
+  wasAirborneLastFrame: boolean;
+  hasCollectedDoubleJumpPickup: boolean;
+  nonProjectileBuffCount: number;
+  lastDirectAttackActivationId?: number;
+  usedCombatFocusActivations?: Set<number>;
+  activeTimedEffects?: Partial<Record<TimedEffectId, ActiveTimedEffect>>;
+  timedEffectCooldowns?: Partial<Record<TimedEffectId, number>>;
+  aerialFocusLatched?: boolean;
+  buffsBySource?: BuffsBySource;
 
   // Energy Shield & Active Equipped Skills
   energyShield: number;
@@ -310,6 +463,8 @@ export interface PlayerState {
   floatingSwords?: FloatingSwordData[];
   slashComboStep?: number;
   slashComboTimer?: number;
+  isCarryingEventPayload?: boolean;
+  carryingEventId?: string | null;
 }
 
 export interface FloatingSwordData {
@@ -335,6 +490,7 @@ export interface EnemyState {
   velocity: Vector2;
   z: number;
   groundZ: number;
+  inWater?: boolean;
   health: number;
   maxHealth: number;
   speed: number;
@@ -342,6 +498,11 @@ export interface EnemyState {
   attackCooldown: number;
   attackCooldownRemaining: number;
   contactCooldownRemaining?: number;
+  rangedWindupTimer?: number;
+  rangedWindupDuration?: number;
+  lockedAttackDir?: { x: number; y: number; z: number };
+  lockedAttackVariant?: 'stinger' | 'spore_bomb' | 'seismic_shard' | 'wasp_sting';
+  lockedTargetPos?: { x: number; y: number; z: number };
   attackRange: number;
   isElite: boolean;
   isBoss?: boolean;
@@ -352,11 +513,15 @@ export interface EnemyState {
   // Status effects from buffs/skills
   isChilled?: boolean;
   chillTimer?: number;
+  chillStrength?: number;
   isToxic?: boolean;
   toxicTimer?: number;
   toxicSlowTimer?: number;
   poisonStacks?: number;
   poisonStackTimer?: number;
+  bleedTimer?: number;
+  bleedTickTimer?: number;
+  bleedDps?: number;
   isStunned?: boolean;
   stunTimer?: number;
   isElectrified?: boolean;
@@ -387,8 +552,21 @@ export interface EnemyState {
 
   // Stage 1 Main Boss (Titan Colossus) Special Mechanics
   isStage1Titan?: boolean;
-  titanState?: 'emerging' | 'idle' | 'walk' | 'laser_sweep' | 'tentacle_strike' | 'elemental_barrage' | 'dying';
+  isScriptedEventEnemy?: boolean;
+  bossPursuitOutOfRangeTimer?: number;
+  titanState?: 'emerging' | 'idle' | 'walk' | 'leap' | 'laser_sweep' | 'tentacle_strike' | 'elemental_barrage' | 'dying';
   titanTimer?: number;
+  // Boss Anti-Stuck Terrain Leap
+  bossStuckTimer?: number;
+  bossStuckAnchor?: Vector2;
+  bossJumpCooldown?: number;
+  isBossLeaping?: boolean;
+  bossLeapElapsed?: number;
+  bossLeapDuration?: number;
+  bossLeapStart?: { x: number; y: number; z: number };
+  bossLeapTarget?: { x: number; y: number; z: number };
+  bossEmergeOrigin?: { x: number; y: number; z: number };
+  bossEmergeTarget?: { x: number; y: number; z: number };
   titanAnimFrame?: number;
   titanFacing?: 'front' | 'back' | 'left' | 'right';
   titanLaserAngle?: number;
@@ -463,6 +641,7 @@ export interface ProjectileState {
   extraLayers?: number;
   // Doctor projectile extensions
   bouncesRemaining?: number;
+  isRicochet?: boolean;
   returnPhase?: boolean;
   outboundHitIds?: Set<string>;
   returnHitIds?: Set<string>;
@@ -471,6 +650,10 @@ export interface ProjectileState {
   trailAccumDist?: number;
   clusterSpreadAngle?: number;
   decoyThrowTarget?: Vector2;
+  attackActivationId?: number;
+  attackInstanceId?: number;
+  isDirectAttack?: boolean;
+  isPrimaryLmb?: boolean;
 }
 
 export interface OrbitalStrikeState {
@@ -487,6 +670,8 @@ export interface OrbitalStrikeState {
   hitEnemyIds?: Set<string>;
   dotTimer?: number;
   hasExploded?: boolean;
+  attackActivationId?: number;
+  cryoTickTimer?: number;
 }
 
 export interface RecoveryFieldState {
@@ -622,6 +807,16 @@ export interface OverseerArtifactState {
   zOffset?: number;
   rotationY?: number;
   scale?: number;
+  phase?: ArtifactPhase;
+  requiredModules?: number;
+  recoveredModules?: number;
+  restorationTimer?: number;
+  teleportPrepTimer?: number;
+  teleportPrepDuration?: number;
+  awaitingDialogueSync?: boolean;
+  refreezeTriggered?: boolean;
+  prematureInteractWarned?: boolean;
+  prematureInteractCooldown?: number;
   chargeProgress: number; // 0 to 100
   chargePerKill: number;
   isCharged: boolean;
@@ -648,7 +843,9 @@ export interface CurrencyDropState {
 export interface ItemDropState {
   id: string;
   itemId?: ItemId;
+  buffId?: BuffId;
   isBuffDrop?: boolean;
+  isDoubleJumpTestPickup?: boolean;
   pos: Vector2;
   vel: Vector2;
   z: number;
@@ -656,6 +853,18 @@ export interface ItemDropState {
   settled: boolean;
   lifetime: number;
 }
+
+export type TerrainSurfaceCategory =
+  | 'ground'
+  | 'cliff'
+  | 'water'
+  | 'waterfall_rock'
+  | 'bridge'
+  | 'tower_ledge'
+  | 'ship_walkable'
+  | 'solid_obstacle'
+  | 'border'
+  | 'tree_nonsolid';
 
 export interface MapObstacle {
   id: string;
@@ -678,6 +887,15 @@ export type WorldEventType =
   | 'orbital_uplink'        // 4. Ultimate (R) Enhancement Shrine
   | 'void_corruption';      // Legacy/optional compatibility
 
+export interface DashEventPlatform {
+  index: number; // 1..5
+  x: number;
+  y: number;
+  z: number;
+  radius: number;
+  reached?: boolean;
+}
+
 export interface WorldEventState {
   id: string;
   type: WorldEventType;
@@ -697,6 +915,12 @@ export interface WorldEventState {
   killTarget?: number;
   elevation: number;
   hasSpawnedBoss50?: boolean;
+  activeEliteId?: string | null;
+  eliteWaveIndex?: number;
+  dashPlatforms?: DashEventPlatform[];
+  highestPlatformReached?: number;
+  payloadPos?: { x: number; y: number; z: number };
+  payloadCollected?: boolean;
 }
 
 export interface InputSnapshot {
@@ -718,87 +942,94 @@ export interface InputSnapshot {
 
 export interface SimEvent {
   type:
-    | 'damage_dealt'
-    | 'enemy_killed'
-    | 'item_dropped'
-    | 'item_acquired'
-    | 'buff_capsule_collected'
-    | 'level_up'
-    | 'currency_collected'
-    | 'buff_choices_ready'
-    | 'buff_selected'
-    | 'player_hit'
-    | 'dash_used'
-    | 'dash_shockwave'
-    | 'medical_rush_hit'
-    | 'recovery_field_deployed'
-    | 'toxic_field_deployed'
-    | 'sanctuary_cross_deployed'
-    | 'sanctuary_pulse'
-    | 'toxic_chain_bounce'
-    | 'toxic_chain_explosion'
-    | 'scalpel_thrown'
-    | 'grenade_thrown'
-    | 'cluster_fragmented'
-    | 'decoy_spawned'
-    | 'decoy_detonated'
-    | 'angel_summoned'
-    | 'falling_cross_impact'
-    | 'rain_crosses_started'
-    | 'therapeutic_heal'
-    | 'drone_bolt_impact'
-    | 'phase_barrier_activated'
-    | 'adrenaline_activated'
-    | 'jump_started'
-    | 'glide_started'
-    | 'glide_ended'
-    | 'landed'
-    | 'ultimate_fired'
-    | 'ultimate_singularity_spawned'
-    | 'ultimate_singularity_detonated'
-    | 'ultimate_convergence_started'
-    | 'ultimate_convergence_detonated'
-    | 'ultimate_cryo_field_spawned'
-    | 'orbital_impact'
-    | 'pulse_fired'
-    | 'pistol_shot_released'
-    | 'beam_charging'
-    | 'beam_fired'
-    | 'scatter_fired'
-    | 'blink_used'
-    | 'wave_fired'
-    | 'pod_opened'
-    | 'pod_dissolving'
-    | 'pod_removed'
-    | 'artifact_charged'
-    | 'boss_spawned'
-    | 'boss_defeated'
-    | 'enemy_emerging'
-    | 'stage_cleared'
-    | 'game_over'
-    | 'chain_spark'
-    | 'difficulty_advanced'
-    | 'world_event_activated'
-    | 'world_event_progress'
-    | 'world_event_completed'
-    | 'world_event_pulse'
-    | 'chill_beam_fired'
-    | 'piercing_laser_fired'
-    | 'extended_slash_fired'
-    | 'scissor_slash_fired'
-    | 'frost_burst_fired'
-    | 'orbiting_blade_summoned'
-    | 'orbiting_blade_expired'
-    | 'orbiting_blade_hit'
-    | 'floating_sword_hit'
-    | 'teleport_executed'
-    | 'dash_shockwave_impact'
-    | 'stage1_boss_emerge'
-    | 'stage1_boss_laser_sweep'
-    | 'stage1_boss_tentacle_strike'
-    | 'stage1_boss_elemental_charge'
-    | 'stage1_boss_elemental_launch'
-    | 'stage1_boss_rumble'
-    | 'stage1_boss_death';
+  | 'damage_dealt'
+  | 'enemy_killed'
+  | 'item_dropped'
+  | 'item_acquired'
+  | 'buff_capsule_collected'
+  | 'level_up'
+  | 'currency_collected'
+  | 'buff_choices_ready'
+  | 'buff_selected'
+  | 'player_hit'
+  | 'dash_used'
+  | 'dash_shockwave'
+  | 'medical_rush_hit'
+  | 'recovery_field_deployed'
+  | 'toxic_field_deployed'
+  | 'sanctuary_cross_deployed'
+  | 'sanctuary_pulse'
+  | 'toxic_chain_bounce'
+  | 'toxic_chain_explosion'
+  | 'scalpel_thrown'
+  | 'grenade_thrown'
+  | 'cluster_fragmented'
+  | 'decoy_spawned'
+  | 'decoy_detonated'
+  | 'angel_summoned'
+  | 'falling_cross_impact'
+  | 'rain_crosses_started'
+  | 'therapeutic_heal'
+  | 'drone_bolt_impact'
+  | 'phase_barrier_activated'
+  | 'adrenaline_activated'
+  | 'jump_started'
+  | 'glide_started'
+  | 'glide_ended'
+  | 'landed'
+  | 'ultimate_fired'
+  | 'ultimate_singularity_spawned'
+  | 'ultimate_singularity_detonated'
+  | 'ultimate_convergence_started'
+  | 'ultimate_convergence_detonated'
+  | 'ultimate_cryo_field_spawned'
+  | 'orbital_impact'
+  | 'pulse_fired'
+  | 'pistol_shot_released'
+  | 'beam_charging'
+  | 'beam_fired'
+  | 'scatter_fired'
+  | 'blink_used'
+  | 'wave_fired'
+  | 'pod_opened'
+  | 'pod_dissolving'
+  | 'pod_removed'
+  | 'artifact_charged'
+  | 'boss_spawned'
+  | 'boss_defeated'
+  | 'enemy_emerging'
+  | 'enemy_attack_windup'
+  | 'enemy_projectile_fired'
+  | 'stage_cleared'
+  | 'game_over'
+  | 'chain_spark'
+  | 'difficulty_advanced'
+  | 'world_event_activated'
+  | 'world_event_progress'
+  | 'world_event_completed'
+  | 'world_event_pulse'
+  | 'overseer_comm'
+  | 'chill_beam_fired'
+  | 'piercing_laser_fired'
+  | 'extended_slash_fired'
+  | 'scissor_slash_fired'
+  | 'frost_burst_fired'
+  | 'orbiting_blade_summoned'
+  | 'orbiting_blade_expired'
+  | 'orbiting_blade_hit'
+  | 'floating_sword_hit'
+  | 'teleport_executed'
+  | 'dash_shockwave_impact'
+  | 'stage1_boss_emerge'
+  | 'stage1_boss_laser_sweep'
+  | 'stage1_boss_tentacle_strike'
+  | 'stage1_boss_elemental_charge'
+  | 'stage1_boss_elemental_launch'
+  | 'stage1_boss_rumble'
+  | 'stage1_boss_death'
+  | 'stage_earthquake'
+  | 'tower_locked_interact'
+  | 'tower_unlocked'
+  | 'stage1_refreeze_started';
   data: any;
 }

@@ -16,8 +16,29 @@ export const PREREQUISITE_REGISTRY: Record<string, NarrativePredicate> = {
   hero_is_commander: (state) => state.player.heroId === 'commander',
   hero_is_doctor: (state) => state.player.heroId === 'doctor',
   boss_not_defeated: (state) => !state.artifact?.isBossDefeated,
-  teleporter_charged_not_spawned: (state) =>
-    Boolean(state.artifact?.isCharged && !state.artifact?.isBossSpawned && !state.artifact?.isBossDefeated)
+  before_fourth_enhancement: (state, ctx) =>
+    Boolean(ctx.facts?.devSimulated) ||
+    (state.completedEnhancementCategories.size < 4 &&
+      !state.hasBossSpawned &&
+      !state.artifact?.isBossSpawned),
+  fewer_than_4_enhancements: (state, ctx) =>
+    Boolean(ctx.facts?.devSimulated) || state.completedEnhancementCategories.size < 4,
+  tower_unlocked_not_spawned: (state, ctx) =>
+    Boolean(ctx.facts?.devSimulated) ||
+    Boolean(
+      state.artifact?.phase === 'unlocked_ready' &&
+        !state.artifact?.isBossSpawned &&
+        !state.artifact?.isBossDefeated &&
+        !state.hasBossSpawned
+    ),
+  teleporter_charged_not_spawned: (state, ctx) =>
+    Boolean(ctx.facts?.devSimulated) ||
+    Boolean(
+      state.artifact?.isCharged &&
+        !state.artifact?.isBossSpawned &&
+        !state.artifact?.isBossDefeated &&
+        !state.hasBossSpawned
+    )
 };
 
 export const RELEVANCE_REGISTRY: Record<string, NarrativePredicate> = {
@@ -25,7 +46,31 @@ export const RELEVANCE_REGISTRY: Record<string, NarrativePredicate> = {
   same_stage: (state, ctx) => state.stageNumber === ctx.originStage && !state.isStageCleared && !state.isGameOver,
   stage1_active: (state) => state.stageNumber === 1 && !state.isStageCleared && !state.isGameOver,
   before_boss_spawned: (state, ctx) =>
-    state.stageNumber === ctx.originStage && !state.hasBossSpawned && !state.isStageCleared && !state.isGameOver,
+    state.stageNumber === ctx.originStage &&
+    !state.hasBossSpawned &&
+    !state.artifact?.isBossSpawned &&
+    !state.artifact?.isBossDefeated &&
+    !state.isStageCleared &&
+    !state.isGameOver,
+  before_fourth_enhancement: (state, ctx) =>
+    state.stageNumber === ctx.originStage &&
+    (Boolean(ctx.facts?.devSimulated) || state.completedEnhancementCategories.size < 4) &&
+    !state.hasBossSpawned &&
+    !state.artifact?.isBossSpawned &&
+    !state.artifact?.isBossDefeated &&
+    !state.isStageCleared &&
+    !state.isGameOver,
+  tower_ready_only: (state, ctx) =>
+    state.stageNumber === ctx.originStage &&
+    !state.isStageCleared &&
+    !state.isGameOver &&
+    (Boolean(ctx.facts?.devSimulated) ||
+      Boolean(
+        state.artifact?.phase === 'unlocked_ready' &&
+          !state.artifact?.isBossSpawned &&
+          !state.artifact?.isBossDefeated &&
+          !state.hasBossSpawned
+      )),
   before_boss_defeated: (state, ctx) =>
     state.stageNumber === ctx.originStage &&
     !state.artifact?.isBossDefeated &&
@@ -43,8 +88,21 @@ export const RELEVANCE_REGISTRY: Record<string, NarrativePredicate> = {
     !state.isGameOver,
   teleporter_ready_only: (state, ctx) =>
     state.stageNumber === ctx.originStage &&
-    Boolean(state.artifact?.isCharged && !state.artifact?.isBossSpawned && !state.isGameOver),
-  during_stage_clear: (state) => state.isStageCleared && !state.isGameOver
+    !state.isStageCleared &&
+    !state.isGameOver &&
+    (Boolean(ctx.facts?.devSimulated) ||
+      Boolean(
+        state.artifact?.isCharged &&
+          state.artifact?.isTeleporterReady &&
+          !state.artifact?.isBossSpawned &&
+          !state.artifact?.isBossDefeated &&
+          !state.hasBossSpawned
+      )),
+  during_stage_clear: (state) =>
+    (state.isStageCleared ||
+      state.artifact?.phase === 'teleport_preparing' ||
+      Boolean(state.artifact?.refreezeTriggered)) &&
+    !state.isGameOver
 };
 
 export function evaluateNamedRule(

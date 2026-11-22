@@ -1,4 +1,4 @@
-import type { CommunicationRole } from '../narrative/types';
+import type { CommunicationRole, SpeakerId } from '../narrative/types';
 import type { VoicePlaybackPort } from '../narrative/DialogueDirector';
 
 interface ActiveVoicePlayback {
@@ -11,16 +11,29 @@ interface ActiveVoicePlayback {
 }
 
 export class SoundManager {
+  private static readonly SPEAKER_VOICE_GAIN: Record<SpeakerId, number> = {
+    commander: 1.0,
+    doctor: 1.0,
+    overseer: 1.38
+  };
+
   private ctx: AudioContext | null = null;
   private isMuted: boolean = false;
   private masterVolume: number = 0.8;
   private voiceVolume: number = 0.95;
   private masterGain: GainNode | null = null;
+  private voiceLimiter: DynamicsCompressorNode | null = null;
   private voiceGain: GainNode | null = null;
 
   private voiceBuffers: Map<string, AudioBuffer | null> = new Map();
   private voiceLoadGen: number = 0;
   private activeVoice: ActiveVoicePlayback | null = null;
+  private fadingVoices: ActiveVoicePlayback[] = [];
+  private fadingOutUntilCtxTime: number = 0;
+
+  public getSpeakerVoiceGain(speaker?: SpeakerId): number {
+    return speaker ? (SoundManager.SPEAKER_VOICE_GAIN[speaker] ?? 1.0) : 1.0;
+  }
 
   public readonly voice: VoicePlaybackPort = {
     preload: (urls: string[], loadGen: number) => this.preloadVoiceBuffers(urls, loadGen),
@@ -29,15 +42,17 @@ export class SoundManager {
       offsetSec: number,
       role: CommunicationRole,
       playbackGen: number,
-      onEnded: (gen: number) => void
-    ) => this.playVoiceBuffer(url, offsetSec, role, playbackGen, onEnded),
+      onEnded: (gen: number) => void,
+      speaker?: SpeakerId
+    ) => this.playVoiceBuffer(url, offsetSec, role, playbackGen, onEnded, speaker),
     pause: (playbackGen: number) => this.pauseVoicePlayback(playbackGen),
-    stop: (playbackGen: number) => this.stopVoicePlayback(playbackGen),
+    stop: (playbackGen: number, fadeOutMs?: number) => this.stopVoicePlayback(playbackGen, fadeOutMs),
     hasBuffer: (url: string) => Boolean(this.voiceBuffers.get(url)),
+    getBufferDuration: (url: string) => this.voiceBuffers.get(url)?.duration ?? null,
     isAvailable: () => typeof window !== 'undefined' && Boolean(window.AudioContext || (window as any).webkitAudioContext),
     clearBuffers: () => {
       this.voiceLoadGen++;
-      this.stopVoicePlayback(0);
+      this.stopVoicePlayback(0, 0);
       this.voiceBuffers.clear();
     }
   };
@@ -81,13 +96,19 @@ export class SoundManager {
   }
 
   constructor() {
-    // Lazy initialize on first interaction to comply with browser autoplay policies
+    // Lazy initialize on first interaction (capture phase) to comply with browser autoplay policies
     const initAudio = () => {
       this.ensureContext();
     };
 
-    window.addEventListener('click', initAudio, { once: false });
-    window.addEventListener('keydown', initAudio, { once: false });
+    window.addEventListener('pointerdown', initAudio, { capture: true, passive: true });
+    window.addEventListener('mousedown', initAudio, { capture: true, passive: true });
+    window.addEventListener('click', initAudio, { capture: true, passive: true });
+    window.addEventListener('keydown', initAudio, { capture: true, passive: true });
+  }
+
+  public unlock(): void {
+    this.ensureContext();
   }
 
   private ensureContext(): AudioContext | null {
@@ -99,9 +120,7 @@ export class SoundManager {
         this.masterGain.gain.setValueAtTime(this.isMuted ? 0 : this.masterVolume, this.ctx.currentTime);
         this.masterGain.connect(this.ctx.destination);
 
-        this.voiceGain = this.ctx.createGain();
-        this.voiceGain.gain.setValueAtTime(this.voiceVolume, this.ctx.currentTime);
-        this.voiceGain.connect(this.masterGain);
+        this.ensureVoiceGain(this.ctx);
       }
     }
     if (this.ctx && this.ctx.state === 'suspended') {
@@ -110,11 +129,25 @@ export class SoundManager {
     return this.ctx;
   }
 
+  private ensureVoiceLimiter(ctx: AudioContext): DynamicsCompressorNode {
+    if (!this.voiceLimiter) {
+      this.voiceLimiter = ctx.createDynamicsCompressor();
+      this.voiceLimiter.threshold.setValueAtTime(-0.5, ctx.currentTime);
+      this.voiceLimiter.knee.setValueAtTime(1.5, ctx.currentTime);
+      this.voiceLimiter.ratio.setValueAtTime(20, ctx.currentTime);
+      this.voiceLimiter.attack.setValueAtTime(0.002, ctx.currentTime);
+      this.voiceLimiter.release.setValueAtTime(0.05, ctx.currentTime);
+      this.voiceLimiter.connect(this.getAudioDestination());
+    }
+    return this.voiceLimiter;
+  }
+
   private ensureVoiceGain(ctx: AudioContext): GainNode {
+    const limiter = this.ensureVoiceLimiter(ctx);
     if (!this.voiceGain) {
       this.voiceGain = ctx.createGain();
       this.voiceGain.gain.setValueAtTime(this.voiceVolume, ctx.currentTime);
-      this.voiceGain.connect(this.getAudioDestination());
+      this.voiceGain.connect(limiter);
     }
     return this.voiceGain;
   }
@@ -166,9 +199,12 @@ export class SoundManager {
     offsetSec: number,
     role: CommunicationRole,
     playbackGen: number,
-    onEnded: (gen: number) => void
+    onEnded: (gen: number) => void,
+    speaker?: SpeakerId
   ): boolean {
-    this.stopVoicePlayback(playbackGen);
+    if (this.activeVoice) {
+      this.stopVoicePlayback(playbackGen, 0);
+    }
 
     const buffer = this.voiceBuffers.get(url);
     if (!buffer) return false;
@@ -181,7 +217,7 @@ export class SoundManager {
     source.buffer = buffer;
 
     const turnGain = ctx.createGain();
-    turnGain.gain.setValueAtTime(1.0, ctx.currentTime);
+    turnGain.gain.setValueAtTime(this.getSpeakerVoiceGain(speaker), ctx.currentTime);
     const nodes: AudioNode[] = [source, turnGain];
 
     if (role === 'remote_support') {
@@ -212,6 +248,7 @@ export class SoundManager {
     turnGain.connect(voiceBus);
 
     const safeOffset = Math.max(0, Math.min(offsetSec, Math.max(0, buffer.duration - 0.05)));
+    const startAt = Math.max(ctx.currentTime, this.fadingOutUntilCtxTime);
     source.onended = () => {
       if (this.activeVoice && this.activeVoice.source === source && this.activeVoice.gen === playbackGen) {
         this.cleanupVoiceNodes(this.activeVoice);
@@ -221,7 +258,7 @@ export class SoundManager {
     };
 
     try {
-      source.start(0, safeOffset);
+      source.start(startAt, safeOffset);
     } catch {
       return false;
     }
@@ -230,7 +267,7 @@ export class SoundManager {
       source,
       turnGain,
       nodes,
-      startedAtCtxTime: ctx.currentTime,
+      startedAtCtxTime: startAt,
       offsetSec: safeOffset,
       gen: playbackGen
     };
@@ -242,11 +279,46 @@ export class SoundManager {
     const elapsed = this.ctx
       ? this.activeVoice.offsetSec + Math.max(0, this.ctx.currentTime - this.activeVoice.startedAtCtxTime)
       : this.activeVoice.offsetSec;
-    this.stopVoicePlayback(0);
+    this.stopVoicePlayback(0, 0);
     return elapsed;
   }
 
-  private stopVoicePlayback(_playbackGen: number): void {
+  private stopVoicePlayback(_playbackGen: number, fadeOutMs: number = 0): void {
+    if (fadeOutMs > 0 && this.ctx && this.activeVoice) {
+      const cur = this.activeVoice;
+      this.activeVoice = null;
+      const now = this.ctx.currentTime;
+      const fadeOutSec = Math.max(0.08, Math.min(0.18, fadeOutMs / 1000));
+      cur.turnGain.gain.cancelScheduledValues(now);
+      cur.turnGain.gain.setValueAtTime(Math.max(0.0001, cur.turnGain.gain.value || 1.0), now);
+      cur.turnGain.gain.linearRampToValueAtTime(0.0001, now + fadeOutSec);
+      this.fadingOutUntilCtxTime = Math.max(this.fadingOutUntilCtxTime, now + fadeOutSec + 0.01);
+      this.fadingVoices.push(cur);
+      cur.source.onended = () => {
+        this.fadingVoices = this.fadingVoices.filter((v) => v !== cur);
+        this.cleanupVoiceNodes(cur);
+      };
+      try {
+        cur.source.stop(now + fadeOutSec + 0.005);
+      } catch {
+        this.fadingVoices = this.fadingVoices.filter((v) => v !== cur);
+        this.cleanupVoiceNodes(cur);
+      }
+      return;
+    }
+
+    this.fadingOutUntilCtxTime = 0;
+    while (this.fadingVoices.length > 0) {
+      const fading = this.fadingVoices.pop()!;
+      fading.source.onended = null;
+      try {
+        fading.source.stop();
+      } catch {
+        // Ignore already stopped node
+      }
+      this.cleanupVoiceNodes(fading);
+    }
+
     if (!this.activeVoice) return;
     const cur = this.activeVoice;
     this.activeVoice = null;
@@ -623,6 +695,58 @@ export class SoundManager {
       osc.start(ctx.currentTime + idx * 0.09);
       osc.stop(ctx.currentTime + idx * 0.09 + 0.55);
     });
+  }
+
+  // Stage Seismic Earthquake Rumble (Moderate for 2nd augment, Major for 4th augment)
+  public playEarthquake(isMajor: boolean = false): void {
+    if (this.isMuted) return;
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+
+    const now = ctx.currentTime;
+    const dur = isMajor ? 5.0 : 3.4;
+    const bufLen = Math.floor(ctx.sampleRate * dur);
+    const noiseBuf = ctx.createBuffer(1, bufLen, ctx.sampleRate);
+    const data = noiseBuf.getChannelData(0);
+    let last = 0;
+    for (let i = 0; i < bufLen; i++) {
+      const white = Math.random() * 2 - 1;
+      last = (last + 0.04 * white) / 1.04;
+      data[i] = Math.max(-1, Math.min(1, last * 4.5));
+    }
+
+    const noise = ctx.createBufferSource();
+    noise.buffer = noiseBuf;
+
+    const lowpass = ctx.createBiquadFilter();
+    lowpass.type = 'lowpass';
+    lowpass.frequency.setValueAtTime(isMajor ? 140 : 105, now);
+    lowpass.frequency.exponentialRampToValueAtTime(42, now + dur);
+
+    const noiseGain = ctx.createGain();
+    noiseGain.gain.setValueAtTime(0.001, now);
+    noiseGain.gain.linearRampToValueAtTime(isMajor ? 0.45 : 0.28, now + 0.14);
+    noiseGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    noise.connect(lowpass);
+    lowpass.connect(noiseGain);
+    noiseGain.connect(this.getAudioDestination());
+    noise.start(now);
+    noise.stop(now + dur);
+
+    const sub = ctx.createOscillator();
+    const subGain = ctx.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(isMajor ? 52 : 46, now);
+    sub.frequency.exponentialRampToValueAtTime(26, now + dur);
+    subGain.gain.setValueAtTime(0.001, now);
+    subGain.gain.linearRampToValueAtTime(isMajor ? 0.34 : 0.2, now + 0.12);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    sub.connect(subGain);
+    subGain.connect(this.getAudioDestination());
+    sub.start(now);
+    sub.stop(now + dur);
   }
 }
 

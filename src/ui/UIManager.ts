@@ -1,6 +1,7 @@
 import { GameState } from '../sim/GameState';
 import { Simulation } from '../sim/Simulation';
 import { ITEM_REGISTRY, BUFF_REGISTRY } from '../sim/ItemDefs';
+import { getStageArtifactPolicy } from '../sim/StageProgressionPolicy';
 import { ItemId, BuffId, HeroId, SkillSlot, SkillEnhancementId } from '../sim/types';
 import { getDifficultyTier } from '../sim/DifficultyDefs';
 import { SkillPreviewScene } from '../render/SkillPreviewScene';
@@ -26,6 +27,7 @@ export interface DialogueUIController {
   resetSavePersistence(): void;
   getTranscript(): TranscriptEntry[];
   getUnlockedCodexLore(): UnlockedCodexLore[];
+  getActiveRunObjectives(): UnlockedCodexLore[];
   getPresentationState(): CommsPresentationState;
   getDebugInfo(): {
     lifecycleState: string;
@@ -40,6 +42,8 @@ export interface DialogueUIController {
   isCustomTestMapActive(): boolean;
 }
 
+export type GraphicsQuality = 'low' | 'medium' | 'high';
+
 export interface GameSettings {
   invertCameraPan: boolean;
   invertCameraPitch: boolean;
@@ -51,6 +55,7 @@ export interface GameSettings {
   subtitlesEnabled: boolean;
   isMuted: boolean;
   use3DCommander: boolean;
+  graphicsQuality: GraphicsQuality;
 }
 
 function escapeHtml(text: string): string {
@@ -85,13 +90,14 @@ export class UIManager {
     voiceVolume: 0.95,
     subtitlesEnabled: true,
     isMuted: false,
-    use3DCommander: false
+    use3DCommander: false,
+    graphicsQuality: 'medium'
   };
   public onSettingsChangedCallback: ((settings: GameSettings) => void) | null = null;
   public onExitToMenuCallback: (() => void) | null = null;
   private dialogueController: DialogueUIController | null = null;
   public onLoadTestMapCallback: ((file: File, scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
-  public onQuickLoadSketchupCallback: ((scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
+  public onLoadBigMapCallback: ((scaleMode: 'auto' | 'x100' | 'x25' | 'x1') => Promise<string>) | null = null;
   public onClearTestMapCallback: (() => void) | null = null;
   public onOpenDeveloperModeCallback: (() => void) | null = null;
   private settingsReturnScreenId: string = 'screen-main-menu';
@@ -144,6 +150,10 @@ export class UIManager {
   private btnSettingReset!: HTMLElement;
   private btnSettingConfirm!: HTMLElement;
   private btnSetting3D!: HTMLElement;
+  private btnQualityLow!: HTMLElement;
+  private btnQualityMed!: HTMLElement;
+  private btnQualityHigh!: HTMLElement;
+  private descQualityPreset!: HTMLElement;
 
   // Radio Comms HUD & Dev Tester Elements
   private elCommsPanel!: HTMLElement;
@@ -153,7 +163,12 @@ export class UIManager {
   private elCommsTurn!: HTMLElement;
   private elCommsMode!: HTMLElement;
   private elCommsText!: HTMLElement;
+  private elQuestTracker!: HTMLElement;
+  private elQuestTrackerList!: HTMLElement;
+  private lastQuestTrackerKey: string = '';
   private lastCommsRenderKey: string = '';
+  private lastDialoguePresentation: CommsPresentationState | null = null;
+  private tacticalCommTimer: number | null = null;
   private elDevTesterPanel!: HTMLElement;
   private elDevTesterSelect!: HTMLSelectElement;
   private elDevTesterHero!: HTMLSelectElement;
@@ -171,6 +186,7 @@ export class UIManager {
   private elStageLabel!: HTMLElement;
   private elCurrencyText!: HTMLElement;
   private elKillsText!: HTMLElement;
+  private elArtifactBar!: HTMLElement;
   private elArtifactFill!: HTMLElement;
   private elArtifactStatus!: HTMLElement;
   private elPickupToast!: HTMLElement;
@@ -245,10 +261,7 @@ export class UIManager {
 
   // Difficulty / Clock Elements
   private elDiffClockText!: HTMLElement;
-  private elDiffTierBadge: HTMLElement | null = null;
   private elDiffBarFill!: HTMLElement;
-  private elDiffThreatScale: HTMLElement | null = null;
-  private elDiffNextTier: HTMLElement | null = null;
   private elDiffBanner!: HTMLElement;
   private elDiffBannerTier!: HTMLElement;
   private elDiffBannerDesc!: HTMLElement;
@@ -417,6 +430,21 @@ export class UIManager {
       } else {
         this.btnSetting3D.classList.remove('active');
         this.btnSetting3D.textContent = '2.5D ILLUSTRATED (ACTIVE)';
+      }
+    }
+
+    // Graphics Quality Preset
+    const quality: GraphicsQuality = this.settings.graphicsQuality || 'medium';
+    this.btnQualityLow?.classList.toggle('active', quality === 'low');
+    this.btnQualityMed?.classList.toggle('active', quality === 'medium');
+    this.btnQualityHigh?.classList.toggle('active', quality === 'high');
+    if (this.descQualityPreset) {
+      if (quality === 'low') {
+        this.descQualityPreset.textContent = 'Low: 1.0x scale, no bloom, static clouds & up to 4 dynamic lights (best FPS).';
+      } else if (quality === 'high') {
+        this.descQualityPreset.textContent = 'High: crisp 1.5x scale, richer bloom, drifting clouds & up to 10 dynamic lights.';
+      } else {
+        this.descQualityPreset.textContent = 'Medium: balanced 60 FPS target (1.25x cap, half-res bloom, up to 8 dynamic lights).';
       }
     }
   }
@@ -682,20 +710,20 @@ export class UIManager {
           <!-- Non-Destructive Test Map Loader (SketchUp / Blender Sandbox) -->
           <div style="margin-top: 4px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(56, 189, 248, 0.28); background: rgba(15, 23, 42, 0.72); display: flex; flex-direction: column; gap: 8px;">
             <div style="display: flex; justify-content: space-between; align-items: center; font-size: 11px; letter-spacing: 0.8px; color: #7dd3fc; font-weight: 700;">
-              <span>TEST MAP SANDBOX</span>
-              <span id="test-map-badge" style="color: #94a3b8; font-weight: 600;">Stage 1 Active</span>
+              <span>CUSTOM MAP LOADER</span>
+              <span id="test-map-badge" style="color: #94a3b8; font-weight: 600;">Default Stage 1</span>
             </div>
             <div style="display: flex; gap: 6px; align-items: center;">
               <select id="select-test-map-scale" class="sci-btn" style="flex: 1; padding: 6px 8px; font-size: 11px; text-align: left;">
-                <option value="auto">Scale: Auto-Fit 3600</option>
-                <option value="x100">Scale: 36m×36m (×100)</option>
-                <option value="x25">Scale: 144m×144m (×25)</option>
+                <option value="auto">Scale: Full Native (×25)</option>
+                <option value="x25">Scale: ×25 (1m = 25u)</option>
+                <option value="x100">Scale: ×100</option>
                 <option value="x1">Scale: 1:1 (×1)</option>
               </select>
-              <button id="btn-load-test-map" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(56, 189, 248, 0.45);">Load File</button>
+              <button id="btn-load-test-map" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(56, 189, 248, 0.45);">Load Map File</button>
             </div>
-            <button id="btn-quick-load-sketchup" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7;">🚀 Load Stage 1 Test Map (Untitled.glb)</button>
-            <button id="btn-clear-test-map" class="sci-btn hidden" style="padding: 5px 8px; font-size: 11px; border-color: rgba(248, 113, 113, 0.45); color: #fca5a5;">↩ Reset to Stage 1</button>
+            <button id="btn-load-big-map" class="sci-btn" style="padding: 6px 10px; font-size: 11px; border-color: rgba(52, 211, 153, 0.5); color: #6ee7b7;">🏔 Load Big Map Stage 1</button>
+            <button id="btn-clear-test-map" class="sci-btn hidden" style="padding: 5px 8px; font-size: 11px; border-color: rgba(248, 113, 113, 0.45); color: #fca5a5;">↩ Reset to Default Stage 1</button>
             <button id="btn-main-dev-dialogue" class="sci-btn" style="padding: 5px 8px; font-size: 11px; border-color: rgba(167, 139, 250, 0.45); color: #ddd6fe;">🎙 Dev Dialogue Tester [F9]</button>
             <input id="input-test-map-file" type="file" accept=".glb,.gltf,.dae,.obj,.stl" style="display: none;" />
           </div>
@@ -952,8 +980,8 @@ export class UIManager {
               <circle cx="12" cy="12" r="2.1" fill="#e9d5ff"/>
             </svg>
             <div class="hud-tp-info">
-              <div id="hud-artifact-status" class="hud-artifact-status">Teleporter Charging: 0%</div>
-              <div class="hud-artifact-bar">
+              <div id="hud-artifact-status" class="hud-artifact-status">Safeguards Offline (0/4)</div>
+              <div id="hud-artifact-bar" class="hud-artifact-bar">
                 <div id="hud-artifact-fill" class="hud-artifact-fill"></div>
               </div>
             </div>
@@ -962,7 +990,7 @@ export class UIManager {
           <!-- Boss Health Bar (Appears cleanly beneath Teleporter Indicator when active) -->
           <div id="hud-boss-bar-wrap" class="hud-boss-bar-wrap hidden">
             <div class="hud-boss-header">
-              <span id="hud-boss-title" class="hud-boss-title">COLOSSAL BIO-CULTIVATOR</span>
+              <span id="hud-boss-title" class="hud-boss-title">STAGE 1 BOSS</span>
               <span id="hud-boss-hp-text" class="hud-boss-hp-text">5400 / 5400</span>
             </div>
             <div class="hud-boss-bar-bg">
@@ -987,6 +1015,12 @@ export class UIManager {
           <div id="items-container" class="hud-items-grid">
             <div class="hud-items-empty" title="No passive items collected yet">0</div>
           </div>
+        </div>
+
+        <!-- Left Side: Mission Quest Tracker (Visible once objectives are communicated or interrupted into tracker) -->
+        <div id="hud-quest-tracker" class="hud-quest-tracker hidden" aria-live="polite">
+          <div class="hud-quest-tracker-hdr">MISSION OBJECTIVES</div>
+          <div id="hud-quest-tracker-list" class="hud-quest-tracker-list"></div>
         </div>
 
         <!-- Bottom Left: Compact Player Panel (Portrait, Name/Lv, Green HP, Conditional Purple Energy Shield) -->
@@ -1294,7 +1328,24 @@ export class UIManager {
               </div>
             </div>
 
-            <!-- Group 4: Character Visuals & Model -->
+            <!-- Group 4: Graphics & Performance -->
+            <div class="settings-section">
+              <div class="settings-section-title">GRAPHICS &amp; PERFORMANCE</div>
+
+              <div class="setting-item">
+                <div class="setting-label-block">
+                  <div class="setting-title">Graphics Quality Preset</div>
+                  <div id="setting-desc-quality" class="setting-desc">Medium: balanced 60 FPS target (1.25x cap, half-res bloom, up to 8 dynamic lights).</div>
+                </div>
+                <div class="setting-quality-group">
+                  <button id="setting-btn-quality-low" class="setting-toggle-btn setting-quality-btn">LOW</button>
+                  <button id="setting-btn-quality-medium" class="setting-toggle-btn setting-quality-btn active">MEDIUM</button>
+                  <button id="setting-btn-quality-high" class="setting-toggle-btn setting-quality-btn">HIGH</button>
+                </div>
+              </div>
+            </div>
+
+            <!-- Group 5: Character Visuals & Model -->
             <div class="settings-section">
               <div class="settings-section-title">COMMANDER CHARACTER RENDERING</div>
 
@@ -1468,10 +1519,13 @@ export class UIManager {
     this.elStageLabel = document.getElementById('hud-stage-label')!;
     this.elCurrencyText = document.getElementById('hud-credits')!;
     this.elKillsText = document.getElementById('hud-kills')!;
+    this.elArtifactBar = document.getElementById('hud-artifact-bar')!;
     this.elArtifactFill = document.getElementById('hud-artifact-fill')!;
     this.elArtifactStatus = document.getElementById('hud-artifact-status')!;
     this.elPickupToast = document.getElementById('hud-pickup-toast')!;
     this.elBuffsRow = document.getElementById('hud-buffs-row')!;
+    this.elQuestTracker = document.getElementById('hud-quest-tracker')!;
+    this.elQuestTrackerList = document.getElementById('hud-quest-tracker-list')!;
 
     this.elMinimapCanvas = document.getElementById('hud-minimap-canvas') as HTMLCanvasElement;
     this.elMinimapNorth = document.getElementById('hud-minimap-north');
@@ -1522,6 +1576,10 @@ export class UIManager {
     this.btnSettingReset = document.getElementById('setting-btn-reset')!;
     this.btnSettingConfirm = document.getElementById('setting-btn-confirm')!;
     this.btnSetting3D = document.getElementById('setting-btn-3d')!;
+    this.btnQualityLow = document.getElementById('setting-btn-quality-low')!;
+    this.btnQualityMed = document.getElementById('setting-btn-quality-medium')!;
+    this.btnQualityHigh = document.getElementById('setting-btn-quality-high')!;
+    this.descQualityPreset = document.getElementById('setting-desc-quality')!;
 
     this.elCommsPanel = document.getElementById('hud-comms-panel')!;
     this.elCommsPortrait = document.getElementById('hud-comms-portrait') as HTMLImageElement;
@@ -1553,10 +1611,7 @@ export class UIManager {
 
     // Risk of Rain 2 Difficulty Elements (Clock + Hairline Meter)
     this.elDiffClockText = document.getElementById('diff-clock-text')!;
-    this.elDiffTierBadge = document.getElementById('diff-tier-badge');
     this.elDiffBarFill = document.getElementById('diff-bar-fill')!;
-    this.elDiffThreatScale = document.getElementById('diff-threat-scale');
-    this.elDiffNextTier = document.getElementById('diff-next-tier');
     this.elDiffBanner = document.getElementById('hud-diff-banner')!;
     this.elDiffBannerTier = document.getElementById('diff-banner-tier')!;
     this.elDiffBannerDesc = document.getElementById('diff-banner-desc')!;
@@ -1639,27 +1694,27 @@ export class UIManager {
       testMapInput?.click();
     });
 
-    document.getElementById('btn-quick-load-sketchup')?.addEventListener('click', async () => {
-      if (!this.onQuickLoadSketchupCallback) return;
+    document.getElementById('btn-load-big-map')?.addEventListener('click', async () => {
+      if (!this.onLoadBigMapCallback) return;
       const mode = (testMapScale?.value || 'auto') as 'auto' | 'x100' | 'x25' | 'x1';
       if (testMapBadge) {
-        testMapBadge.textContent = 'Loading...';
+        testMapBadge.textContent = 'Loading Big Map...';
         testMapBadge.style.color = '#facc15';
       }
       try {
-        const summary = await this.onQuickLoadSketchupCallback(mode);
+        const summary = await this.onLoadBigMapCallback(mode);
         if (testMapBadge) {
           testMapBadge.textContent = summary;
           testMapBadge.style.color = '#34d399';
         }
         btnClearTestMap?.classList.remove('hidden');
-        this.showPickupNotification('Stage 1 Crater Map Loaded (Spawned at Ship Foot)');
+        this.showPickupNotification('Blender Map (Blenderrr.glb) Loaded!');
       } catch (err: any) {
         if (testMapBadge) {
           testMapBadge.textContent = 'Load failed';
           testMapBadge.style.color = '#f87171';
         }
-        this.showPickupNotification(err?.message || 'Failed to load SketchUp map');
+        this.showPickupNotification(err?.message || 'Failed to load Blenderrr.glb');
       }
     });
 
@@ -1808,6 +1863,16 @@ export class UIManager {
       this.saveSettings();
     });
 
+    const setQuality = (q: GraphicsQuality) => {
+      this.settings.graphicsQuality = q;
+      this.syncSettingsUI();
+      this.saveSettings();
+      this.showPickupNotification(`Graphics Quality: ${q.toUpperCase()}`);
+    };
+    this.btnQualityLow?.addEventListener('click', () => setQuality('low'));
+    this.btnQualityMed?.addEventListener('click', () => setQuality('medium'));
+    this.btnQualityHigh?.addEventListener('click', () => setQuality('high'));
+
     this.btnSetting3D.addEventListener('click', () => {
       this.settings.use3DCommander = !this.settings.use3DCommander;
       this.syncSettingsUI();
@@ -1826,7 +1891,8 @@ export class UIManager {
         voiceVolume: 0.95,
         subtitlesEnabled: true,
         isMuted: false,
-        use3DCommander: false
+        use3DCommander: false,
+        graphicsQuality: 'medium'
       };
       this.syncSettingsUI();
       this.saveSettings();
@@ -2038,10 +2104,10 @@ export class UIManager {
           const curScreen = !this.elMainMenu.classList.contains('hidden')
             ? 'screen-main-menu'
             : !this.elHeroSelect.classList.contains('hidden')
-            ? 'screen-hero-select'
-            : !this.elPauseModal.classList.contains('hidden')
-            ? 'screen-pause-menu'
-            : 'hud-container';
+              ? 'screen-hero-select'
+              : !this.elPauseModal.classList.contains('hidden')
+                ? 'screen-pause-menu'
+                : 'hud-container';
           this.openSettings(curScreen);
         }
         return;
@@ -2414,20 +2480,20 @@ export class UIManager {
       } else if (this.currentPassiveFilter === 'item') {
         allItems = catalog.physicalItems;
       } else if (this.currentPassiveFilter === 'offense') {
-        allItems = catalog.passiveBuffs.filter(b => 
-          b.name.includes('Amp') || b.name.includes('Damage') || b.name.includes('Crit') || 
+        allItems = catalog.passiveBuffs.filter(b =>
+          b.name.includes('Amp') || b.name.includes('Damage') || b.name.includes('Crit') ||
           b.name.includes('Penetrator') || b.name.includes('Splitter') || b.name.includes('Sparks') ||
           b.name.includes('Spark') || b.name.includes('Overdrive') || b.name.includes('Plasma') ||
           b.name.includes('Ignition') || b.name.includes('Breaker') || b.name.includes('Ricochet')
         );
       } else if (this.currentPassiveFilter === 'defense') {
-        allItems = catalog.passiveBuffs.filter(b => 
+        allItems = catalog.passiveBuffs.filter(b =>
           b.name.includes('Vital') || b.name.includes('Shield') || b.name.includes('Spikes') ||
           b.name.includes('Exoskeleton') || b.name.includes('Armor') || b.name.includes('Nanite') ||
           b.name.includes('Siphon') || b.name.includes('Plating')
         );
       } else if (this.currentPassiveFilter === 'utility') {
-        allItems = catalog.passiveBuffs.filter(b => 
+        allItems = catalog.passiveBuffs.filter(b =>
           b.name.includes('Thruster') || b.name.includes('Speed') || b.name.includes('Array') ||
           b.name.includes('Harvester') || b.name.includes('Supercharger') || b.name.includes('Attunement') ||
           b.name.includes('Harmonizer') || b.name.includes('Drone')
@@ -2607,8 +2673,8 @@ export class UIManager {
     }
 
     // 2. Stage Strip Metadata (Stage, Clock, Kills, Discreet Genes)
+    const stNum = state.stageNumber || 1;
     if (this.elStageLabel) {
-      const stNum = state.stageNumber || 1;
       const stName = state.stageName || 'The Wreckage';
       const nextHtml = `<span class="hud-stage-num">Stage ${stNum}</span> / <span class="hud-stage-name">${stName}</span>`;
       if (this.elStageLabel.innerHTML !== nextHtml) {
@@ -2618,27 +2684,59 @@ export class UIManager {
     this.elCurrencyText.textContent = `${p.currency}`;
     this.elKillsText.textContent = `${p.killCount}`;
 
-    // 3. Single Teleporter Charging Progress
+    // 3. Stage Artifact Status (Stage 1: 4-module concealment policy, no charge bar; Future stages: optional charging bar)
     const art = state.artifact;
-    const tpPct = Math.max(0, Math.min(100, Math.floor(art.chargeProgress)));
-    this.elArtifactFill.style.width = `${Math.max(0, Math.min(100, art.chargeProgress))}%`;
-    if (art.isCharged) {
-      if (art.isTeleporterReady && !art.isBossSpawned) {
-        this.elArtifactStatus.textContent = 'Teleporter Ready — Press [E]';
-        this.elArtifactStatus.classList.add('ready');
-      } else if (art.isSummoning) {
-        this.elArtifactStatus.textContent = 'Teleporter Awakening — Guardian Emerging';
+    const artPolicy = getStageArtifactPolicy(stNum);
+    if (!artPolicy.usesCharging) {
+      if (this.elArtifactBar) this.elArtifactBar.style.display = 'none';
+      const recovered = state.completedEnhancementCategories.size;
+      const required = artPolicy.requiredEnhancementCategories.length || 4;
+      const phase = art.phase || (recovered >= required ? 'unlocked_ready' : 'locked_missing_modules');
+      if (phase === 'locked_missing_modules') {
+        this.elArtifactStatus.textContent = `Safeguards Offline (${recovered}/${required})`;
         this.elArtifactStatus.classList.remove('ready');
-      } else if (!art.isBossDefeated) {
-        this.elArtifactStatus.textContent = 'Defeat Guardian to Activate Teleporter';
+      } else if (phase === 'unlocked_ready' && art.isTeleporterReady && !art.isBossSpawned) {
+        this.elArtifactStatus.textContent = 'Tower Unlocked — Press [E]';
+        this.elArtifactStatus.classList.add('ready');
+      } else if (phase === 'boss_summoning' || art.isSummoning) {
+        this.elArtifactStatus.textContent = 'Seismic Anomaly — Stage 1 Boss Emerging';
+        this.elArtifactStatus.classList.remove('ready');
+      } else if (phase === 'boss_active' || !art.isBossDefeated) {
+        this.elArtifactStatus.textContent = 'Defeat Stage 1 Boss to Restore Tower';
+        this.elArtifactStatus.classList.remove('ready');
+      } else if (phase === 'restoring') {
+        this.elArtifactStatus.textContent = 'Restoring Tower Stasis...';
+        this.elArtifactStatus.classList.remove('ready');
+      } else if (phase === 'teleport_preparing') {
+        if (this.elArtifactBar) this.elArtifactBar.style.display = 'none';
+        this.elArtifactStatus.textContent = 'AWAITING TELEPORT SYNCHRONIZATION...';
         this.elArtifactStatus.classList.remove('ready');
       } else {
-        this.elArtifactStatus.textContent = 'Teleporter Unlocked — Press [E]';
+        this.elArtifactStatus.textContent = 'Portal Ready — Press [E]';
         this.elArtifactStatus.classList.add('ready');
       }
     } else {
-      this.elArtifactStatus.textContent = `Teleporter Charging: ${tpPct}%`;
-      this.elArtifactStatus.classList.remove('ready');
+      if (this.elArtifactBar) this.elArtifactBar.style.display = '';
+      const tpPct = Math.max(0, Math.min(100, Math.floor(art.chargeProgress)));
+      this.elArtifactFill.style.width = `${Math.max(0, Math.min(100, art.chargeProgress))}%`;
+      if (art.isCharged) {
+        if (art.isTeleporterReady && !art.isBossSpawned) {
+          this.elArtifactStatus.textContent = 'Teleporter Ready — Press [E]';
+          this.elArtifactStatus.classList.add('ready');
+        } else if (art.isSummoning) {
+          this.elArtifactStatus.textContent = 'Teleporter Awakening — Guardian Emerging';
+          this.elArtifactStatus.classList.remove('ready');
+        } else if (!art.isBossDefeated) {
+          this.elArtifactStatus.textContent = 'Defeat Guardian to Activate Teleporter';
+          this.elArtifactStatus.classList.remove('ready');
+        } else {
+          this.elArtifactStatus.textContent = 'Teleporter Unlocked — Press [E]';
+          this.elArtifactStatus.classList.add('ready');
+        }
+      } else {
+        this.elArtifactStatus.textContent = `Teleporter Charging: ${tpPct}%`;
+        this.elArtifactStatus.classList.remove('ready');
+      }
     }
 
     // 3b. Active Boss Health Bar
@@ -2648,7 +2746,7 @@ export class UIManager {
       const bossHpPct = Math.max(0, Math.min(100, (activeBoss.health / activeBoss.maxHealth) * 100));
       this.elBossBarFill.style.width = `${bossHpPct}%`;
       this.elBossHpText.textContent = `${Math.ceil(activeBoss.health)} / ${activeBoss.maxHealth}`;
-      this.elBossTitle.textContent = activeBoss.isStage1Titan ? 'COLOSSAL BIO-CULTIVATOR' : 'BROOD QUEEN';
+      this.elBossTitle.textContent = activeBoss.isStage1Titan ? 'STAGE 1 BOSS' : 'BROOD QUEEN';
     } else if (this.elBossBarWrap) {
       this.elBossBarWrap.classList.add('hidden');
     }
@@ -2740,8 +2838,8 @@ export class UIManager {
     // 4c. Active Temporary Buffs & Debuffs (directly below Skill Bar)
     this.updateActiveBuffsRow(state);
 
-    // 5. Right-Side Expandable Passive Items Tray (Player permanent items only)
-    this.updateItemsTray(p.items);
+    // 5. Right-Side Expandable Passive Buffs & Legacy Items Tray
+    this.updateItemsTray(p.items, p.buffs);
 
     // 6. Top-Right Circular Terrain Minimap
     this.updateRadar(state);
@@ -2793,28 +2891,52 @@ export class UIManager {
           this.eventBannerTitle.style.color = '#38bdf8';
           const pDist = Math.hypot(p.pos.x - activeEv.pos.x, p.pos.y - activeEv.pos.y);
           this.eventBannerDesc.textContent = pDist <= activeEv.radius
-            ? `Synchronizing Resonance... ${activeEv.chargeProgress.toFixed(0)}% (Hold Area!)`
-            : `Resonance Decaying! Return to Totem Area! (${activeEv.chargeProgress.toFixed(0)}%)`;
+            ? `Fight Within Range! Synchronizing Resonance... ${activeEv.chargeProgress.toFixed(0)}%`
+            : `Resonance Decaying! Return to Totem Range! (${activeEv.chargeProgress.toFixed(0)}%)`;
+        } else if (activeEv.type === 'secondary_totem') {
+          const kills = activeEv.killCount || 0;
+          const curWave = Math.min(3, kills + 1);
+          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
+          this.eventProgressBar.style.backgroundColor = '#f59e0b';
+          this.eventBannerTitle.style.color = '#f59e0b';
+          this.eventBannerDesc.textContent = `Sequential Elite Trial: Defeat Elite ${curWave} of 3 (${kills}/3 Eliminated)`;
+        } else if (activeEv.type === 'dash_totem') {
+          const reached = activeEv.highestPlatformReached || 0;
+          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
+          this.eventProgressBar.style.backgroundColor = '#818cf8';
+          this.eventBannerTitle.style.color = '#818cf8';
+          this.eventBannerDesc.textContent = `Ascend the 5 Phase Platforms to Reach the Summit Core! [${reached}/5 Platforms Reached]`;
         } else {
           this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
           this.eventProgressBar.style.backgroundColor = '#fbbf24';
           this.eventBannerTitle.style.color = '#fbbf24';
-          const pDist = Math.hypot(p.pos.x - activeEv.pos.x, p.pos.y - activeEv.pos.y);
-          this.eventBannerDesc.textContent = pDist <= activeEv.radius
-            ? `Charging Orbital Uplink... ${activeEv.chargeProgress.toFixed(0)}% (Defend Beacon!)`
-            : `Conduit Signal Lost! Return to Beacon Pad! (${activeEv.chargeProgress.toFixed(0)}%)`;
+          if (!activeEv.payloadCollected) {
+            const itemDist = activeEv.payloadPos
+              ? Math.round(Math.hypot(p.pos.x - activeEv.payloadPos.x, p.pos.y - activeEv.payloadPos.y))
+              : 0;
+            this.eventBannerDesc.textContent = `Follow the Vertical Light Beam to Collect the Quantum Core! (${itemDist}m)`;
+          } else {
+            const returnDist = Math.round(Math.hypot(p.pos.x - activeEv.pos.x, p.pos.y - activeEv.pos.y));
+            this.eventBannerDesc.textContent = `Deliver Quantum Core to the Uplink Conduit! (+25% Move Speed · Weapons Offline · ${returnDist}m)`;
+          }
         }
       } else {
         this.elEventBanner.classList.add('hidden');
       }
     }
 
-    // 7. 3-Choice Buff Selection Pause Modal
+    // 7. 3-Choice Buff / Augment Selection Pause Modal
     if (state.isPausedForBuffChoice) {
       if (document.pointerLockElement) document.exitPointerLock?.();
+      const firstDef = state.currentBuffChoices.length > 0 ? BUFF_REGISTRY[state.currentBuffChoices[0]] : undefined;
+      const isAugmentDraft = !!(firstDef?.exclusiveEvent || firstDef?.enhancesSkillSlot || firstDef?.replacesSkillSlot);
       const buffTitleEl = this.elBuffChoiceModal.querySelector('h2');
       if (buffTitleEl) {
-        buffTitleEl.textContent = p.heroId === 'doctor' ? 'SELECT DOCTOR AUGMENTATION' : 'SELECT COMMANDER AUGMENTATION';
+        if (isAugmentDraft) {
+          buffTitleEl.textContent = p.heroId === 'doctor' ? 'SELECT DOCTOR AUGMENTATION' : 'SELECT COMMANDER AUGMENTATION';
+        } else {
+          buffTitleEl.textContent = 'SELECT A BUFF (CHOOSE ONE)';
+        }
       }
       this.elBuffChoiceModal.classList.remove('hidden');
       const key = state.currentBuffChoices.join(',');
@@ -2857,12 +2979,20 @@ export class UIManager {
         : buffStacks[buffId] || 0;
 
       const isSkillSwap = !!(def.replacesSkillSlot && def.replacementSkillId);
+      const isAugmentCard = !!(def.exclusiveEvent || def.enhancesSkillSlot || isSkillSwap);
+      const maxCapLabel = def.maxStacks !== undefined ? `/${def.maxStacks}` : '';
       const stackLabel = isSkillSwap
         ? `★ REPLACES ${def.replacesSkillSlot!.toUpperCase()}`
-        : curCount > 0
-        ? `STACK x${curCount} → x${curCount + 1}`
-        : 'NEW AUGMENT';
-      const buttonLabel = isSkillSwap ? 'Install & Equip Skill' : 'Install Augment';
+        : isAugmentCard
+          ? curCount > 0
+            ? `STACK x${curCount} → x${curCount + 1}`
+            : 'NEW AUGMENT'
+          : curCount > 0
+            ? `STACK x${curCount} → x${curCount + 1}${maxCapLabel}`
+            : def.maxStacks !== undefined
+              ? `NEW BUFF (MAX ${def.maxStacks})`
+              : 'NEW BUFF';
+      const buttonLabel = isSkillSwap ? 'Install & Equip Skill' : isAugmentCard ? 'Install Augment' : 'Select Buff';
       const cardBorder = isSkillSwap
         ? 'border: 2px solid #f59e0b; box-shadow: 0 0 18px rgba(245, 158, 11, 0.45);'
         : '';
@@ -2925,8 +3055,8 @@ export class UIManager {
       const tHtml = timer && timer > 0 ? `<span class="hud-buff-timer">${timer.toFixed(1)}</span>` : '';
       chips.push(
         `<div class="hud-buff-chip ${cls}" title="${title}">` +
-          `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${svgPath}</svg>` +
-          `${tHtml}` +
+        `<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">${svgPath}</svg>` +
+        `${tHtml}` +
         `</div>`
       );
     };
@@ -2940,15 +3070,39 @@ export class UIManager {
     if (p.inSanctuaryCross) {
       mkIcon('<path d="M12 5v14M5 12h14"/>', 'is-buff', 'Sacred Field: +HP/s Healing & Empowered Strikes');
     }
+    if ((p.tempShieldAmount ?? 0) > 0 && (p.tempShieldTimer ?? 0) > 0) {
+      mkIcon('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', 'is-gold', `Barrier Shield: ${Math.round(p.tempShieldAmount)} HP (${(p.tempShieldTimer ?? 0).toFixed(1)}s)`, p.tempShieldTimer);
+    }
+    if ((p.bloodRushTimer ?? 0) > 0) {
+      mkIcon('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>', 'is-gold', `Blood Rush: +LMB Atk Spd & Move Spd (${(p.bloodRushTimer ?? 0).toFixed(1)}s)`, p.bloodRushTimer);
+    }
+    if ((p.retaliationTimer ?? 0) > 0) {
+      mkIcon('<path d="M12 2l3 7h7l-5.5 4.5 2 7L12 16l-6.5 4.5 2-7L2 9h7z"/>', 'is-buff', `Retaliation: +${(p.buffs.buff_retaliation || 0) * 2}% Damage (${(p.retaliationTimer ?? 0).toFixed(1)}s)`, p.retaliationTimer);
+    }
+    if ((p.killingMomentumTimer ?? 0) > 0 && (p.killingMomentumStacks ?? 0) > 0) {
+      mkIcon('<polyline points="13 17 18 12 13 7"/><polyline points="6 17 11 12 6 7"/>', 'is-buff', `Killing Momentum x${p.killingMomentumStacks} (${(p.killingMomentumTimer ?? 0).toFixed(1)}s)`, p.killingMomentumTimer);
+    }
+    if ((p.survivalInstinctTimer ?? 0) > 0) {
+      mkIcon('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', 'is-gold', `Survival Instinct: Stun Immune + Speed (${(p.survivalInstinctTimer ?? 0).toFixed(1)}s)`, p.survivalInstinctTimer);
+    }
+    if (p.health > 0 && p.health / Math.max(1, p.maxHealth) < 0.40 && (p.buffs.buff_final_stand || 0) > 0) {
+      const fs = p.buffs.buff_final_stand || 0;
+      mkIcon('<polygon points="12 2 15 9 22 9 16.5 14 18.5 21 12 17 5.5 21 7.5 14 2 9 9 9"/>', 'is-debuff', `Final Stand Active: +${fs * 3}% DMG & +${fs * 2}% DR`);
+    }
     if (p.defenseBonusTimer > 0) {
       mkIcon('<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', 'is-buff', `Defensive Resolve: -35% Damage Taken (${p.defenseBonusTimer.toFixed(1)}s)`, p.defenseBonusTimer);
     }
-    if (p.heroId === 'doctor' && p.health < p.maxHealth) {
-      const rate = p.health < p.maxHealth * 0.5 ? '+7 HP/s' : '+3 HP/s';
-      mkIcon('<path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"/>', 'is-buff', `Bio-Triage Active (${rate})`);
+    if (p.inWater) {
+      mkIcon('<path d="M2 12c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/><path d="M2 17c2-2 4-2 6 0s4 2 6 0 4-2 6 0"/>', 'is-debuff', 'In Water: 68% Movement Speed (-32%)');
+    }
+    if ((p.maxAirJumps ?? 0) > 0) {
+      mkIcon('<polyline points="17 11 12 6 7 11"/><polyline points="17 17 12 12 7 17"/>', 'is-gold', `Air Jumps Ready: ${p.airJumpsRemaining ?? 0}/${p.maxAirJumps}`);
     }
     if ((p.toxicRainTimer ?? 0) > 0) {
       mkIcon('<path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/>', 'is-debuff', `Environmental Hazard (${(p.toxicRainTimer ?? 0).toFixed(1)}s)`, p.toxicRainTimer);
+    }
+    if (p.isCarryingEventPayload) {
+      mkIcon('<circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3"/>', 'is-gold', 'Carrying Quantum Core: +25% Move Speed (Weapons Offline)');
     }
 
     const html = chips.join('');
@@ -2958,9 +3112,26 @@ export class UIManager {
     }
   }
 
-  private updateItemsTray(items: Record<ItemId, number>): void {
+  private updateItemsTray(items: Record<ItemId, number>, buffs?: Record<BuffId, number>): void {
     let html = '';
     let countAny = false;
+
+    if (buffs) {
+      for (const [id, stack] of Object.entries(buffs) as [BuffId, number][]) {
+        if (stack > 0) {
+          const def = BUFF_REGISTRY[id];
+          if (!def || def.exclusiveEvent || def.replacesSkillSlot || def.enhancesSkillSlot) continue;
+          countAny = true;
+          const capText = def.maxStacks !== undefined ? ` / Max ${def.maxStacks}` : '';
+          html += `
+            <div class="item-badge" title="${def.name} (x${stack}${capText}): ${def.description}">
+              <img src="${def.icon}" alt="${def.name}" />
+              <span class="item-stack-counter">x${stack}</span>
+            </div>
+          `;
+        }
+      }
+    }
 
     for (const [id, stack] of Object.entries(items) as [ItemId, number][]) {
       if (stack > 0) {
@@ -2976,7 +3147,7 @@ export class UIManager {
       }
     }
 
-    const emptyHtml = '<div class="hud-items-empty" title="No passive items collected yet">0</div>';
+    const emptyHtml = '<div class="hud-items-empty" title="No buffs collected yet">0</div>';
     const targetHtml = countAny ? html : emptyHtml;
     if (targetHtml !== this.lastItemsHtml) {
       this.elItemsTray.innerHTML = targetHtml;
@@ -3160,6 +3331,22 @@ export class UIManager {
     ctx.fill();
     ctx.shadowBlur = 0;
 
+    // Ultimate Event Quantum Core Beacon on Minimap (clamped to rim so direction is always visible)
+    for (let i = 0; i < state.worldEvents.length; i++) {
+      const ev = state.worldEvents[i];
+      if (ev.type === 'orbital_uplink' && ev.isActive && !ev.isCompleted) {
+        const targetPos = !ev.payloadCollected && ev.payloadPos ? ev.payloadPos : ev.pos;
+        const corePt = projectPoint(targetPos.x, targetPos.y, true);
+        ctx.fillStyle = '#38bdf8';
+        ctx.shadowColor = '#38bdf8';
+        ctx.shadowBlur = 10;
+        ctx.beginPath();
+        ctx.arc(corePt.x, corePt.y, 5.2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+    }
+
     // Player Directional Chevron at Center
     const facingAngle = p.facing === 'right' ? Math.PI * 0.5 : p.facing === 'left' ? -Math.PI * 0.5 : p.facing === 'front' ? Math.PI : 0;
     ctx.save();
@@ -3242,7 +3429,7 @@ export class UIManager {
           <div class="hud-inv-stat-box"><span>Attack Speed</span><span>${Math.round((stats.attackSpeedMultiplier || 1) * 100)}%</span></div>
           <div class="hud-inv-stat-box"><span>Move Speed</span><span>${Math.round(stats.moveSpeed)}</span></div>
           <div class="hud-inv-stat-box"><span>Crit Chance</span><span>${Math.round(stats.critChance * 100)}%</span></div>
-          <div class="hud-inv-stat-box"><span>Extra Projectiles</span><span>+${stats.extraProjectiles || 0}</span></div>
+          <div class="hud-inv-stat-box"><span>Extra Projectiles</span><span>LMB +${stats.extraLmbProjectiles || 0} / RMB +${stats.extraRmbProjectiles || 0}</span></div>
           <div class="hud-inv-stat-box"><span>Genes Harvested</span><span>${p.currency}</span></div>
         </div>
       </div>
@@ -3273,15 +3460,19 @@ export class UIManager {
         .join('');
       this.elCodexBody.innerHTML = `<div class="hud-codex-list">${cards}</div>`;
     } else if (this.currentCodexTab === 'items') {
-      const items = Object.values(ITEM_REGISTRY)
-        .map(it => `<div class="hud-codex-entry"><img src="${it.icon}" alt="${it.name}"/><div><div class="hud-codex-entry-meta">PASSIVE ITEM</div><div class="hud-codex-entry-name">${it.name}</div><div class="hud-codex-entry-desc">${it.description}</div></div></div>`)
+      const catalogBuffs = Object.values(BUFF_REGISTRY)
+        .filter((b) => !b.exclusiveEvent && !b.replacesSkillSlot && !b.enhancesSkillSlot && b.isAttributeUpgrade !== false)
+        .map(
+          (b) =>
+            `<div class="hud-codex-entry"><img src="${b.icon}" alt="${b.name}"/><div><div class="hud-codex-entry-meta">${b.category}${b.maxStacks !== undefined ? ` · MAX ${b.maxStacks}` : ' · UNCAPPED'}</div><div class="hud-codex-entry-name">${b.name}</div><div class="hud-codex-entry-desc">${b.description}</div></div></div>`
+        )
         .join('');
-      const buffs = getAllPassiveBuffsCatalog().passiveBuffs
+      const augments = getAllPassiveBuffsCatalog().passiveBuffs
         .map(b => `<div class="hud-codex-entry"><img src="${b.icon}" alt="${b.name}"/><div><div class="hud-codex-entry-meta">${b.slotLabel}</div><div class="hud-codex-entry-name">${b.name}</div><div class="hud-codex-entry-desc">${b.description}</div></div></div>`)
         .join('');
       this.elCodexBody.innerHTML = `
-        <div><div class="hud-codex-entry-meta" style="margin-bottom:6px;">PASSIVE FIELD ITEMS</div><div class="hud-codex-list">${items}</div></div>
-        <div><div class="hud-codex-entry-meta" style="margin-bottom:6px;">SURVIVOR UPGRADES</div><div class="hud-codex-list">${buffs}</div></div>
+        <div><div class="hud-codex-entry-meta" style="margin-bottom:6px;">ACTIVE BUFF CATALOG (${Object.values(BUFF_REGISTRY).filter((b) => !b.exclusiveEvent && !b.replacesSkillSlot && !b.enhancesSkillSlot && b.isAttributeUpgrade !== false).length} BUFFS)</div><div class="hud-codex-list">${catalogBuffs}</div></div>
+        <div><div class="hud-codex-entry-meta" style="margin-bottom:6px;">SKILL AUGMENTS</div><div class="hud-codex-list">${augments}</div></div>
       `;
     } else {
       const transcript = this.dialogueController?.getTranscript() || [];
@@ -3289,30 +3480,30 @@ export class UIManager {
 
       const loreHtml = unlockedLore.length
         ? `<div><div class="hud-codex-entry-meta" style="margin-bottom:6px;">UNLOCKED NARRATIVE INTEL</div><div class="hud-codex-list">${unlockedLore
-            .map(
-              (l) =>
-                `<div class="hud-codex-entry hud-codex-comms-lore"><img src="/assets/overseer/overseer_portrait.png" alt="Intel"/><div><div class="hud-codex-entry-meta">FIELD ARCHIVE · ${escapeHtml(l.id)}</div><div class="hud-codex-entry-name">${escapeHtml(l.title)}</div><div class="hud-codex-entry-desc">${escapeHtml(l.summary)}</div></div></div>`
-            )
-            .join('')}</div></div>`
+          .map(
+            (l) =>
+              `<div class="hud-codex-entry hud-codex-comms-lore"><img src="/assets/overseer/overseer_portrait.png" alt="Intel"/><div><div class="hud-codex-entry-meta">FIELD ARCHIVE · ${escapeHtml(l.id)}</div><div class="hud-codex-entry-name">${escapeHtml(l.title)}</div><div class="hud-codex-entry-desc">${escapeHtml(l.summary)}</div></div></div>`
+          )
+          .join('')}</div></div>`
         : '';
 
       const logHtml = transcript.length
         ? transcript
-            .map((entry) => {
-              const portrait =
-                entry.speaker === 'doctor'
-                  ? '/assets/doctor/doctor_portrait.png'
-                  : entry.speaker === 'overseer'
+          .map((entry) => {
+            const portrait =
+              entry.speaker === 'doctor'
+                ? '/assets/doctor/doctor_portrait.png'
+                : entry.speaker === 'overseer'
                   ? '/assets/overseer/overseer_portrait.png'
                   : '/assets/commander/commander_portrait.png';
-              const roleBadge =
-                entry.role === 'field_operative'
-                  ? 'FIELD'
-                  : entry.role === 'local_companion'
+            const roleBadge =
+              entry.role === 'field_operative'
+                ? 'FIELD'
+                : entry.role === 'local_companion'
                   ? 'LOCAL'
                   : 'COMMS';
-              const modeBadge = entry.voiced ? 'VOICED' : 'TEXT';
-              return `
+            const modeBadge = entry.voiced ? 'VOICED' : 'TEXT';
+            return `
                 <div class="hud-codex-entry hud-codex-comms-entry speaker-${entry.speaker}">
                   <img src="${portrait}" alt="${escapeHtml(entry.speaker)}"/>
                   <div>
@@ -3321,8 +3512,8 @@ export class UIManager {
                   </div>
                 </div>
               `;
-            })
-            .join('')
+          })
+          .join('')
         : '<div class="hud-codex-entry-desc">No radio transmissions logged yet in this mission. Leave the crash perimeter to establish comms.</div>';
 
       this.elCodexBody.innerHTML = `
@@ -3339,18 +3530,100 @@ export class UIManager {
     this.dialogueController = controller;
     this.populateDevDialogueSelect();
     this.updateCommsPresentation(controller.getPresentationState());
+    this.updateQuestTracker(controller.getActiveRunObjectives());
     this.refreshDevDialogueTester();
   }
 
+  public updateQuestTracker(objectives: UnlockedCodexLore[]): void {
+    if (!this.elQuestTracker || !this.elQuestTrackerList) return;
+    if (!objectives || objectives.length === 0) {
+      if (this.lastQuestTrackerKey !== '') {
+        this.lastQuestTrackerKey = '';
+        this.elQuestTrackerList.innerHTML = '';
+      }
+      this.elQuestTracker.classList.add('hidden');
+      return;
+    }
+
+    const key = objectives.map((o) => `${o.id}:${o.title}`).join('|');
+    this.elQuestTracker.classList.remove('hidden');
+    if (key === this.lastQuestTrackerKey) return;
+    this.lastQuestTrackerKey = key;
+
+    this.elQuestTrackerList.innerHTML = objectives
+      .map(
+        (obj) => `
+          <div class="hud-quest-item" data-quest-id="${escapeHtml(obj.id)}">
+            <div class="hud-quest-item-title">${escapeHtml(obj.title)}</div>
+            <div class="hud-quest-item-desc">${escapeHtml(obj.summary)}</div>
+          </div>
+        `
+      )
+      .join('');
+  }
+
+  public showOverseerTacticalComm(text: string, durationSec: number = 6.5): void {
+    if (!this.elCommsPanel) return;
+    // Do not overwrite an actively speaking narrative conversation
+    if (this.lastDialoguePresentation && this.lastDialoguePresentation.visible && this.lastDialoguePresentation.speaker) {
+      return;
+    }
+
+    if (this.tacticalCommTimer !== null) {
+      window.clearTimeout(this.tacticalCommTimer);
+      this.tacticalCommTimer = null;
+    }
+
+    this.elCommsPanel.classList.remove('hidden', 'is-suspended');
+    this.elCommsPanel.setAttribute('data-speaker', 'overseer');
+    if (this.elCommsPortrait) {
+      this.elCommsPortrait.src = '/assets/overseer/overseer_portrait.png';
+      this.elCommsPortrait.alt = 'OVERSEER';
+    }
+    if (this.elCommsSpeaker) {
+      this.elCommsSpeaker.textContent = 'OVERSEER';
+    }
+    if (this.elCommsRole) {
+      this.elCommsRole.textContent = 'TACTICAL GUIDE';
+    }
+    if (this.elCommsMode) {
+      this.elCommsMode.textContent = 'TEXT COMM';
+      this.elCommsMode.classList.remove('is-voiced');
+    }
+    if (this.elCommsTurn) {
+      this.elCommsTurn.textContent = '1/1';
+    }
+    if (this.elCommsText) {
+      this.elCommsText.textContent = text;
+      this.elCommsText.classList.remove('hidden');
+    }
+    this.lastCommsRenderKey = `tactical_overseer|${text}`;
+
+    this.tacticalCommTimer = window.setTimeout(() => {
+      this.tacticalCommTimer = null;
+      if (!this.lastDialoguePresentation || !this.lastDialoguePresentation.visible) {
+        this.elCommsPanel.classList.add('hidden');
+        this.lastCommsRenderKey = '';
+      }
+    }, Math.max(2000, Math.round(durationSec * 1000)));
+  }
+
   public updateCommsPresentation(comms: CommsPresentationState): void {
+    this.lastDialoguePresentation = comms;
     if (!this.elCommsPanel) return;
 
     const hideForOverlay = !comms.visible || !comms.speaker;
 
     if (hideForOverlay) {
+      if (this.tacticalCommTimer !== null) return;
       this.elCommsPanel.classList.add('hidden');
       this.lastCommsRenderKey = '';
       return;
+    }
+
+    if (this.tacticalCommTimer !== null) {
+      window.clearTimeout(this.tacticalCommTimer);
+      this.tacticalCommTimer = null;
     }
 
     const renderKey = `${comms.conversationId}|${comms.turnIndex}|${comms.speaker}|${comms.role}|${comms.isSubtitlesEnabled}|${comms.isVoicedPlayback}|${comms.lifecycleState}|${comms.text}`;
@@ -3379,8 +3652,8 @@ export class UIManager {
         comms.lifecycleState === 'suspended'
           ? 'PAUSED'
           : comms.isVoicedPlayback
-          ? 'VOICED'
-          : 'TEXT FALLBACK';
+            ? 'VOICED'
+            : 'TEXT FALLBACK';
       this.elCommsMode.classList.toggle('is-voiced', comms.isVoicedPlayback);
     }
     if (this.elCommsTurn) {
@@ -3468,7 +3741,7 @@ export class UIManager {
       ? `${dbg.activeId} (Turn ${dbg.turnIndex + 1}/${Math.max(1, pres.turnCount)}${pres.speaker ? ` · ${pres.speakerDisplayName}` : ''})`
       : 'None';
     const queueTxt = dbg.queueIds.length ? dbg.queueIds.join(', ') : 'Empty';
-    const audioTxt = `${dbg.voicedBufferedCount}/${dbg.voicedTotalEnabledUrls} enabled WAVs buffered`;
+    const audioTxt = `${dbg.voicedBufferedCount}/${dbg.voicedTotalEnabledUrls} enabled voice clips buffered`;
     this.elDevTesterStatus.innerHTML = `
       <div><strong>Map:</strong> ${escapeHtml(mapLabel)}</div>
       <div><strong>State:</strong> ${escapeHtml(dbg.lifecycleState)} · <strong>Active:</strong> ${escapeHtml(activeTxt)}</div>

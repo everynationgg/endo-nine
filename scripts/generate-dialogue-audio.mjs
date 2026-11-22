@@ -59,20 +59,40 @@ function loadEnvFile(filePath) {
 function parseArgs(argv) {
   const args = {
     scene: null,
-    line: null,
+    lines: null,
     all: false,
     force: false,
-    dryRun: false
+    dryRun: false,
+    delayMs: 0
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--scene' && argv[i + 1]) args.scene = argv[++i];
-    else if (a === '--line' && argv[i + 1]) args.line = argv[++i];
-    else if (a === '--all') args.all = true;
+    else if (a === '--line' && argv[i + 1]) {
+      args.lines = new Set(
+        argv[++i]
+          .split(',')
+          .map((s) => s.trim())
+          .filter(Boolean)
+      );
+    } else if (a === '--all') args.all = true;
     else if (a === '--force') args.force = true;
     else if (a === '--dry-run') args.dryRun = true;
+    else if (a === '--delay-ms' && argv[i + 1]) args.delayMs = Math.max(0, Number(argv[++i]) || 0);
   }
   return args;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseRetryDelayMs(errText) {
+  const match = errText.match(/retry\s+in\s+(\d+(?:\.\d+)?)s/i);
+  if (match) {
+    return Math.ceil(parseFloat(match[1]) * 1000) + 2000;
+  }
+  return 25000;
 }
 
 function pcmToWavBuffer(pcmBuffer, sampleRate = 24000, channels = 1, bitsPerSample = 16) {
@@ -106,47 +126,58 @@ function computeWavDurationSec(wavBuffer) {
   return Math.max(0.5, Number((dataSize / byteRate).toFixed(2)));
 }
 
-async function synthesizeLineWithGemini(apiKey, model, turn) {
+async function synthesizeLineWithGemini(apiKey, model, turn, maxRetries = 5) {
   const profile = VOICE_PROFILES[turn.speaker] || VOICE_PROFILES.commander;
   const styleParts = [profile.persona, turn.direction ? `Delivery: ${turn.direction}` : ''].filter(Boolean);
   const styleText = styleParts.join(' ');
 
   const endpoint = 'https://generativelanguage.googleapis.com/v1beta/interactions';
-
-  const res = await fetch(endpoint, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey
-    },
-    body: JSON.stringify({
-      model,
-      input: [
-        {
-          type: 'user_input',
-          content: [
-            {
-              type: 'text',
-              text: turn.text,
-              annotations: [
-                {
-                  type: 'speech_metadata',
-                  style: styleText
-                }
-              ]
-            }
-          ]
-        }
-      ],
-      response_format: { type: 'audio' },
-      generation_config: {
-        speech_config: [{ voice: profile.voiceName }]
+  const payload = JSON.stringify({
+    model,
+    input: [
+      {
+        type: 'user_input',
+        content: [
+          {
+            type: 'text',
+            text: turn.text,
+            annotations: [
+              {
+                type: 'speech_metadata',
+                style: styleText
+              }
+            ]
+          }
+        ]
       }
-    })
+    ],
+    response_format: { type: 'audio' },
+    generation_config: {
+      speech_config: [{ voice: profile.voiceName }]
+    }
   });
 
-  if (!res.ok) {
+  let res;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    res = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey
+      },
+      body: payload
+    });
+
+    if (res.ok) break;
+
     const errText = await res.text();
+    const isDailyLimit = /requests per day|retry in \d+h/i.test(errText);
+    if (res.status === 429 && !isDailyLimit && attempt < maxRetries) {
+      const waitMs = parseRetryDelayMs(errText);
+      console.log(`[rate-limit] 429 for ${turn.id}, waiting ${Math.round(waitMs / 1000)}s before retry ${attempt + 1}/${maxRetries}...`);
+      await sleep(waitMs);
+      continue;
+    }
     throw new Error(`Gemini TTS API error (${res.status}): ${errText}`);
   }
 
@@ -182,8 +213,8 @@ async function main() {
   loadEnvFile(path.resolve('.env.local'));
 
   const args = parseArgs(process.argv.slice(2));
-  if (!args.scene && !args.line && !args.all) {
-    console.error('Specify --scene <id>, --line <lineId>, or --all');
+  if (!args.scene && !args.lines && !args.all) {
+    console.error('Specify --scene <id>, --line <lineId[,lineId2,...]>, or --all');
     process.exit(1);
   }
 
@@ -201,74 +232,79 @@ async function main() {
   let generated = 0;
   let manifestUpdated = false;
 
-  for (const conv of manifest.conversations) {
-    if (args.scene && conv.id !== args.scene) continue;
+  try {
+    for (const conv of manifest.conversations) {
+      if (args.scene && conv.id !== args.scene) continue;
 
-    for (const turns of Object.values(conv.variants || {})) {
-      if (!Array.isArray(turns)) continue;
+      for (const turns of Object.values(conv.variants || {})) {
+        if (!Array.isArray(turns)) continue;
 
-      for (const turn of turns) {
-        if (args.line && turn.id !== args.line) continue;
-        if (!turn.audioUrl) continue;
+        for (const turn of turns) {
+          if (args.lines && !args.lines.has(turn.id)) continue;
+          if (!turn.audioUrl) continue;
 
-        const relUrl = turn.audioUrl.replace(/^\//, '');
-        const outPath = path.join(PUBLIC_ROOT, relUrl);
-        if (seenAudioPaths.has(outPath)) continue;
-        seenAudioPaths.add(outPath);
+          const relUrl = turn.audioUrl.replace(/^\//, '');
+          const outPath = path.join(PUBLIC_ROOT, relUrl);
+          if (seenAudioPaths.has(outPath)) continue;
+          seenAudioPaths.add(outPath);
 
-        processed++;
-        if (fs.existsSync(outPath) && !args.force && !args.line) {
-          const existing = fs.readFileSync(outPath);
-          const dur = computeWavDurationSec(existing);
+          processed++;
+          if (fs.existsSync(outPath) && !args.force && !args.lines) {
+            const existing = fs.readFileSync(outPath);
+            const dur = computeWavDurationSec(existing);
+            if (turn.durationSec !== dur) {
+              turn.durationSec = dur;
+              manifestUpdated = true;
+            }
+            console.log(`[skip] ${turn.id} (${turn.speaker}) -> exists (${dur}s)`);
+            continue;
+          }
+
+          if (args.dryRun) {
+            console.log(
+              `[dry-run] ${turn.id} (${turn.speaker} / ${VOICE_PROFILES[turn.speaker]?.voiceName}) -> ${outPath}\n  "${turn.text}"`
+            );
+            continue;
+          }
+
+          if (generated > 0 && args.delayMs > 0) {
+            await sleep(args.delayMs);
+          }
+
+          fs.mkdirSync(path.dirname(outPath), { recursive: true });
+          console.log(`[tts] Generating ${turn.id} (${turn.speaker})...`);
+          const wavBuf = await synthesizeLineWithGemini(apiKey, DEFAULT_MODEL, turn);
+          fs.writeFileSync(outPath, wavBuf);
+
+          const dur = computeWavDurationSec(wavBuf);
           if (turn.durationSec !== dur) {
             turn.durationSec = dur;
             manifestUpdated = true;
           }
-          console.log(`[skip] ${turn.id} (${turn.speaker}) -> exists (${dur}s)`);
-          continue;
+          generated++;
+          console.log(`[ok]  ${turn.id} -> ${relUrl} (${dur}s)`);
         }
-
-        if (args.dryRun) {
-          console.log(
-            `[dry-run] ${turn.id} (${turn.speaker} / ${VOICE_PROFILES[turn.speaker]?.voiceName}) -> ${outPath}\n  "${turn.text}"`
-          );
-          continue;
-        }
-
-        fs.mkdirSync(path.dirname(outPath), { recursive: true });
-        console.log(`[tts] Generating ${turn.id} (${turn.speaker})...`);
-        const wavBuf = await synthesizeLineWithGemini(apiKey, DEFAULT_MODEL, turn);
-        fs.writeFileSync(outPath, wavBuf);
-
-        const dur = computeWavDurationSec(wavBuf);
-        if (turn.durationSec !== dur) {
-          turn.durationSec = dur;
-          manifestUpdated = true;
-        }
-        generated++;
-        console.log(`[ok]  ${turn.id} -> ${relUrl} (${dur}s)`);
       }
     }
-  }
-
-  // Sync shared audioUrl durations across variants (e.g. Scene 07 shared lines)
-  if (manifestUpdated) {
-    const durationByUrl = new Map();
-    for (const conv of manifest.conversations) {
-      for (const turns of Object.values(conv.variants || {})) {
-        if (!Array.isArray(turns)) continue;
-        for (const turn of turns) {
-          const outPath = path.join(PUBLIC_ROOT, turn.audioUrl.replace(/^\//, ''));
-          if (fs.existsSync(outPath)) {
-            const dur = computeWavDurationSec(fs.readFileSync(outPath));
-            durationByUrl.set(turn.audioUrl, dur);
-            turn.durationSec = dur;
+  } finally {
+    // Sync shared audioUrl durations across variants (e.g. Scene 07 shared lines)
+    if (manifestUpdated) {
+      for (const conv of manifest.conversations) {
+        for (const turns of Object.values(conv.variants || {})) {
+          if (!Array.isArray(turns)) continue;
+          for (const turn of turns) {
+            if (!turn.audioUrl) continue;
+            const outPath = path.join(PUBLIC_ROOT, turn.audioUrl.replace(/^\//, ''));
+            if (fs.existsSync(outPath)) {
+              const dur = computeWavDurationSec(fs.readFileSync(outPath));
+              turn.durationSec = dur;
+            }
           }
         }
       }
+      fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+      console.log(`[manifest] Updated durations in ${MANIFEST_PATH}`);
     }
-    fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
-    console.log(`[manifest] Updated durations in ${MANIFEST_PATH}`);
   }
 
   console.log(`Done. Scanned ${processed} unique lines, generated ${generated} WAV files.`);

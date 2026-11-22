@@ -17,13 +17,60 @@ window.addEventListener('DOMContentLoaded', async () => {
   const narrativeObserver = new NarrativeObserver();
   const dialogueDirector = new DialogueDirector(soundManager.voice, {
     onPresentationChanged: (presentation) => uiManager.updateCommsPresentation(presentation),
-    onTranscriptChanged: () => uiManager.refreshCommsLogIfOpen()
+    onTranscriptChanged: () => uiManager.refreshCommsLogIfOpen(),
+    onObjectiveUnlocked: (lore) => uiManager.showPickupNotification(`★ OBJECTIVE: ${lore.title}`),
+    onObjectivesChanged: (objectives) => uiManager.updateQuestTracker(objectives),
+    onConversationCompleted: (conversationId) => {
+      if (conversationId === 'scene_01_first_steps') {
+        simulation.unlockStage1EnemySpawning('opening_dialogue_completed');
+      } else if (conversationId === 'event_03a_major_earthquake') {
+        dialogueDirector.notifySignal(
+          'fourth_enhancement_revelation',
+          {
+            originStage: simulation.state.stageNumber || 1,
+            triggerId: 'fourth_enhancement_revelation',
+            facts: {}
+          },
+          simulation.state
+        );
+      } else if (conversationId === 'event_05_tower_restoration_refreeze') {
+        dialogueDirector.notifySignal(
+          'boss_defeated_aftermath',
+          {
+            originStage: simulation.state.stageNumber || 1,
+            triggerId: 'boss_defeated_aftermath',
+            facts: {}
+          },
+          simulation.state
+        );
+        dialogueDirector.notifySignal(
+          'stage_leaving',
+          {
+            originStage: simulation.state.stageNumber || 1,
+            triggerId: 'stage_leaving',
+            facts: {}
+          },
+          simulation.state
+        );
+      }
+    },
+    onConversationLeadIn: (conversationId) => {
+      if (conversationId === 'event_02_first_earthquake') {
+        app.triggerEarthquake('moderate');
+      } else if (conversationId === 'event_03a_major_earthquake') {
+        app.triggerEarthquake('major');
+      }
+    }
   });
 
   app.setNarrativeSystems(narrativeObserver, dialogueDirector);
+  simulation.setEssentialDialogueBusyChecker(() =>
+    dialogueDirector.isEssentialStage1DepartureDialogueBusy()
+  );
   (window as any).__app = app;
   (window as any).__sim = simulation;
   (window as any).__ui = uiManager;
+  (window as any).__soundManager = soundManager;
   (window as any).__dialogue = dialogueDirector;
   (window as any).__narrativeObserver = narrativeObserver;
   (window as any).gameApp = app;
@@ -48,6 +95,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     resetSavePersistence: () => dialogueDirector.resetSavePersistence(),
     getTranscript: () => dialogueDirector.getTranscript(),
     getUnlockedCodexLore: () => dialogueDirector.getUnlockedCodexLore(),
+    getActiveRunObjectives: () => dialogueDirector.getActiveRunObjectives(),
     getPresentationState: () => dialogueDirector.getPresentationState(),
     getDebugInfo: () => dialogueDirector.getDebugInfo(),
     isCustomTestMapActive: () =>
@@ -75,6 +123,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     if (settings.use3DCommander !== undefined) {
       app.setUse3DCommander(settings.use3DCommander);
     }
+    app.setGraphicsQuality(settings.graphicsQuality || 'medium');
     soundManager.setMuted(settings.isMuted);
     soundManager.setMasterVolume(settings.masterVolume);
     soundManager.setVoiceVolume(settings.voiceVolume ?? 0.95);
@@ -85,6 +134,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   uiManager.onSettingsChangedCallback = applySettings;
   uiManager.onExitToMenuCallback = () => {
+    app.resetRegionalFreeze();
     dialogueDirector.endRun('menu');
   };
   applySettings(uiManager.settings);
@@ -100,9 +150,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     const res = await app.loadTestMap(file, scaleMode);
     return `${res.fileName} (${res.triangleCount.toLocaleString()} tris)`;
   };
-  uiManager.onQuickLoadSketchupCallback = async (scaleMode) => {
-    const res = await app.loadTestMapUrl('/assets/models/Untitled.glb', 'Untitled.glb', scaleMode);
-    return `${res.fileName} (${res.triangleCount.toLocaleString()} tris)`;
+  uiManager.onLoadBigMapCallback = async (scaleMode) => {
+    const res = await app.loadTestMapUrl('/assets/maps/Blenderrr.glb', 'Blenderrr.glb', scaleMode);
+    return `${res.fileName} (${res.worldWidth}x${res.worldHeight}, ${res.triangleCount.toLocaleString()} tris)`;
   };
   uiManager.onClearTestMapCallback = () => {
     app.clearTestMap();

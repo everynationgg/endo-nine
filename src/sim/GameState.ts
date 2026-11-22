@@ -25,6 +25,8 @@ import {
 } from './types';
 import { HERO_COMMANDER, HERO_REGISTRY } from './HeroDefs';
 import { calculateStats, SeededRandom, ALL_BUFF_IDS } from './ItemDefs';
+import { createRunRngStreams, generateFreshRunSeed } from './RngStreams';
+import type { SceneDirectorReport } from './SceneDirector';
 import { COMMANDER_DEFAULT_SKILLS, DOCTOR_DEFAULT_SKILLS } from './SkillDefs';
 import { DOCTOR_CONFIG } from './DoctorConfig';
 import { TerrainSystem } from './TerrainSystem';
@@ -35,6 +37,8 @@ import type {
   StageProfileKey
 } from '../dev/StageConfig';
 import { formatObstacleDisplayName } from '../dev/StageConfig';
+import { getStageArtifactPolicy, isStage1EnhancementCategory } from './StageProgressionPolicy';
+import type { WorldEventType } from './types';
 
 export class GameState {
   // Compact, vertically layered 3D world (RoR2 scale: 3600x3600, 600+ unit verticality)
@@ -42,6 +46,13 @@ export class GameState {
   public worldHeight: number = 3600;
 
   public rng: SeededRandom;
+  public runSeed: number;
+  public layoutSeed: number;
+  public pinnedLayoutSeed: number | null = null;
+  public layoutRng: SeededRandom;
+  public directorRng: SeededRandom;
+  public lootRng: SeededRandom;
+  public sceneDirectorReport: SceneDirectorReport | null = null;
   public terrain: TerrainSystem;
   public selectedHeroId: HeroId = 'commander';
   public player: PlayerState;
@@ -59,6 +70,8 @@ export class GameState {
   public fallingCrosses: FallingCrossState[] = [];
   public pods: OrganicPodState[] = [];
   public worldEvents: WorldEventState[] = [];
+  public completedEnhancementCategories: Set<WorldEventType> = new Set();
+  public enhancementCompletionOrder: WorldEventType[] = [];
   public artifact!: OverseerArtifactState;
   public currencyDrops: CurrencyDropState[] = [];
   public itemDrops: ItemDropState[] = [];
@@ -99,7 +112,13 @@ export class GameState {
           ? configSeed
           : (Date.now() ^ Math.floor(Math.random() * 0x7fffffff)) >>> 0;
     this.seed = actualSeed;
-    this.rng = new SeededRandom(actualSeed);
+    const streams = createRunRngStreams(actualSeed, this.pinnedLayoutSeed);
+    this.runSeed = streams.runSeed;
+    this.layoutSeed = streams.layoutSeed;
+    this.rng = streams.combat;
+    this.layoutRng = streams.layout;
+    this.directorRng = streams.director;
+    this.lootRng = streams.loot;
     this.selectedHeroId = heroId;
 
     const initialItems: Record<ItemId, number> = {
@@ -121,11 +140,14 @@ export class GameState {
       heroDef.baseMaxHealth,
       heroDef.baseMoveSpeed,
       initialItems,
-      initialBuffs
+      initialBuffs,
+      {
+        baseDamageReduction: heroDef.baseDamageReduction,
+        baseHealthRegenPercent: heroDef.baseHealthRegenPercent
+      }
     );
 
     const cx = this.worldWidth / 2; // 1800
-    const cy = this.worldHeight / 2; // 1800
 
     // Spawn in the safe crash-site starting deck facing north into the crater
     const spawnX = cx; // 1800
@@ -143,10 +165,15 @@ export class GameState {
       maxHealth: initialStats.maxHealth,
       baseMoveSpeed: heroDef.baseMoveSpeed,
       moveSpeed: initialStats.moveSpeed,
+      baseLmbDamage: heroDef.baseLmbDamage,
+      baseDamageReduction: heroDef.baseDamageReduction,
+      baseHealthRegenPercent: heroDef.baseHealthRegenPercent,
       defenseBonusTimer: 0,
       defenseBonusDuration: heroDef.defenseBonusDuration,
       defenseBonusReduction: heroDef.defenseBonusReduction,
       hurtInvulnTimer: 0,
+      enemyProjectileGraceTimer: 0,
+      hitByEnemyAttackInstanceIds: new Map<number, number>(),
       level: 1,
       xp: 0,
       xpNeeded: 8,
@@ -178,10 +205,42 @@ export class GameState {
       isGliding: false,
       jetpackFuel: 100,
       maxJetpackFuel: 100,
+      maxAirJumps: 0,
+      airJumpsRemaining: 0,
+      inWater: false,
       cameraYaw: 0,
       items: initialItems,
       buffs: initialBuffs,
       calculatedStats: initialStats,
+      tempShieldAmount: 0,
+      tempShieldTimer: 0,
+      emergencyBarrierCooldown: 0,
+      chainReactionCooldown: 0,
+      secondWindCooldown: 0,
+      staticDischargeCooldown: 0,
+      aftershockCooldown: 0,
+      reactiveShieldCooldown: 0,
+      survivalInstinctCooldown: 0,
+      bloodRushTimer: 0,
+      bloodRushRecentKills: 0,
+      bloodRushKillWindowTimer: 0,
+      combatFocusHitCount: 0,
+      killingMomentumTimer: 0,
+      killingMomentumStacks: 0,
+      retaliationTimer: 0,
+      survivalInstinctTimer: 0,
+      stunImmunityTimer: 0,
+      postDashSpeedTimer: 0,
+      lifeSiphonSecondTimer: 0,
+      lifeSiphonSecondAmount: 0,
+      wasAirborneLastFrame: false,
+      hasCollectedDoubleJumpPickup: false,
+      nonProjectileBuffCount: 0,
+      usedCombatFocusActivations: new Set<number>(),
+      activeTimedEffects: {},
+      timedEffectCooldowns: {},
+      aerialFocusLatched: false,
+      buffsBySource: { level: 0, pod: 0, elite: 0, event: 0 },
       energyShield: initialStats.maxEnergyShield,
       maxEnergyShield: initialStats.maxEnergyShield,
       beamChargeTimer: 0,
@@ -200,6 +259,18 @@ export class GameState {
     }
   }
 
+  public reseedRunStreams(forcedRunSeed?: number): void {
+    const nextSeed = forcedRunSeed !== undefined ? forcedRunSeed : generateFreshRunSeed();
+    const streams = createRunRngStreams(nextSeed, this.pinnedLayoutSeed);
+    this.seed = streams.runSeed;
+    this.runSeed = streams.runSeed;
+    this.layoutSeed = streams.layoutSeed;
+    this.rng = streams.combat;
+    this.layoutRng = streams.layout;
+    this.directorRng = streams.director;
+    this.lootRng = streams.loot;
+  }
+
   public selectHero(heroId: HeroId): void {
     this.selectedHeroId = heroId;
     const heroDef = HERO_REGISTRY[heroId] || HERO_COMMANDER;
@@ -207,7 +278,11 @@ export class GameState {
       heroDef.baseMaxHealth,
       heroDef.baseMoveSpeed,
       this.player.items,
-      this.player.buffs
+      this.player.buffs,
+      {
+        baseDamageReduction: heroDef.baseDamageReduction,
+        baseHealthRegenPercent: heroDef.baseHealthRegenPercent
+      }
     );
     this.player.heroId = heroId;
     this.player.baseMaxHealth = heroDef.baseMaxHealth;
@@ -215,10 +290,15 @@ export class GameState {
     this.player.health = initialStats.maxHealth;
     this.player.baseMoveSpeed = heroDef.baseMoveSpeed;
     this.player.moveSpeed = initialStats.moveSpeed;
+    this.player.baseLmbDamage = heroDef.baseLmbDamage;
+    this.player.baseDamageReduction = heroDef.baseDamageReduction;
+    this.player.baseHealthRegenPercent = heroDef.baseHealthRegenPercent;
     this.player.calculatedStats = initialStats;
     this.player.defenseBonusDuration = heroDef.defenseBonusDuration;
     this.player.defenseBonusReduction = heroDef.defenseBonusReduction;
     this.player.hurtInvulnTimer = 0;
+    this.player.enemyProjectileGraceTimer = 0;
+    this.player.hitByEnemyAttackInstanceIds = new Map<number, number>();
     this.player.pistolHand = 'left';
     this.player.dashShockwaveTriggered = false;
     this.player.dashHitIds = new Set<string>();
@@ -228,6 +308,40 @@ export class GameState {
     this.player.toxicRainTimer = 0;
     this.player.toxicRainTickTimer = 0;
     this.player.toxicRainOrigin = undefined;
+    this.player.maxAirJumps = initialStats.extraAirJumps;
+    this.player.airJumpsRemaining = initialStats.extraAirJumps;
+    this.player.maxJetpackFuel = 100 * initialStats.jetpackCapacityMultiplier;
+    this.player.jetpackFuel = this.player.maxJetpackFuel;
+    this.player.tempShieldAmount = 0;
+    this.player.tempShieldTimer = 0;
+    this.player.emergencyBarrierCooldown = 0;
+    this.player.chainReactionCooldown = 0;
+    this.player.secondWindCooldown = 0;
+    this.player.staticDischargeCooldown = 0;
+    this.player.aftershockCooldown = 0;
+    this.player.reactiveShieldCooldown = 0;
+    this.player.survivalInstinctCooldown = 0;
+    this.player.bloodRushTimer = 0;
+    this.player.bloodRushRecentKills = 0;
+    this.player.bloodRushKillWindowTimer = 0;
+    this.player.combatFocusHitCount = 0;
+    this.player.killingMomentumTimer = 0;
+    this.player.killingMomentumStacks = 0;
+    this.player.retaliationTimer = 0;
+    this.player.survivalInstinctTimer = 0;
+    this.player.stunImmunityTimer = 0;
+    this.player.postDashSpeedTimer = 0;
+    this.player.lifeSiphonSecondTimer = 0;
+    this.player.lifeSiphonSecondAmount = 0;
+    this.player.wasAirborneLastFrame = false;
+    this.player.hasCollectedDoubleJumpPickup = false;
+    this.player.nonProjectileBuffCount = 0;
+    this.player.usedCombatFocusActivations?.clear();
+    this.player.activeTimedEffects = {};
+    this.player.timedEffectCooldowns = {};
+    this.player.aerialFocusLatched = false;
+    this.player.buffsBySource = { level: 0, pod: 0, elite: 0, event: 0 };
+    this.player.inWater = false;
     this.frostTrails = [];
     this.vitalTethers = [];
     this.doctorDrones = [];
@@ -236,17 +350,17 @@ export class GameState {
     this.fallingCrosses = [];
     this.player.equippedSkills = heroId === 'doctor'
       ? {
-          primary: { ...DOCTOR_DEFAULT_SKILLS.primary },
-          secondary: { ...DOCTOR_DEFAULT_SKILLS.secondary },
-          utility: { ...DOCTOR_DEFAULT_SKILLS.utility },
-          ultimate: { ...DOCTOR_DEFAULT_SKILLS.ultimate }
-        }
+        primary: { ...DOCTOR_DEFAULT_SKILLS.primary },
+        secondary: { ...DOCTOR_DEFAULT_SKILLS.secondary },
+        utility: { ...DOCTOR_DEFAULT_SKILLS.utility },
+        ultimate: { ...DOCTOR_DEFAULT_SKILLS.ultimate }
+      }
       : {
-          primary: { ...COMMANDER_DEFAULT_SKILLS.primary },
-          secondary: { ...COMMANDER_DEFAULT_SKILLS.secondary },
-          utility: { ...COMMANDER_DEFAULT_SKILLS.utility },
-          ultimate: { ...COMMANDER_DEFAULT_SKILLS.ultimate }
-        };
+        primary: { ...COMMANDER_DEFAULT_SKILLS.primary },
+        secondary: { ...COMMANDER_DEFAULT_SKILLS.secondary },
+        utility: { ...COMMANDER_DEFAULT_SKILLS.utility },
+        ultimate: { ...COMMANDER_DEFAULT_SKILLS.ultimate }
+      };
     this.player.skillEnhancements = {};
   }
 
@@ -265,8 +379,19 @@ export class GameState {
       }
     }
 
+    const policy = getStageArtifactPolicy(this.stageNumber);
     this.artifact = {
       pos: { x: artX, y: artY },
+      phase: policy.mode === 'four_enhancements' ? 'locked_missing_modules' : 'charging',
+      requiredModules: policy.requiredEnhancementCategories.length,
+      recoveredModules: 0,
+      restorationTimer: 0,
+      teleportPrepTimer: 0,
+      teleportPrepDuration: 10.0,
+      awaitingDialogueSync: false,
+      refreezeTriggered: false,
+      prematureInteractWarned: false,
+      prematureInteractCooldown: 0,
       chargeProgress: 0,
       chargePerKill: 1.75, // 2x slower charge rate as requested
       isCharged: false,
@@ -278,6 +403,44 @@ export class GameState {
       isCompleted: false,
       radius: 55
     };
+  }
+
+  public resetArtifactProgression(): void {
+    this.completedEnhancementCategories.clear();
+    this.enhancementCompletionOrder = [];
+    this.hasBossSpawned = false;
+    this.isStageCleared = false;
+    if (!this.artifact) return;
+    const policy = getStageArtifactPolicy(this.stageNumber);
+    this.artifact.chargeProgress = 0;
+    this.artifact.isCharged = false;
+    this.artifact.isTeleporterReady = false;
+    this.artifact.isSummoning = false;
+    this.artifact.summonTimer = 0;
+    this.artifact.isBossSpawned = false;
+    this.artifact.isBossDefeated = false;
+    this.artifact.isCompleted = false;
+    this.artifact.restorationTimer = 0;
+    this.artifact.teleportPrepTimer = 0;
+    this.artifact.teleportPrepDuration = 10.0;
+    this.artifact.awaitingDialogueSync = false;
+    this.artifact.refreezeTriggered = false;
+    this.artifact.prematureInteractWarned = false;
+    this.artifact.prematureInteractCooldown = 0;
+    this.artifact.requiredModules = policy.requiredEnhancementCategories.length;
+    this.artifact.recoveredModules = 0;
+    this.artifact.phase = policy.mode === 'four_enhancements' ? 'locked_missing_modules' : 'charging';
+  }
+
+  public markEnhancementCategoryCompleted(type: WorldEventType): boolean {
+    if (!isStage1EnhancementCategory(type)) return false;
+    if (this.completedEnhancementCategories.has(type)) return false;
+    this.completedEnhancementCategories.add(type);
+    this.enhancementCompletionOrder.push(type);
+    if (this.artifact) {
+      this.artifact.recoveredModules = this.completedEnhancementCategories.size;
+    }
+    return true;
   }
 
   private generateWorldEvents(): void {
@@ -351,7 +514,7 @@ export class GameState {
         id: 'event_primal_totem',
         type: 'primal_totem',
         name: 'Ancient Bio-Resonance Totem',
-        description: 'Stand in pulsating aura to synchronize energy. Grants Basic Attack (LMB) Enhancements.',
+        description: 'Fight within the resonance field for the duration. Grants Basic Attack (LMB) Enhancements.',
         pos: totemPos,
         radius: 110,
         chargeProgress: 0,
@@ -364,7 +527,7 @@ export class GameState {
         id: 'event_secondary_totem',
         type: 'secondary_totem',
         name: 'Kinetic Blade Conduit',
-        description: 'Harmonize with the blade conduit. Grants Secondary Attack (RMB) Enhancements.',
+        description: 'Defeat 3 sequential Elite organisms. Grants Secondary Attack (RMB) Enhancements.',
         pos: secondaryPos,
         radius: 110,
         chargeProgress: 0,
@@ -377,7 +540,7 @@ export class GameState {
         id: 'event_dash_totem',
         type: 'dash_totem',
         name: 'Phase Thruster Pylon',
-        description: 'Overcharge the kinetic thruster core. Grants Dash (Utility) Enhancements.',
+        description: 'Ascend 5 phase platforms to the summit core. Grants Dash (Utility) Enhancements.',
         pos: dashPos,
         radius: 110,
         chargeProgress: 0,
@@ -390,7 +553,7 @@ export class GameState {
         id: 'event_orbital_uplink',
         type: 'orbital_uplink',
         name: 'Celestial Uplink Conduit',
-        description: 'Hold the orbital beacon platform against threats. Grants Ultimate (R) Enhancements.',
+        description: 'Retrieve the beacon core and deliver it (+25% Move Speed, Weapons Offline). Grants Ultimate (R) Enhancements.',
         pos: uplinkPos,
         radius: 115,
         chargeProgress: 0,
@@ -666,31 +829,113 @@ export class GameState {
   }
 
   public updateCalculatedStats(): void {
-    const prevMax = this.player.maxHealth;
-    this.player.calculatedStats = calculateStats(
-      this.player.baseMaxHealth,
-      this.player.baseMoveSpeed,
-      this.player.items,
-      this.player.buffs
-    );
-    if (this.player.inSanctuaryCross) {
-      this.player.calculatedStats.damageMultiplier *= DOCTOR_CONFIG.sacredField.allyDamageMult;
-      this.player.calculatedStats.attackSpeedMultiplier *= DOCTOR_CONFIG.sacredField.allyAttackSpeedMult;
-      this.player.calculatedStats.moveSpeed *= 1.15;
-    }
-    if ((this.player.adrenalineRushTimer ?? 0) > 0) {
-      this.player.calculatedStats.moveSpeed *= DOCTOR_CONFIG.adrenalineRush.moveSpeedMultiplier;
-    }
-    this.player.maxHealth = this.player.calculatedStats.maxHealth;
-    this.player.moveSpeed = this.player.calculatedStats.moveSpeed;
+    const p = this.player;
+    const prevMax = p.maxHealth;
+    const prevMaxFuel = p.maxJetpackFuel || 100;
 
-    if (this.player.maxHealth > prevMax) {
-      this.player.health += this.player.maxHealth - prevMax;
+    // Runtime Trigger & Augment-Specific transient bonuses
+    let runtimeSpeedBonus = 0;
+    let runtimeDamageBonus = 0;
+    let runtimeDRBonus = 0;
+    let runtimeLmbAtkBonus = 0;
+
+    if ((p.bloodRushTimer ?? 0) > 0 && (p.buffs.buff_blood_rush || 0) > 0) {
+      const n = p.buffs.buff_blood_rush || 0;
+      runtimeLmbAtkBonus += 0.03 * n;
+      runtimeSpeedBonus += 0.02 * n;
+    }
+
+    if (p.health > 0 && p.health / Math.max(1, p.maxHealth) < 0.40 && (p.buffs.buff_final_stand || 0) > 0) {
+      const n = p.buffs.buff_final_stand || 0;
+      runtimeDamageBonus += 0.03 * n;
+      runtimeDRBonus += 0.02 * n;
+    }
+
+    if ((p.retaliationTimer ?? 0) > 0 && (p.buffs.buff_retaliation || 0) > 0) {
+      runtimeDamageBonus += 0.02 * (p.buffs.buff_retaliation || 0);
+    }
+
+    if ((p.killingMomentumTimer ?? 0) > 0 && (p.killingMomentumStacks ?? 0) > 0 && (p.buffs.buff_killing_momentum || 0) > 0) {
+      const n = p.buffs.buff_killing_momentum || 0;
+      const kmStacks = Math.min(3, p.killingMomentumStacks || 0);
+      runtimeSpeedBonus += 0.01 * n * kmStacks;
+    }
+
+    if ((p.survivalInstinctTimer ?? 0) > 0 && (p.buffs.buff_survival_instinct || 0) > 0) {
+      runtimeSpeedBonus += 0.02 * (p.buffs.buff_survival_instinct || 0);
+    }
+
+    if (
+      (p.postDashSpeedTimer ?? 0) > 0 &&
+      p.heroId === 'commander' &&
+      p.skillEnhancements.utility === 'teleport'
+    ) {
+      const vsStacks = p.buffs.buff_cmd_velocity_surge || 0;
+      const aeStacks = p.buffs.buff_cmd_adrenal_extension || 0;
+      if (vsStacks > 0 || aeStacks > 0) {
+        runtimeSpeedBonus += 0.12 + 0.04 * vsStacks;
+      }
+    }
+
+    p.calculatedStats = calculateStats(
+      p.baseMaxHealth,
+      p.baseMoveSpeed,
+      p.items,
+      p.buffs,
+      {
+        baseDamageReduction: p.baseDamageReduction,
+        baseHealthRegenPercent: p.baseHealthRegenPercent,
+        runtimeSpeedBonusFraction: runtimeSpeedBonus,
+        runtimeDamageBonusFraction: runtimeDamageBonus,
+        runtimeDamageReductionBonus: runtimeDRBonus,
+        runtimeLmbAttackSpeedBonusFraction: runtimeLmbAtkBonus,
+        completedEnhancements: this.completedEnhancementCategories.size,
+        activeTimedEffects: p.activeTimedEffects
+      }
+    );
+
+    if (p.inSanctuaryCross) {
+      p.calculatedStats.damageMultiplier *= DOCTOR_CONFIG.sacredField.allyDamageMult;
+      p.calculatedStats.attackSpeedMultiplier *= DOCTOR_CONFIG.sacredField.allyAttackSpeedMult;
+      p.calculatedStats.lmbAttackSpeedMultiplier *= DOCTOR_CONFIG.sacredField.allyAttackSpeedMult;
+      p.calculatedStats.moveSpeed *= 1.15;
+    }
+    if ((p.adrenalineRushTimer ?? 0) > 0) {
+      p.calculatedStats.moveSpeed *= DOCTOR_CONFIG.adrenalineRush.moveSpeedMultiplier;
+      if (p.heroId === 'doctor' && p.skillEnhancements?.utility === 'adrenaline_rush') {
+        const erStacks = p.buffs.buff_doc_emergency_reflex || 0;
+        if (erStacks > 0) {
+          p.calculatedStats.lmbAttackSpeedMultiplier += 0.02 * erStacks;
+        }
+      }
+    }
+    if (p.isCarryingEventPayload) {
+      p.calculatedStats.moveSpeed *= 1.25;
+    }
+    p.calculatedStats.moveSpeed = Math.min(p.baseMoveSpeed * 2.25, p.calculatedStats.moveSpeed);
+
+    p.maxHealth = p.calculatedStats.maxHealth;
+    p.moveSpeed = p.calculatedStats.moveSpeed;
+    p.maxAirJumps = p.calculatedStats.extraAirJumps;
+
+    const newMaxFuel = 100 * p.calculatedStats.jetpackCapacityMultiplier;
+    p.maxJetpackFuel = newMaxFuel;
+    if (newMaxFuel > prevMaxFuel) {
+      p.jetpackFuel = Math.min(newMaxFuel, p.jetpackFuel + (newMaxFuel - prevMaxFuel));
+    } else {
+      p.jetpackFuel = Math.min(newMaxFuel, p.jetpackFuel);
+    }
+
+    if (p.maxHealth > prevMax) {
+      // Only add the delta from max health increases (never full-heals on Vitality gain)
+      p.health = Math.min(p.maxHealth, p.health + (p.maxHealth - prevMax));
+    } else {
+      p.health = Math.min(p.maxHealth, p.health);
     }
   }
 
   public getActiveProfileKey(): StageProfileKey {
-    return this.terrain.isCustomTestMap ? 'untitled_crater' : 'procedural';
+    return this.terrain.isCustomTestMap ? 'custom_map' : 'procedural';
   }
 
   public applyStageConfig(config: StageConfig, profileKey?: StageProfileKey): boolean {
@@ -737,9 +982,13 @@ export class GameState {
       if (profile.teleporter.chargePerKill !== undefined) {
         this.artifact.chargePerKill = profile.teleporter.chargePerKill;
       }
+      this.resetArtifactProgression();
     }
 
     if (Array.isArray(profile.worldEvents)) {
+      this.terrain.activeDashPlatforms = [];
+      this.player.isCarryingEventPayload = false;
+      this.player.carryingEventId = null;
       this.worldEvents = profile.worldEvents
         .filter((ev) => ev.enabled !== false)
         .map((ev) => ({
@@ -758,6 +1007,26 @@ export class GameState {
           pulseTimer: 0,
           elevation: this.terrain.getElevation(ev.x, ev.y).height + (ev.zOffset ?? 0)
         }));
+      if (!this.worldEvents.some((ev) => ev.type === 'secondary_totem')) {
+        const secX = Math.round(this.worldWidth * 0.68);
+        const secY = Math.round(this.worldHeight * 0.68);
+        this.worldEvents.splice(1, 0, {
+          id: 'event_secondary_totem_auto',
+          type: 'secondary_totem',
+          name: 'Kinetic Blade Conduit',
+          description: 'Defeat 3 sequential Elite organisms. Grants Secondary Attack (RMB) Enhancements.',
+          pos: { x: secX, y: secY },
+          zOffset: 0,
+          rotationY: 0,
+          scale: 1,
+          radius: 110,
+          chargeProgress: 0,
+          isActive: false,
+          isCompleted: false,
+          pulseTimer: 0,
+          elevation: this.terrain.getElevation(secX, secY).height
+        });
+      }
     }
 
     if (Array.isArray(profile.pods)) {
@@ -797,6 +1066,10 @@ export class GameState {
     this.enemySpawnRegions = Array.isArray(profile.enemySpawnRegions)
       ? profile.enemySpawnRegions.map((r) => ({ ...r, allowedTypes: [...r.allowedTypes] }))
       : [];
+
+    if (this.terrain.meshCollider && profile.terrainOverrides) {
+      this.terrain.meshCollider.applyOverrides(profile.terrainOverrides);
+    }
   }
 
   public exportCurrentProfile(): StageLayoutProfile {
@@ -813,8 +1086,8 @@ export class GameState {
       terrainSeed: this.terrain.seed,
       environment: {
         stageName: this.stageName,
-        terrainAsset: this.terrain.isCustomTestMap ? '/assets/models/Untitled.glb' : 'procedural_heightfield',
-        waterLevel: this.terrain.isCustomTestMap ? 105 : 5.2,
+        terrainAsset: this.terrain.isCustomTestMap ? 'custom_map' : 'procedural_heightfield',
+        waterLevel: 5.2,
         narrativeTriggersEnabled: !this.terrain.isCustomTestMap || this.terrain.allowTestMapNarrative
       },
       playerSpawn: {
@@ -891,26 +1164,29 @@ export class GameState {
         this.enemySpawnRegions.length > 0
           ? this.enemySpawnRegions.map((r) => ({ ...r, allowedTypes: [...r.allowedTypes] }))
           : [
-              {
-                id: 'region_default_stage1',
-                name: 'Stage 1 Default Crater Spawn Zone',
-                shape: 'circle',
-                x: 1800,
-                y: 1800,
-                zOffset: 0,
-                radius: 1700,
-                width: 3400,
-                height: 3400,
-                allowedTypes: ['crawler', 'spitter', 'wasp', 'elite'],
-                spawnDensity: 1.0,
-                maxActiveEnemies: 40,
-                minPlayerDistance: 420,
-                terrainRestriction: 'walkable',
-                minElevation: 0,
-                maxElevation: 680,
-                enabled: false
-              }
-            ]
+            {
+              id: 'region_default_stage1',
+              name: 'Stage 1 Default Crater Spawn Zone',
+              shape: 'circle',
+              x: 1800,
+              y: 1800,
+              zOffset: 0,
+              radius: 1700,
+              width: 3400,
+              height: 3400,
+              allowedTypes: ['crawler', 'spitter', 'wasp', 'elite'],
+              spawnDensity: 1.0,
+              maxActiveEnemies: 40,
+              minPlayerDistance: 420,
+              terrainRestriction: 'walkable',
+              minElevation: 0,
+              maxElevation: 680,
+              enabled: false
+            }
+          ],
+      ...(this.terrain.meshCollider && Object.keys(this.terrain.meshCollider.overrides).length > 0
+        ? { terrainOverrides: { ...this.terrain.meshCollider.overrides } }
+        : {})
     };
   }
 }

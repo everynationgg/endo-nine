@@ -6,7 +6,6 @@ import {
   Conversation,
   DevConversationSummary,
   DialogueLifecycleState,
-  DialogueManifest,
   DialogueTurn,
   PacingConfig,
   SpeakerId,
@@ -25,11 +24,13 @@ export interface VoicePlaybackPort {
     offsetSec: number,
     role: CommunicationRole,
     playbackGen: number,
-    onEnded: (gen: number) => void
+    onEnded: (gen: number) => void,
+    speaker?: SpeakerId
   ): boolean;
   pause(playbackGen: number): number;
-  stop(playbackGen: number): void;
+  stop(playbackGen: number, fadeOutMs?: number): void;
   hasBuffer(url: string): boolean;
+  getBufferDuration(url: string): number | null;
   isAvailable(): boolean;
   clearBuffers(): void;
 }
@@ -60,6 +61,8 @@ interface ActiveConversation {
   audioPlaying: boolean;
   pausedOffsetSec: number;
   bypassPacing: boolean;
+  lastCompletedTurnId: string | null;
+  leadInRemainingSec: number;
 }
 
 interface SavedNarrativeState {
@@ -113,6 +116,7 @@ export class DialogueDirector {
   private completedRunIds: Set<string> = new Set();
   private deferredRunItems: Map<string, { conversation: Conversation; context: TriggerContext }> = new Map();
   private unlockedCodex: Map<string, UnlockedCodexLore> = new Map();
+  private runObjectives: Map<string, UnlockedCodexLore> = new Map();
 
   private transcript: TranscriptEntry[] = [];
   private transcriptIndexByKey: Map<string, number> = new Map();
@@ -137,15 +141,21 @@ export class DialogueDirector {
   private isTabHidden: boolean = false;
   private lastKnownStage: number = 1;
   private lastKnownGameStarted: boolean = false;
+  private lastKnownGameOver: boolean = false;
   private lastKnownGameTime: number = 0;
   private lastStateRef: GameState | null = null;
   private lastPreloadedVoicedCount: number = 0;
   private lastPreloadedTotalCount: number = 0;
+  private playedTurnIdsThisRun: Set<string> = new Set();
 
   private manifestUrl: string;
   private pacingUrl: string;
   private onPresentationChanged?: (state: CommsPresentationState) => void;
   private onTranscriptChanged?: () => void;
+  private onObjectiveUnlocked?: (lore: UnlockedCodexLore) => void;
+  private onObjectivesChanged?: (objectives: UnlockedCodexLore[]) => void;
+  private onConversationCompleted?: (conversationId: string) => void;
+  private onConversationLeadIn?: (conversationId: string, triggerId: string, leadInSec: number) => void;
 
   constructor(
     voice: VoicePlaybackPort,
@@ -154,6 +164,10 @@ export class DialogueDirector {
       pacingUrl?: string;
       onPresentationChanged?: (state: CommsPresentationState) => void;
       onTranscriptChanged?: () => void;
+      onObjectiveUnlocked?: (lore: UnlockedCodexLore) => void;
+      onObjectivesChanged?: (objectives: UnlockedCodexLore[]) => void;
+      onConversationCompleted?: (conversationId: string) => void;
+      onConversationLeadIn?: (conversationId: string, triggerId: string, leadInSec: number) => void;
     }
   ) {
     this.voice = voice;
@@ -161,6 +175,10 @@ export class DialogueDirector {
     this.pacingUrl = opts?.pacingUrl || '/dialogue/pacing.json';
     this.onPresentationChanged = opts?.onPresentationChanged;
     this.onTranscriptChanged = opts?.onTranscriptChanged;
+    this.onObjectiveUnlocked = opts?.onObjectiveUnlocked;
+    this.onObjectivesChanged = opts?.onObjectivesChanged;
+    this.onConversationCompleted = opts?.onConversationCompleted;
+    this.onConversationLeadIn = opts?.onConversationLeadIn;
     this.loadPersistentState();
   }
 
@@ -191,6 +209,19 @@ export class DialogueDirector {
     }
 
     // Preload all enabled scenes (and Scene 01 variants immediately)
+    const urlsToPreload = this.collectEnabledUrls();
+    await this.voice.preload(urlsToPreload, curLoadGen);
+
+    let voicedCount = 0;
+    for (const url of urlsToPreload) {
+      if (this.voice.hasBuffer(url)) voicedCount++;
+    }
+    this.lastPreloadedVoicedCount = voicedCount;
+    this.lastPreloadedTotalCount = urlsToPreload.length;
+    return { count: this.conversations.length, voicedCount };
+  }
+
+  private collectEnabledUrls(): string[] {
     const urlsToPreload = new Set<string>();
     for (const conv of this.conversations) {
       if (conv.enabled === false) continue;
@@ -201,37 +232,68 @@ export class DialogueDirector {
         }
       }
     }
+    return [...urlsToPreload];
+  }
 
-    await this.voice.preload([...urlsToPreload], curLoadGen);
-
+  public async ensureAudioPreloaded(): Promise<void> {
+    const urls = this.collectEnabledUrls();
+    const missing = urls.filter((u) => !this.voice.hasBuffer(u));
+    if (missing.length === 0) return;
+    const curLoadGen = this.loadGen;
+    await this.voice.preload(missing, curLoadGen);
+    if (curLoadGen !== this.loadGen) return;
     let voicedCount = 0;
-    for (const url of urlsToPreload) {
-      if (this.voice.hasBuffer(url)) voicedCount++;
+    for (const u of urls) {
+      if (this.voice.hasBuffer(u)) voicedCount++;
     }
     this.lastPreloadedVoicedCount = voicedCount;
-    this.lastPreloadedTotalCount = urlsToPreload.size;
-    return { count: this.conversations.length, voicedCount };
+    this.lastPreloadedTotalCount = urls.length;
+  }
+
+  public isPriorityBusy(): boolean {
+    if (this.active && this.active.conversation.priority <= 1) return true;
+    return this.queue.some((q) => q.conversation.priority <= 1);
+  }
+
+  /**
+   * Returns true only when required Stage 1 post-boss or restoration/departure conversations
+   * are actively playing or queued. Optional ambient lines never block teleporter departure.
+   */
+  public isEssentialStage1DepartureDialogueBusy(): boolean {
+    const essentialDepartureIds = new Set([
+      'event_05_tower_restoration_refreeze',
+      'scene_11_after_the_battle',
+      'scene_12_leaving_the_wreckage'
+    ]);
+    if (this.active && essentialDepartureIds.has(this.active.conversation.id)) {
+      return true;
+    }
+    return this.queue.some((q) => essentialDepartureIds.has(q.conversation.id));
   }
 
   public getDebugInfo(): {
     lifecycleState: DialogueLifecycleState;
     activeId: string | null;
     turnIndex: number;
+    leadInRemainingSec: number;
     queueIds: string[];
     completedSaveIds: string[];
     completedRunIds: string[];
     voicedBufferedCount: number;
     voicedTotalEnabledUrls: number;
   } {
+    const urls = this.collectEnabledUrls();
+    const liveBufferedCount = urls.reduce((acc, u) => acc + (this.voice.hasBuffer(u) ? 1 : 0), 0);
     return {
       lifecycleState: this.lifecycleState,
       activeId: this.active?.conversation.id || null,
       turnIndex: this.active?.turnIndex ?? 0,
+      leadInRemainingSec: this.active?.leadInRemainingSec ?? 0,
       queueIds: this.queue.map((q) => q.conversation.id),
       completedSaveIds: [...this.completedSaveIds],
       completedRunIds: [...this.completedRunIds],
-      voicedBufferedCount: this.lastPreloadedVoicedCount,
-      voicedTotalEnabledUrls: this.lastPreloadedTotalCount
+      voicedBufferedCount: liveBufferedCount || this.lastPreloadedVoicedCount,
+      voicedTotalEnabledUrls: urls.length || this.lastPreloadedTotalCount
     };
   }
 
@@ -255,7 +317,9 @@ export class DialogueDirector {
     this.endRun('restart');
     this.sessionId++;
     this.completedRunIds.clear();
+    this.playedTurnIdsThisRun.clear();
     this.deferredRunItems.clear();
+    this.runObjectives.clear();
     this.transcript = [];
     this.transcriptIndexByKey.clear();
     this.lastTriggeredAtSec.clear();
@@ -264,32 +328,41 @@ export class DialogueDirector {
     this.quietUntilSec = this.realClockSec + this.pacing.initialQuietSec;
     this.lastKnownStage = state.stageNumber || 1;
     this.lastKnownGameStarted = state.isGameStarted;
+    this.lastKnownGameOver = false;
     this.lastKnownGameTime = state.gameTime || 0;
     this.isGamePaused = false;
+    if ((state.stageNumber || 1) === 1) {
+      void this.ensureAudioPreloaded();
+    }
     this.emitPresentation();
     this.onTranscriptChanged?.();
+    this.onObjectivesChanged?.(this.getActiveRunObjectives());
   }
 
   public endRun(reason: 'menu' | 'restart' | 'game_over' | 'stage_clear'): void {
     this.playbackGen++;
-    this.voice.stop(this.playbackGen);
+    this.voice.stop(this.playbackGen, 0);
 
-    if (reason === 'menu' || reason === 'restart') {
+    if (reason === 'menu' || reason === 'restart' || reason === 'game_over') {
       this.active = null;
       this.queue = [];
       this.lifecycleState = 'idle';
       this.deferredRunItems.clear();
-      this.lastKnownGameStarted = false;
+      if (reason !== 'game_over') {
+        this.lastKnownGameStarted = false;
+        this.runObjectives.clear();
+        this.onObjectivesChanged?.(this.getActiveRunObjectives());
+      }
       this.emitPresentation();
       return;
     }
 
-    // For game_over / stage_clear: drop non-outcome active/queued dialogue; stage_leaving may trigger right after
-    if (this.active && this.active.conversation.priority > 0) {
+    // For stage_clear: drop non-essential active/queued dialogue; stage_leaving (P1) may trigger right after
+    if (this.active && this.active.conversation.priority > 1) {
       this.active = null;
       this.lifecycleState = 'idle';
     }
-    this.queue = this.queue.filter((q) => q.conversation.priority === 0);
+    this.queue = this.queue.filter((q) => q.conversation.priority <= 1);
     this.emitPresentation();
   }
 
@@ -321,6 +394,8 @@ export class DialogueDirector {
     this.banterCountThisRun = 0;
     this.lastKnownStage = newStageNumber;
     this.quietUntilSec = this.realClockSec + this.pacing.initialQuietSec;
+    this.runObjectives.clear();
+    this.onObjectivesChanged?.(this.getActiveRunObjectives());
 
     // Re-evaluate deferred run items on new stage
     for (const [id, entry] of this.deferredRunItems.entries()) {
@@ -348,6 +423,7 @@ export class DialogueDirector {
       if (conv.trigger !== triggerId) continue;
       if (!this.isEligible(conv, context, state)) continue;
       this.enqueueConversation(conv, context, state, false);
+      if (triggerId === 'ambient_exploration') break;
     }
   }
 
@@ -439,8 +515,16 @@ export class DialogueDirector {
     return [...this.unlockedCodex.values()];
   }
 
+  public getActiveRunObjectives(): UnlockedCodexLore[] {
+    return [...this.runObjectives.values()];
+  }
+
   public getPresentationState(): CommsPresentationState {
-    if (!this.active || (this.lifecycleState !== 'playing' && this.lifecycleState !== 'suspended' && this.lifecycleState !== 'awaiting_modal_close')) {
+    if (
+      !this.active ||
+      this.active.leadInRemainingSec > 0 ||
+      (this.lifecycleState !== 'playing' && this.lifecycleState !== 'suspended' && this.lifecycleState !== 'awaiting_modal_close')
+    ) {
       return {
         visible: false,
         conversationId: null,
@@ -487,6 +571,11 @@ export class DialogueDirector {
     }
     this.lastKnownGameStarted = state.isGameStarted;
 
+    if (state.isGameOver && !this.lastKnownGameOver) {
+      this.endRun('game_over');
+    }
+    this.lastKnownGameOver = state.isGameOver;
+
     if (state.stageNumber !== this.lastKnownStage && state.isGameStarted) {
       this.stageTransition(state.stageNumber, state);
     }
@@ -494,9 +583,9 @@ export class DialogueDirector {
     this.lastKnownGameTime = state.gameTime || 0;
 
     // Esc / Inventory / Codex hard pause suspension
-    const shouldSuspend = state.isPaused || this.isTabHidden;
-    if (shouldSuspend !== this.isGamePaused) {
-      this.isGamePaused = shouldSuspend;
+    const paused = state.isPaused;
+    if (paused !== this.isGamePaused) {
+      this.isGamePaused = paused;
       this.syncSuspensionState();
     }
 
@@ -518,7 +607,7 @@ export class DialogueDirector {
         !this.active.bypassPacing &&
         !this.checkRelevance(this.active.conversation, state, this.active.context)
       ) {
-        this.dropActive();
+        this.dropActive(120);
       } else {
         this.stepActiveConversation(dt, state);
       }
@@ -542,7 +631,7 @@ export class DialogueDirector {
       this.emitPresentation();
     } else if (!shouldBeSuspended && this.lifecycleState === 'suspended' && this.active) {
       this.lifecycleState = 'playing';
-      if (!this.active.inInterTurnPause) {
+      if (!this.active.inInterTurnPause && this.active.leadInRemainingSec <= 0) {
         this.resumeCurrentTurnAudio();
       }
       this.emitPresentation();
@@ -611,8 +700,8 @@ export class DialogueDirector {
       conv.retention === 'stage_immediate'
         ? conv.ttlSec ?? 5.0
         : conv.retention === 'stage_deferred' && conv.ttlSec !== undefined
-        ? conv.ttlSec
-        : null;
+          ? conv.ttlSec
+          : null;
 
     const queuedItem: QueuedConversation = {
       instanceId: this.nextInstanceId++,
@@ -626,11 +715,25 @@ export class DialogueDirector {
       bypassPacing
     };
 
-    // Immediate preemption if active conversation has strictly lower importance (higher priority number)
+    // Drop stale active conversation if its relevance window already ended (e.g. boss defeated replaces boss emerged)
+    if (
+      this.active &&
+      !this.active.bypassPacing &&
+      !this.checkRelevance(this.active.conversation, state, this.active.context)
+    ) {
+      this.dropActive(120);
+    }
+
+    // Immediate preemption if active conversation has strictly lower importance (higher priority number),
+    // but let Scene 11 post-boss aftermath finish cleanly before starting Tower Restoration Refreeze.
     if (
       this.active &&
       !this.active.bypassPacing &&
       conv.priority < this.active.conversation.priority &&
+      !(
+        this.active.conversation.id === 'scene_11_after_the_battle' &&
+        conv.id === 'event_05_tower_restoration_refreeze'
+      ) &&
       !state.isPausedForBuffChoice
     ) {
       this.preemptActiveFor(queuedItem, state);
@@ -647,28 +750,15 @@ export class DialogueDirector {
   private preemptActiveFor(incoming: QueuedConversation, state: GameState): void {
     const prev = this.active!;
     this.playbackGen++;
-    this.voice.stop(this.playbackGen);
+    this.voice.stop(this.playbackGen, 120);
 
-    if (
-      prev.conversation.resumable &&
-      this.checkRelevance(prev.conversation, state, prev.context)
-    ) {
-      // Restart interrupted speaker turn from offset 0 when resumed
-      this.queue.unshift({
-        instanceId: prev.instanceId,
-        conversation: prev.conversation,
-        turns: prev.turns,
-        context: prev.context,
-        heroId: prev.heroId,
-        nextTurnIndex: prev.turnIndex,
-        enqueuedAtSec: this.realClockSec,
-        expiresAtSec:
-          prev.conversation.retention === 'stage_immediate'
-            ? this.realClockSec + (prev.conversation.ttlSec ?? 5.0)
-            : null,
-        bypassPacing: prev.bypassPacing
-      });
+    // Critical P0 interrupts discard queued ambient banter
+    if (incoming.conversation.priority === 0) {
+      this.queue = this.queue.filter((q) => q.conversation.priority < 3);
     }
+
+    // Never resume an interrupted conversation; mark done and immediately route any quest objective to the tracker
+    this.markConversationCompleted(prev.conversation, prev.bypassPacing);
 
     this.active = null;
     this.startActiveConversation(incoming, state);
@@ -703,20 +793,32 @@ export class DialogueDirector {
   }
 
   private canPlayUnderPacing(conv: Conversation, telemetry: ObserverTelemetry): boolean {
-    if (conv.priority === 0 || conv.category === 'essential') {
-      // Critical/essential beats bypass normal quiet floor unless inside initial drop second
-      return conv.priority === 0 || this.runRealClockSec >= Math.min(0.8, this.pacing.initialQuietSec);
+    if (conv.priority === 0) return true;
+
+    if (conv.priority === 1 || conv.category === 'essential') {
+      return this.runRealClockSec >= Math.min(0.8, this.pacing.initialQuietSec);
     }
 
-    if (this.realClockSec < this.quietUntilSec) {
+    if (this.runRealClockSec < this.pacing.initialQuietSec) {
       return false;
     }
 
+    // Tactical P2 announcements (e.g. teleporter_charged) use short validity windows; do not suppress behind long quiet timers
+    if (conv.priority === 2) {
+      return !telemetry.isBossActive;
+    }
+
+    // True ambient banter (Ambient A/B, Scene 08) respects quiet floor, combat intensity, and banter cap
     if (conv.category === 'banter') {
+      if (this.realClockSec < this.quietUntilSec) return false;
       if (telemetry.isHighCombatIntensity) return false;
       if (this.banterCountThisRun >= this.pacing.maxBanterPerStageRun) return false;
-    } else if (conv.category === 'contextual' && conv.priority >= 2 && telemetry.isHighCombatIntensity) {
-      return false;
+      return true;
+    }
+
+    // P3 environmental discoveries (flora, water, bio-sac) avoid active boss/world events
+    if (conv.priority >= 3) {
+      if (telemetry.isBossActive || telemetry.hasActiveWorldEvent) return false;
     }
 
     return true;
@@ -726,6 +828,8 @@ export class DialogueDirector {
     if (item.conversation.category === 'banter' && !item.bypassPacing) {
       this.banterCountThisRun++;
     }
+
+    const leadInSec = Math.max(0, item.conversation.leadInSec ?? 0);
 
     this.active = {
       instanceId: item.instanceId,
@@ -740,9 +844,16 @@ export class DialogueDirector {
       interTurnRemainingSec: 0,
       audioPlaying: false,
       pausedOffsetSec: 0,
-      bypassPacing: item.bypassPacing
+      bypassPacing: item.bypassPacing,
+      lastCompletedTurnId: null,
+      leadInRemainingSec: leadInSec
     };
     this.lifecycleState = 'playing';
+    if (leadInSec > 0) {
+      this.onConversationLeadIn?.(item.conversation.id, item.conversation.trigger, leadInSec);
+      this.emitPresentation();
+      return;
+    }
     this.beginCurrentTurn(state);
   }
 
@@ -755,17 +866,32 @@ export class DialogueDirector {
     }
 
     this.active.turnElapsedSec = 0;
-    this.active.turnDurationSec = Math.max(0.4, turn.durationSec);
+    this.active.turnDurationSec = Math.max(0.4, this.voice.getBufferDuration(turn.audioUrl) ?? turn.durationSec);
     this.active.inInterTurnPause = false;
     this.active.interTurnRemainingSec = 0;
     this.active.pausedOffsetSec = 0;
+
+    if (
+      turn.requiresPreviousTurnId &&
+      this.active.lastCompletedTurnId !== turn.requiresPreviousTurnId
+    ) {
+      this.advanceToNextTurn(state);
+      return;
+    }
+    if (!this.active.bypassPacing && turn.requiresPreviousTurnId && this.playedTurnIdsThisRun.has(turn.id)) {
+      this.advanceToNextTurn(state);
+      return;
+    }
+    if (!this.active.bypassPacing) {
+      this.playedTurnIdsThisRun.add(turn.id);
+    }
 
     const gen = ++this.playbackGen;
     const role = resolveCommunicationRole(turn.speaker, this.active.heroId, this.active.context.originStage);
     const startedAudio = this.voice.play(turn.audioUrl, 0, role, gen, (endedGen) => {
       if (endedGen !== this.playbackGen || !this.active || this.lifecycleState !== 'playing') return;
       this.finishCurrentTurn(state);
-    });
+    }, turn.speaker);
     this.active.audioPlaying = startedAudio;
 
     this.upsertTranscriptEntry(this.active, turn, role, startedAudio);
@@ -777,9 +903,21 @@ export class DialogueDirector {
     const turn = this.active.turns[this.active.turnIndex];
     if (!turn) return;
 
+    const resumeFrom = Math.max(this.active.pausedOffsetSec, this.active.turnElapsedSec);
+    if (resumeFrom >= this.active.turnDurationSec - 0.08) {
+      if (this.lastStateRef) {
+        this.finishCurrentTurn(this.lastStateRef);
+      } else {
+        this.onAudioTurnNaturalEnd();
+      }
+      return;
+    }
+
     const gen = ++this.playbackGen;
     const role = resolveCommunicationRole(turn.speaker, this.active.heroId, this.active.context.originStage);
-    const offset = Math.max(0, Math.min(this.active.turnElapsedSec, this.active.turnDurationSec - 0.05));
+    const offset = Math.max(0, Math.min(resumeFrom, this.active.turnDurationSec - 0.05));
+    this.active.turnElapsedSec = offset;
+    this.active.pausedOffsetSec = 0;
     const startedAudio = this.voice.play(turn.audioUrl, offset, role, gen, (endedGen) => {
       if (endedGen !== this.playbackGen || !this.active || this.lifecycleState !== 'playing') return;
       if (this.lastStateRef) {
@@ -787,18 +925,19 @@ export class DialogueDirector {
       } else {
         this.onAudioTurnNaturalEnd();
       }
-    });
+    }, turn.speaker);
     this.active.audioPlaying = startedAudio;
   }
 
   private onAudioTurnNaturalEnd(): void {
     if (!this.active) return;
     this.active.audioPlaying = false;
+    const turn = this.active.turns[this.active.turnIndex];
+    this.active.lastCompletedTurnId = turn?.id ?? null;
     if (this.active.turnIndex + 1 >= this.active.turns.length) {
       this.completeActiveConversation();
       return;
     }
-    const turn = this.active.turns[this.active.turnIndex];
     const pauseAfter = turn?.pauseAfterSec ?? this.pacing.defaultPauseAfterTurnSec;
     this.active.inInterTurnPause = true;
     this.active.interTurnRemainingSec = pauseAfter;
@@ -813,6 +952,17 @@ export class DialogueDirector {
       if (!state.isPausedForBuffChoice) {
         this.lifecycleState = 'playing';
         this.advanceToNextTurn(state);
+      }
+      return;
+    }
+
+    if (this.active.leadInRemainingSec > 0) {
+      if (state.isPausedForBuffChoice) {
+        return;
+      }
+      this.active.leadInRemainingSec = Math.max(0, this.active.leadInRemainingSec - dt);
+      if (this.active.leadInRemainingSec <= 0) {
+        this.beginCurrentTurn(state);
       }
       return;
     }
@@ -834,7 +984,7 @@ export class DialogueDirector {
 
     // Fallback completion timer (always active when audio is muted/missing, and safety guard on voiced lines)
     const fallbackCap = this.active.audioPlaying
-      ? this.active.turnDurationSec + 1.5
+      ? this.active.turnDurationSec + 2.0
       : this.active.turnDurationSec;
 
     if (this.active.turnElapsedSec >= fallbackCap) {
@@ -846,11 +996,16 @@ export class DialogueDirector {
     if (!this.active) return;
     this.playbackGen++;
     if (this.active.audioPlaying) {
-      this.voice.stop(this.playbackGen);
+      this.voice.stop(this.playbackGen, 0);
       this.active.audioPlaying = false;
     }
 
     const turn = this.active.turns[this.active.turnIndex];
+    this.active.lastCompletedTurnId = turn?.id ?? null;
+    if (turn?.unlocksObjectives && !this.active.bypassPacing) {
+      this.unlockConversationCodex(this.active.conversation);
+    }
+
     const pauseAfter = turn?.pauseAfterSec ?? this.pacing.defaultPauseAfterTurnSec;
     if (pauseAfter > 0 && this.active.turnIndex + 1 < this.active.turns.length) {
       this.active.inInterTurnPause = true;
@@ -878,11 +1033,30 @@ export class DialogueDirector {
     }
   }
 
-  private completeActiveConversation(): void {
-    if (!this.active) return;
-    const conv = this.active.conversation;
-    const bypass = this.active.bypassPacing;
+  private unlockConversationCodex(conv: Conversation): void {
+    const entryId = conv.onComplete?.codexEntryId;
+    if (!entryId) return;
 
+    const lore: UnlockedCodexLore = this.unlockedCodex.get(entryId) ?? {
+      id: entryId,
+      title: conv.onComplete?.codexTitle || conv.title || conv.id,
+      summary: conv.onComplete?.codexSummary || '',
+      unlockedAtIso: new Date().toISOString()
+    };
+
+    if (!this.unlockedCodex.has(entryId)) {
+      this.unlockedCodex.set(entryId, lore);
+      this.savePersistentState();
+    }
+
+    if (!this.runObjectives.has(entryId)) {
+      this.runObjectives.set(entryId, lore);
+      this.onObjectivesChanged?.(this.getActiveRunObjectives());
+      this.onObjectiveUnlocked?.(lore);
+    }
+  }
+
+  private markConversationCompleted(conv: Conversation, bypass: boolean): void {
     if (!bypass) {
       if (conv.persistenceScope === 'once_per_save') {
         this.completedSaveIds.add(conv.id);
@@ -890,37 +1064,42 @@ export class DialogueDirector {
         this.completedRunIds.add(conv.id);
       }
 
-      if (conv.onComplete?.codexEntryId && !this.unlockedCodex.has(conv.onComplete.codexEntryId)) {
-        this.unlockedCodex.set(conv.onComplete.codexEntryId, {
-          id: conv.onComplete.codexEntryId,
-          title: conv.onComplete.codexTitle || conv.title || conv.id,
-          summary: conv.onComplete.codexSummary || '',
-          unlockedAtIso: new Date().toISOString()
-        });
-      }
-
+      this.unlockConversationCodex(conv);
       this.savePersistentState();
 
       const quiet =
         conv.category === 'essential'
           ? this.pacing.quietAfterEssentialSec
           : conv.category === 'contextual'
-          ? this.pacing.quietAfterContextualSec
-          : this.pacing.quietAfterBanterSec;
+            ? this.pacing.quietAfterContextualSec
+            : this.pacing.quietAfterBanterSec;
       this.quietUntilSec = Math.max(this.quietUntilSec, this.realClockSec + quiet);
+      this.onConversationCompleted?.(conv.id);
     }
 
     this.deferredRunItems.delete(conv.id);
+  }
+
+  private completeActiveConversation(): void {
+    if (!this.active) return;
+    const conv = this.active.conversation;
+    const bypass = this.active.bypassPacing;
+
+    this.markConversationCompleted(conv, bypass);
     this.active = null;
     this.lifecycleState = this.queue.length > 0 ? 'queued' : 'idle';
     this.emitPresentation();
     this.onTranscriptChanged?.();
   }
 
-  private dropActive(): void {
+  private dropActive(fadeOutMs: number = 120): void {
     if (!this.active) return;
+    const prev = this.active;
     this.playbackGen++;
-    this.voice.stop(this.playbackGen);
+    this.voice.stop(this.playbackGen, fadeOutMs);
+    if (!this.lastStateRef?.isGameOver && !this.lastStateRef?.isStageCleared) {
+      this.markConversationCompleted(prev.conversation, prev.bypassPacing);
+    }
     this.active = null;
     this.lifecycleState = this.queue.length > 0 ? 'queued' : 'idle';
     this.emitPresentation();

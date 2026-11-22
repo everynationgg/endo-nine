@@ -1,4 +1,4 @@
-import { ItemDef, ItemId, BuffDef, BuffId, CalculatedStats, ExclusiveEventPool, HeroId } from './types';
+import { ItemDef, ItemId, BuffDef, BuffId, CalculatedStats, ExclusiveEventPool, HeroId, PlayerState, ActiveTimedEffect, TimedEffectId } from './types';
 
 export interface LootSystemConfig {
   normalEnemyItemDropChance: number; // 0.01 (1%) for normal enemies as requested
@@ -12,8 +12,42 @@ export const LOOT_CONFIG: LootSystemConfig = {
   normalEnemyItemDropChance: 0.01,
   eliteEnemyItemDropChance: 0.12,
   bossEnemyItemDropChance: 1.0,
-  basePickupRadius: 125,
+  basePickupRadius: 250,
   maxCurrencyObjects: 65
+};
+
+/** Configurable progressive rarity weighting for Additional Jump stacks after the free pickup */
+export const AERIAL_BOOST_WEIGHT_CONFIG = {
+  baseWeight: 5,
+  decayFactor: 0.5,
+  minWeight: 0.01
+};
+
+/**
+ * Configurable global stack caps for +1 Projectile buffs (null = no unapproved global cap;
+ * character/augment-specific caps like 7 Drones & 5 Fragmentation Bombs remain enforced).
+ */
+export const PROJECTILE_STACK_CONFIG = {
+  maxExtraLmbStacks: null as number | null,
+  maxExtraRmbStacks: null as number | null
+};
+
+/** Soft-pity scaling for +1 LMB / +1 RMB Projectile buffs on chest selection and enemy drops */
+export const PROJECTILE_PITY_CONFIG = {
+  baseWeight: 100,
+  threshold: 8,
+  incrementPerBuff: 35,
+  maxWeight: 450
+};
+
+/** Explicit configuration of Special rarity weights and approved Special buffs */
+export const BUFF_RARITY_CONFIG = {
+  ordinaryWeight: 100,
+  specialWeight: 10,
+  projectileWeight: PROJECTILE_PITY_CONFIG.baseWeight,
+  approvedSpecialBuffIds: new Set<BuffId>([
+    // Explicitly approved Special buffs may be added here cleanly without editing BUFF_REGISTRY
+  ])
 };
 
 /**
@@ -100,392 +134,6 @@ export function rollWeightedPassiveItem(rng: SeededRandom): ItemId {
  * Offense, Defense, Elemental Procs, Autonomous Drones, and Skill Replacements!
  */
 export const BUFF_REGISTRY: Record<BuffId, BuffDef> = {
-  buff_overdrive: {
-    id: 'buff_overdrive',
-    name: 'Overdrive Cycling',
-    category: 'OFFENSE / MODULE',
-    description: '+1 Overdrive stack (+20% Attack Speed). Accelerates all weapon firing.',
-    icon: '/assets/attack_speed.png',
-    accentColor: '#fb923c',
-    linkedItemId: 'overdrive',
-    applyStack: () => {}
-  },
-  buff_vital_core: {
-    id: 'buff_vital_core',
-    name: 'Vital Core Resonance',
-    category: 'DEFENSE / MODULE',
-    description: '+1 Vital Core stack (+35 Max HP & +1.5 HP/s bio-regeneration).',
-    icon: '/assets/health.png',
-    accentColor: '#34d399',
-    linkedItemId: 'vital_core',
-    applyStack: () => {}
-  },
-  buff_chain_spark: {
-    id: 'buff_chain_spark',
-    name: 'Chain Spark Conduit',
-    category: 'PROC / MODULE',
-    description: '+1 Chain Spark stack (+15% chance to arc chain lightning for 30 dmg).',
-    icon: '/assets/critical_damage.png',
-    accentColor: '#c084fc',
-    linkedItemId: 'chain_spark',
-    applyStack: () => {}
-  },
-  buff_pulse_power: {
-    id: 'buff_pulse_power',
-    name: 'Kinetic Amplifier',
-    category: 'WEAPON AUGMENT',
-    description: '+22% All Skill & Weapon Damage per stack.',
-    icon: '/assets/attack_power.png',
-    accentColor: '#facc15',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.damageMultiplier += count * 0.22;
-    }
-  },
-  buff_thrusters: {
-    id: 'buff_thrusters',
-    name: 'Cryo-Vector Thrusters',
-    category: 'MOBILITY AUGMENT',
-    description: '+14% Movement Speed and -15% Tactical Dash cooldown per stack.',
-    icon: '/assets/movement_speed.png',
-    accentColor: '#60a5fa',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.moveSpeed *= 1 + count * 0.14;
-      stats.dashCooldownMultiplier = Math.max(0.35, Math.pow(0.85, count));
-    }
-  },
-  buff_orbital_cap: {
-    id: 'buff_orbital_cap',
-    name: 'Orbital Targeting Array',
-    category: 'ULTIMATE AUGMENT',
-    description: '+25% Orbital blast radius and -18% Ultimate cooldown per stack.',
-    icon: '/assets/cooldown_reduction.png',
-    accentColor: '#f59e0b',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.ultimateRadiusMultiplier += count * 0.25;
-      stats.aoeRadiusMultiplier += count * 0.20;
-      stats.ultimateCooldownMultiplier = Math.max(0.35, Math.pow(0.82, count));
-    }
-  },
-  buff_harvester: {
-    id: 'buff_harvester',
-    name: 'Resonance Harvester',
-    category: 'UTILITY AUGMENT',
-    description: '+55 Currency pickup radius and +1.5 HP/s shield recovery per stack.',
-    icon: '/assets/currency_shard.png',
-    accentColor: '#c084fc',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.pickupRadius += count * 55;
-      stats.healthRegen += count * 1.5;
-    }
-  },
-  buff_crit_lens: {
-    id: 'buff_crit_lens',
-    name: 'Optical Precision Lens',
-    category: 'OFFENSE AUGMENT',
-    description: '+12% Critical Strike Chance. Critical hits deal 200% lethal damage.',
-    icon: '/assets/critical_chance.png',
-    accentColor: '#ef4444',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.critChance = Math.min(0.85, stats.critChance + count * 0.12);
-      stats.critMultiplier = 2.0;
-    }
-  },
-  buff_heavy_slugs: {
-    id: 'buff_heavy_slugs',
-    name: 'Tungsten Penetrator',
-    category: 'OFFENSE AUGMENT',
-    description: '+1 Pierce to all projectiles & +15% projectile velocity per stack.',
-    icon: '/assets/attack_power.png',
-    accentColor: '#94a3b8',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.projectilePierce += count;
-      stats.projectileSpeedMultiplier = (stats.projectileSpeedMultiplier || 1.0) + count * 0.15;
-      stats.damageMultiplier += count * 0.08;
-    }
-  },
-  buff_multi_barrel: {
-    id: 'buff_multi_barrel',
-    name: 'Multi-Chamber Splitter',
-    category: 'OFFENSE AUGMENT',
-    description: '+1 Extra Projectile fired in a spread with every primary attack.',
-    icon: '/assets/attack_power.png',
-    accentColor: '#eab308',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.extraProjectiles += count;
-      stats.projectileSpread = 0.22;
-    }
-  },
-  buff_cryo_rounds: {
-    id: 'buff_cryo_rounds',
-    name: 'Permafrost Cryo-Rounds',
-    category: 'ELEMENTAL / PROC',
-    description: '+20% chance on hit to freeze enemies, reducing their speed by 50%.',
-    icon: '/assets/proj_wave.png',
-    accentColor: '#00e5ff',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.frostChance = Math.min(0.75, stats.frostChance + count * 0.20);
-    }
-  },
-  buff_toxic_spores: {
-    id: 'buff_toxic_spores',
-    name: 'Corrosive Xenomorph Spores',
-    category: 'ELEMENTAL / PROC',
-    description: 'Attacks infect targets with alien venom, dealing 16 poison damage/sec for 4s.',
-    icon: '/assets/alien_flora.png',
-    accentColor: '#84cc16',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.toxicChance = Math.min(0.80, stats.toxicChance + count * 0.25);
-      stats.skillDurationMultiplier += count * 0.15;
-    }
-  },
-  buff_death_blossom: {
-    id: 'buff_death_blossom',
-    name: 'Volatile Biomass',
-    category: 'EXPLOSIVE / PROC',
-    description: 'Enemies detonate on death, dealing 48 plasma damage in an 80 radius.',
-    icon: '/assets/alien_mushroom.png',
-    accentColor: '#f97316',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.deathExplosionRadius += 80;
-      stats.deathExplosionDamage += count * 48;
-    }
-  },
-  buff_energy_shield: {
-    id: 'buff_energy_shield',
-    name: 'Aegis Nano-Shield',
-    category: 'DEFENSE AUGMENT',
-    description: '+45 Max Energy Shield. Automatically absorbs damage before Health.',
-    icon: '/assets/armor.png',
-    accentColor: '#06b6d4',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.maxEnergyShield += count * 45;
-    }
-  },
-  buff_thorns_plating: {
-    id: 'buff_thorns_plating',
-    name: 'Reactive Shock Spikes',
-    category: 'DEFENSE / PROC',
-    description: 'Reflects 32 electrical damage back to any creature that strikes you.',
-    icon: '/assets/armor.png',
-    accentColor: '#a855f7',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.thornsDamage += count * 32;
-    }
-  },
-  buff_vampiric_siphon: {
-    id: 'buff_vampiric_siphon',
-    name: 'Bio-Siphon Protocol',
-    category: 'SURVIVAL AUGMENT',
-    description: 'Heals +6 Health instantly whenever you eliminate an enemy.',
-    icon: '/assets/life_steal.png',
-    accentColor: '#ec4899',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.lifestealOnKill += count * 6;
-      stats.healingMultiplier += count * 0.15;
-    }
-  },
-  buff_executioner: {
-    id: 'buff_executioner',
-    name: 'Death Mark Protocol',
-    category: 'OFFENSE AUGMENT',
-    description: 'Instantly executes any normal enemy whose Health drops below 18%.',
-    icon: '/assets/critical_damage.png',
-    accentColor: '#dc2626',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.executionThreshold = Math.min(0.35, stats.executionThreshold + count * 0.09);
-    }
-  },
-  buff_combat_drone: {
-    id: 'buff_combat_drone',
-    name: 'Autonomous Attack Drone',
-    category: 'AUTONOMOUS DRONE',
-    description: 'Deploys an automated support drone that orbits you and fires lasers at nearby foes.',
-    icon: '/assets/overseer_artifact.png',
-    accentColor: '#38bdf8',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.droneCount += count;
-    }
-  },
-  buff_shock_trail: {
-    id: 'buff_shock_trail',
-    name: 'Kinetic Dash — Static Discharge',
-    category: 'SURVIVAL / UTILITY',
-    description: 'Augments Kinetic Dash: Leaves an electrified plasma trail along your dash path that shocks and damages pursuing foes.',
-    icon: '/assets/proj_pulse.png',
-    accentColor: '#c084fc',
-    applyStack: (stats: CalculatedStats) => {
-      stats.shockingDash = true;
-    }
-  },
-  buff_speed_demon: {
-    id: 'buff_speed_demon',
-    name: 'Momentum Capacitor',
-    category: 'HYBRID AUGMENT',
-    description: 'Converts speed to firepower: gain +1% bonus Damage per 5 points of Movement Speed.',
-    icon: '/assets/movement_speed.png',
-    accentColor: '#10b981',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      const speedBonus = ((stats.moveSpeed - 220) / 5) * 0.01 * count;
-      stats.damageMultiplier += Math.max(0, speedBonus);
-    }
-  },
-  buff_giant_slayer: {
-    id: 'buff_giant_slayer',
-    name: 'Behemoth Breaker',
-    category: 'OFFENSE AUGMENT',
-    description: '+45% Bonus Damage against Elite and Boss alien monsters.',
-    icon: '/assets/void_goliath.png',
-    accentColor: '#f43f5e',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.giantSlayerBonus += count * 0.45;
-    }
-  },
-  buff_jet_overclock: {
-    id: 'buff_jet_overclock',
-    name: 'Jetpack Supercharger',
-    category: 'TRAVERSAL AUGMENT',
-    description: '+50% Max Jetpack Fuel and +25% horizontal air gliding speed.',
-    icon: '/assets/jet_plume.png',
-    accentColor: '#0284c7',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.moveSpeed *= 1 + count * 0.08;
-    }
-  },
-  buff_bouncing_slugs: {
-    id: 'buff_bouncing_slugs',
-    name: 'Ricochet Matrix',
-    category: 'WEAPON AUGMENT',
-    description: 'Kinetic energy pulses bounce off terrain cliffs and obstacles toward enemies.',
-    icon: '/assets/attack_power.png',
-    accentColor: '#f59e0b',
-    applyStack: (stats: CalculatedStats) => {
-      stats.bouncingProjectiles = true;
-    }
-  },
-  buff_titanium_armor: {
-    id: 'buff_titanium_armor',
-    name: 'Plated Exoskeleton',
-    category: 'DEFENSE AUGMENT',
-    description: 'Reduces all incoming damage by a flat 4 damage (minimum 1 damage taken).',
-    icon: '/assets/armor.png',
-    accentColor: '#64748b',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.flatArmor += count * 4;
-    }
-  },
-  buff_greedy_leech: {
-    id: 'buff_greedy_leech',
-    name: 'Shard Attunement',
-    category: 'ECONOMY / UTILITY',
-    description: 'Collecting currency shards grants +15% Attack Speed for 4 seconds.',
-    icon: '/assets/currency_shard.png',
-    accentColor: '#facc15',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.pickupRadius += count * 35;
-    }
-  },
-  buff_resonance_booster: {
-    id: 'buff_resonance_booster',
-    name: 'Artifact Harmonizer',
-    category: 'OBJECTIVE AUGMENT',
-    description: 'Overseer Artifact charges +35% faster from all enemy kills.',
-    icon: '/assets/overseer_artifact.png',
-    accentColor: '#eab308',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.artifactChargeMultiplier += count * 0.35;
-    }
-  },
-  buff_stun_rounds: {
-    id: 'buff_stun_rounds',
-    name: 'Concussive Disruption',
-    category: 'CROWD CONTROL',
-    description: '+16% chance on hit to stagger and stun enemies for 1.2 seconds.',
-    icon: '/assets/proj_pulse.png',
-    accentColor: '#3b82f6',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.stunChance = Math.min(0.65, stats.stunChance + count * 0.16);
-    }
-  },
-  buff_thermite_infusion: {
-    id: 'buff_thermite_infusion',
-    name: 'Plasma Ignition',
-    category: 'DAMAGE / ELEMENTAL',
-    description: 'All attacks ignite enemies and scorch the ground for bonus burning damage.',
-    icon: '/assets/proj_wave.png',
-    accentColor: '#ea580c',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.damageMultiplier += count * 0.12;
-    }
-  },
-  buff_berserker_stim: {
-    id: 'buff_berserker_stim',
-    name: 'Berserker Adrenaline',
-    category: 'SURVIVAL / DAMAGE',
-    description: 'Grants +55% Attack Speed and +20% Movement Speed when below 40% Health.',
-    icon: '/assets/item_overdrive.png',
-    accentColor: '#b91c1c',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.damageMultiplier += count * 0.10;
-    }
-  },
-  buff_frost_landing: {
-    id: 'buff_frost_landing',
-    name: 'Cryo Impact Plating',
-    category: 'SURVIVAL / UTILITY',
-    description: 'Colliding with enemies or completing a dash triggers a freezing nova that chills and slows nearby foes.',
-    icon: '/assets/proj_wave.png',
-    accentColor: '#38bdf8',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.frostChance = Math.min(0.80, stats.frostChance + count * 0.15);
-    }
-  },
-  buff_nanite_swarm: {
-    id: 'buff_nanite_swarm',
-    name: 'Self-Replicating Nanites',
-    category: 'PROC / SWARM',
-    description: 'Killing an enemy constructs 2 autonomous nanites that seek and strike other foes.',
-    icon: '/assets/item_chain_spark.png',
-    accentColor: '#06b6d4',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.chainSparkDamage += count * 12;
-    }
-  },
-  buff_superconductor: {
-    id: 'buff_superconductor',
-    name: 'High-Voltage Capacitor',
-    category: 'PROC / ELECTRIC',
-    description: 'Chain Spark jumps to +2 additional targets and deals +50% critical damage.',
-    icon: '/assets/critical_damage.png',
-    accentColor: '#a855f7',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.chainSparkChance = Math.min(0.85, stats.chainSparkChance + count * 0.12);
-      stats.chainSparkDamage += count * 22;
-    }
-  },
-  buff_lead_curtain: {
-    id: 'buff_lead_curtain',
-    name: 'Hyper-Density Munitions',
-    category: 'WEAPON AUGMENT',
-    description: '+30% Projectile collision hitbox size and +18% base projectile damage.',
-    icon: '/assets/attack_power.png',
-    accentColor: '#475569',
-    applyStack: (stats: CalculatedStats, count: number) => {
-      stats.projectileRadiusMultiplier = (stats.projectileRadiusMultiplier || 1.0) + count * 0.30;
-      stats.damageMultiplier += count * 0.18;
-    }
-  },
-  buff_second_wind: {
-    id: 'buff_second_wind',
-    name: 'Emergency Defibrillator',
-    category: 'SURVIVAL PROTOCOL',
-    description: 'Survive what would be a fatal blow once per stage, restoring 50% Health.',
-    icon: '/assets/health.png',
-    accentColor: '#10b981',
-    applyStack: (stats: CalculatedStats) => {
-      stats.hasSecondWind = true;
-    }
-  },
-
   // --- EXCLUSIVE EVENT: BASIC SKILL ENHANCEMENTS (Primal Totem) ---
   // --- EXCLUSIVE EVENT 1: BASIC ATTACK (LMB) ENHANCEMENTS (Ancient Bio-Resonance Totem) ---
   buff_chill_beam: {
@@ -796,163 +444,1394 @@ export const BUFF_REGISTRY: Record<BuffId, BuffDef> = {
     applyStack: () => {}
   },
 
-  // --- LEGACY PROTOTYPES (Preserved without exclusiveEvent for backward compatibility) ---
-  buff_skill_scatter: {
-    id: 'buff_skill_scatter',
-    name: 'Scatter Rounds',
-    category: 'COMBAT / WEAPONS',
-    description: 'Fires 2 additional flanking golden blaster bolts in a tight burst cone (+1 Pierce).',
-    icon: '/assets/rally_command.png',
-    accentColor: '#f97316',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
-  },
-  buff_skill_arc: {
-    id: 'buff_skill_arc',
-    name: 'Arc Conduction',
-    category: 'COMBAT / WEAPONS',
-    description: 'Every blaster bolt hit arcs high-voltage chain lightning to nearby enemies.',
-    icon: '/assets/rally_command.png',
+  // =========================================================================
+  // UNIVERSAL BUFFS (18 Total: U01–U18)
+  // =========================================================================
+  buff_momentum: {
+    id: 'buff_momentum',
+    name: 'Momentum',
+    category: 'UNIVERSAL BUFF • MOBILITY',
+    description: '+2% movement speed per stack (max 15).',
+    icon: '/assets/movement_speed.png',
     accentColor: '#38bdf8',
-    isAttributeUpgrade: true,
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 15,
     applyStack: () => {}
   },
-  buff_skill_hyper_beam: {
-    id: 'buff_skill_hyper_beam',
-    name: 'Piercing Rounds',
-    category: 'COMBAT / WEAPONS',
-    description: 'Supercharges blaster bolts with +35% Damage, +40% Velocity, and +3 Pierce.',
-    icon: '/assets/proj_wave.png',
-    accentColor: '#a855f7',
-    isAttributeUpgrade: true,
-    applyStack: (stats: CalculatedStats) => {
-      stats.damageMultiplier += 0.35;
+  buff_thruster_core: {
+    id: 'buff_thruster_core',
+    name: 'Thruster Core',
+    category: 'UNIVERSAL BUFF • MOBILITY',
+    description: '+5% jetpack fuel capacity per stack (max 10).',
+    icon: '/assets/jet_plume.png',
+    accentColor: '#60a5fa',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: (stats, n) => {
+      stats.jetpackCapacityMultiplier += 0.05 * n;
     }
   },
-  buff_skill_gatling: {
-    id: 'buff_skill_gatling',
-    name: 'Rapid Overclock',
-    category: 'COMBAT / WEAPONS',
-    description: 'Permanently grants +25% Attack Speed.',
-    icon: '/assets/item_overdrive.png',
-    accentColor: '#eab308',
-    isAttributeUpgrade: true,
-    applyStack: (stats: CalculatedStats) => {
-      stats.attackSpeedMultiplier += 0.25;
+  buff_fuel_recycler: {
+    id: 'buff_fuel_recycler',
+    name: 'Fuel Recycler',
+    category: 'UNIVERSAL BUFF • MOBILITY',
+    description: '+5% jetpack fuel recharge rate per stack (max 10).',
+    icon: '/assets/energy_flare.png',
+    accentColor: '#22d3ee',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: (stats, n) => {
+      stats.jetpackRegenMultiplier += 0.05 * n;
     }
   },
-  buff_skill_cryo_grenade: {
-    id: 'buff_skill_cryo_grenade',
-    name: 'Cryogenic Infusion',
-    category: 'COMBAT / WEAPONS',
-    description: 'Secondary attacks freeze enemies for 2.0s and leave a chilling frost wake.',
-    icon: '/assets/defensive_protocol.png',
-    accentColor: '#00e5ff',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
+  buff_aerial_boost: {
+    id: 'buff_aerial_boost',
+    name: 'Aerial Boost',
+    category: 'UNIVERSAL SPECIAL • MOBILITY',
+    description: '+1 additional midair jump per stack (uncapped).',
+    icon: '/assets/jet_plume.png',
+    accentColor: '#a78bfa',
+    buffPool: 'universal',
+    dropWeight: 5,
+    isAdditionalJump: true,
+    isUncapped: true,
+    applyStack: (stats, n) => {
+      stats.extraAirJumps += n;
+    }
   },
-  buff_skill_gravity_vortex: {
-    id: 'buff_skill_gravity_vortex',
-    name: 'Gravitational Compression',
-    category: 'COMBAT / WEAPONS',
-    description: 'Secondary attacks create a brief gravitational compression well pulling foes inward.',
-    icon: '/assets/defensive_protocol.png',
-    accentColor: '#a855f7',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
+  buff_overcharge: {
+    id: 'buff_overcharge',
+    name: 'Overcharge',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: '+2% all damage dealt per stack (max 15).',
+    icon: '/assets/attack_power.png',
+    accentColor: '#f87171',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 15,
+    applyStack: (stats, n) => {
+      stats.damageMultiplier += 0.02 * n;
+    }
   },
-  buff_skill_blink: {
-    id: 'buff_skill_blink',
-    name: 'Phase Surge Capacitor',
-    category: 'COMBAT / WEAPONS',
-    description: 'Increases dash speed and distance by +35% and unleashes a concussive phase shockwave.',
-    icon: '/assets/combat_dash.png',
-    accentColor: '#c084fc',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
-  },
-  buff_skill_nuke: {
-    id: 'buff_skill_nuke',
-    name: 'Orbital Strike — Multi-Beam',
-    category: 'COMBAT / WEAPONS',
-    description: 'Legacy multi-beam orbital strike prototype.',
-    icon: '/assets/tactical_strike.png',
+  buff_precision: {
+    id: 'buff_precision',
+    name: 'Precision',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: '+3% critical strike chance per stack (max 10).',
+    icon: '/assets/critical_chance.png',
     accentColor: '#fbbf24',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: (stats, n) => {
+      stats.critChance += 0.03 * n;
+    }
   },
-  buff_skill_singularity: {
-    id: 'buff_skill_singularity',
-    name: 'Orbital Strike — Void Singularity',
-    category: 'COMBAT / WEAPONS',
-    description: 'Legacy singularity orbital strike prototype.',
-    icon: '/assets/overseer_artifact.png',
-    accentColor: '#a855f7',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
-  },
-  buff_skill_chrono_stasis: {
-    id: 'buff_skill_chrono_stasis',
-    name: 'Orbital Strike — Cryo Nova',
-    category: 'COMBAT / WEAPONS',
-    description: 'Legacy cryogenic orbital strike prototype.',
-    icon: '/assets/cooldown_reduction.png',
-    accentColor: '#38bdf8',
-    isAttributeUpgrade: true,
-    applyStack: () => {}
-  },
-  buff_skill_orbital_lance: {
-    id: 'buff_skill_orbital_lance',
-    name: 'ULTIMATE: Cataclysmic Lance',
-    category: '★ ULTIMATE EVOLUTION',
-    description: 'Legacy Orbital Lance prototype.',
+  buff_critical_surge: {
+    id: 'buff_critical_surge',
+    name: 'Critical Surge',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: '+8% critical strike damage multiplier per stack (max 6).',
     icon: '/assets/critical_damage.png',
     accentColor: '#f59e0b',
-    isAttributeUpgrade: true,
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: (stats, n) => {
+      stats.critMultiplier += 0.08 * n;
+    }
+  },
+  buff_rapid_fire: {
+    id: 'buff_rapid_fire',
+    name: 'Rapid Fire',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: '+2% LMB attack speed per stack (max 15).',
+    icon: '/assets/attack_speed.png',
+    accentColor: '#fb923c',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 15,
+    applyStack: (stats, n) => {
+      stats.lmbAttackSpeedMultiplier += 0.02 * n;
+    }
+  },
+  buff_vitality: {
+    id: 'buff_vitality',
+    name: 'Vitality',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: '+3% max health per stack (max 15).',
+    icon: '/assets/health.png',
+    accentColor: '#4ade80',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 15,
+    applyStack: () => {}
+  },
+  buff_reinforced_plating: {
+    id: 'buff_reinforced_plating',
+    name: 'Reinforced Plating',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: '+2% damage reduction per stack (max 8).',
+    icon: '/assets/armor.png',
+    accentColor: '#94a3b8',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: (stats, n) => {
+      stats.damageReduction += 0.02 * n;
+    }
+  },
+  buff_regeneration: {
+    id: 'buff_regeneration',
+    name: 'Regeneration',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: '+0.15% max health regeneration per second per stack (max 10).',
+    icon: '/assets/life_steal.png',
+    accentColor: '#34d399',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: () => {}
+  },
+  buff_life_siphon: {
+    id: 'buff_life_siphon',
+    name: 'Life Siphon',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: 'Heal for 0.15% of damage dealt per stack, capped at 1% max HP/s (max 5).',
+    icon: '/assets/life_steal.png',
+    accentColor: '#f43f5e',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 5,
+    applyStack: (stats, n) => {
+      stats.lifeSiphonPercent += 0.0015 * n;
+    }
+  },
+  buff_thorns: {
+    id: 'buff_thorns',
+    name: 'Thorns',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: 'Reflect 6% of incoming damage per stack back to attackers (max 8).',
+    icon: '/assets/defensive_protocol.png',
+    accentColor: '#a3e635',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: (stats, n) => {
+      stats.thornsReflectFraction += 0.06 * n;
+    }
+  },
+  buff_emergency_barrier: {
+    id: 'buff_emergency_barrier',
+    name: 'Emergency Barrier',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: 'Below 30% HP, gain a barrier equal to 4% max HP per stack for 3s (25s ICD, max 4).',
+    icon: '/assets/defensive_protocol.png',
+    accentColor: '#38bdf8',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 4,
+    applyStack: (stats, n) => {
+      stats.emergencyBarrierFraction += 0.04 * n;
+    }
+  },
+  buff_accelerator: {
+    id: 'buff_accelerator',
+    name: 'Accelerator',
+    category: 'UNIVERSAL BUFF • UTILITY',
+    description: '-2% skill cooldown duration per stack (max 10).',
+    icon: '/assets/cooldown_reduction.png',
+    accentColor: '#818cf8',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: (stats, n) => {
+      stats.skillCooldownMultiplier -= 0.02 * n;
+    }
+  },
+  buff_magnetic_field: {
+    id: 'buff_magnetic_field',
+    name: 'Magnetic Field',
+    category: 'UNIVERSAL BUFF • UTILITY',
+    description: '+12% pickup attraction radius per stack (max 10).',
+    icon: '/assets/loot_orb.png',
+    accentColor: '#2dd4bf',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: () => {}
+  },
+  buff_fortune: {
+    id: 'buff_fortune',
+    name: 'Fortune',
+    category: 'UNIVERSAL BUFF • UTILITY',
+    description: '+4% currency gain per stack (max 10).',
+    icon: '/assets/currency_shard.png',
+    accentColor: '#eab308',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 10,
+    applyStack: (stats, n) => {
+      stats.currencyMultiplier += 0.04 * n;
+    }
+  },
+  buff_area_amplifier: {
+    id: 'buff_area_amplifier',
+    name: 'Area Amplifier',
+    category: 'UNIVERSAL BUFF • UTILITY',
+    description: '+6% Ultimate AoE radius per stack, globally capped at +50% (max 6).',
+    icon: '/assets/orbital_reticle.png',
+    accentColor: '#c084fc',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: (stats, n) => {
+      stats.ultimateRadiusBonusRaw += 0.06 * n;
+    }
+  },
+
+  // =========================================================================
+  // TRIGGER BUFFS (15 Total: T01–T15)
+  // =========================================================================
+  buff_chain_reaction: {
+    id: 'buff_chain_reaction',
+    name: 'Chain Reaction',
+    category: 'TRIGGER BUFF • ON KILL',
+    description: 'Enemies explode on death for 6% base LMB damage per stack in 180u radius (2s ICD, max 6).',
+    icon: '/assets/energy_flare.png',
+    accentColor: '#f97316',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: () => {}
+  },
+  buff_blood_rush: {
+    id: 'buff_blood_rush',
+    name: 'Blood Rush',
+    category: 'TRIGGER BUFF • ON KILL',
+    description: '3 kills within 5s grants +3% LMB attack speed & +2% move speed per stack for 4s (max 8).',
+    icon: '/assets/attack_speed.png',
+    accentColor: '#ef4444',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_second_wind: {
+    id: 'buff_second_wind',
+    name: 'Second Wind',
+    category: 'TRIGGER BUFF • ON ELITE KILL',
+    description: 'Eliminating an elite or boss restores 3% max HP per stack (12s ICD, max 5).',
+    icon: '/assets/health.png',
+    accentColor: '#4ade80',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 5,
+    applyStack: () => {}
+  },
+  buff_executioner: {
+    id: 'buff_executioner',
+    name: 'Executioner',
+    category: 'TRIGGER BUFF • LOW HP TARGET',
+    description: '+2% bonus damage per stack against enemies below 30% HP (max 8).',
+    icon: '/assets/attack_power.png',
+    accentColor: '#dc2626',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_combat_focus: {
+    id: 'buff_combat_focus',
+    name: 'Combat Focus',
+    category: 'TRIGGER BUFF • HIT CADENCE',
+    description: 'Every 5th direct hit deals +5% bonus damage per stack (max 8).',
+    icon: '/assets/critical_chance.png',
+    accentColor: '#facc15',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_final_stand: {
+    id: 'buff_final_stand',
+    name: 'Final Stand',
+    category: 'TRIGGER BUFF • LOW HP SELF',
+    description: 'Below 40% HP: gain +3% all damage and +2% damage reduction per stack (max 8).',
+    icon: '/assets/rally_command.png',
+    accentColor: '#fb7185',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_static_discharge: {
+    id: 'buff_static_discharge',
+    name: 'Static Discharge',
+    category: 'TRIGGER BUFF • ARC LIGHTNING',
+    description: 'Every 6s, direct attacks chain arc lightning to up to 3 enemies for 5% base LMB damage/stack (max 6).',
+    icon: '/assets/proj_wave.png',
+    accentColor: '#38bdf8',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: () => {}
+  },
+  buff_aftershock: {
+    id: 'buff_aftershock',
+    name: 'Aftershock',
+    category: 'TRIGGER BUFF • LANDING',
+    description: 'Landing after >0.15s airborne unleashes a 200u shockwave for 4% base LMB damage/stack (3s ICD, max 8).',
+    icon: '/assets/tactical_strike.png',
+    accentColor: '#a855f7',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_retaliation: {
+    id: 'buff_retaliation',
+    name: 'Retaliation',
+    category: 'TRIGGER BUFF • ON HIT TAKEN',
+    description: 'Taking damage grants +2% all damage per stack for 3s (max 8).',
+    icon: '/assets/armor.png',
+    accentColor: '#f59e0b',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_cooldown_harvest: {
+    id: 'buff_cooldown_harvest',
+    name: 'Cooldown Harvest',
+    category: 'TRIGGER BUFF • ON KILL',
+    description: 'Kills reduce active skill cooldowns by 0.08s per stack, capped at 0.5s/sec (max 6).',
+    icon: '/assets/cooldown_reduction.png',
+    accentColor: '#6366f1',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: () => {}
+  },
+  buff_fuel_harvest: {
+    id: 'buff_fuel_harvest',
+    name: 'Fuel Harvest',
+    category: 'TRIGGER BUFF • ON KILL',
+    description: 'Kills restore +1.5 jetpack fuel per stack (max 8).',
+    icon: '/assets/jet_plume.png',
+    accentColor: '#06b6d4',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_killing_momentum: {
+    id: 'buff_killing_momentum',
+    name: 'Killing Momentum',
+    category: 'TRIGGER BUFF • ON KILL',
+    description: 'Kills grant +1% move speed per stack for 3s, stacking up to 3 times (max 8).',
+    icon: '/assets/movement_speed.png',
+    accentColor: '#2dd4bf',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 8,
+    applyStack: () => {}
+  },
+  buff_reactive_shield: {
+    id: 'buff_reactive_shield',
+    name: 'Reactive Shield',
+    category: 'TRIGGER BUFF • HEAVY HIT',
+    description: 'Taking >15% max HP in one hit grants a 4% max HP barrier per stack for 3s (15s ICD, max 4).',
+    icon: '/assets/defensive_protocol.png',
+    accentColor: '#60a5fa',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 4,
+    applyStack: () => {}
+  },
+  buff_overkill: {
+    id: 'buff_overkill',
+    name: 'Overkill',
+    category: 'TRIGGER BUFF • EXCESS DAMAGE',
+    description: '4% excess killing-blow damage per stack jumps to the nearest enemy within 280u (max 6).',
+    icon: '/assets/orbital_beam.png',
+    accentColor: '#f43f5e',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 6,
+    applyStack: () => {}
+  },
+  buff_survival_instinct: {
+    id: 'buff_survival_instinct',
+    name: 'Survival Instinct',
+    category: 'TRIGGER BUFF • CRITICAL HP',
+    description: 'Dropping below 25% HP grants +0.25s stun immunity (max 1s) and +2% move speed/stack for 3s (30s ICD, max 5).',
+    icon: '/assets/combat_dash.png',
+    accentColor: '#22c55e',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 5,
     applyStack: () => {}
   },
 
-  // --- EXCLUSIVE EVENT: CORRUPTION TRIAL MUTATIONS (Trial of Corruption) ---
-  buff_corruption_dominance: {
-    id: 'buff_corruption_dominance',
-    name: 'MUTATION: Sovereign Dominion',
-    category: '★ CORRUPTION MUTATION',
-    description: 'Permanent +35% All Weapon Damage, +20% Movement Speed, and +15 Health Bio-Siphon on every elimination.',
+  // =========================================================================
+  // COMMANDER AUGMENT-SPECIFIC BUFFS (24 Total: 6 LMB, 6 RMB, 6 Dash, 6 Ult)
+  // =========================================================================
+  // --- Commander LMB ---
+  buff_cmd_cryo_amplification: {
+    id: 'buff_cmd_cryo_amplification',
+    name: 'Cryo Amplification',
+    category: 'COMMANDER AUGMENT • CHILL BEAM',
+    description: '+3% Chill Beam damage and +2% Chill slow intensity per stack (max 8).',
+    icon: '/assets/proj_pulse.png',
+    accentColor: '#67e8f9',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 8,
+    heroFilter: 'commander',
+    requiredAugment: 'chill_beam',
+    applyStack: () => {}
+  },
+  buff_cmd_thermal_focus: {
+    id: 'buff_cmd_thermal_focus',
+    name: 'Thermal Focus',
+    category: 'COMMANDER AUGMENT • CHILL BEAM',
+    description: '+5% Chill Beam width/radius and +4% beam range per stack (max 6).',
+    icon: '/assets/energy_flare.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'chill_beam',
+    applyStack: () => {}
+  },
+  buff_cmd_penetration_core: {
+    id: 'buff_cmd_penetration_core',
+    name: 'Penetration Core',
+    category: 'COMMANDER AUGMENT • PIERCING LASER',
+    description: '+1 Piercing Laser pierce per 2 stacks and +2% laser damage per stack (max 6).',
+    icon: '/assets/orbital_beam.png',
+    accentColor: '#818cf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'piercing_laser',
+    applyStack: () => {}
+  },
+  buff_cmd_coherent_optics: {
+    id: 'buff_cmd_coherent_optics',
+    name: 'Coherent Optics',
+    category: 'COMMANDER AUGMENT • PIERCING LASER',
+    description: '+4% laser beam width and +3% projectile speed per stack (max 6).',
+    icon: '/assets/critical_chance.png',
+    accentColor: '#a78bfa',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'piercing_laser',
+    applyStack: () => {}
+  },
+  buff_cmd_blade_reach: {
+    id: 'buff_cmd_blade_reach',
+    name: 'Blade Reach',
+    category: 'COMMANDER AUGMENT • EXTENDED SLASH',
+    description: '+5% slash arc radius and +4% arc angle per stack (max 6).',
+    icon: '/assets/proj_wave.png',
+    accentColor: '#f472b6',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'extended_slash',
+    applyStack: () => {}
+  },
+  buff_cmd_heavy_swing: {
+    id: 'buff_cmd_heavy_swing',
+    name: 'Heavy Swing',
+    category: 'COMMANDER AUGMENT • EXTENDED SLASH',
+    description: '+3% Extended Slash damage per stack (max 8).',
+    icon: '/assets/attack_power.png',
+    accentColor: '#fb7185',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 8,
+    heroFilter: 'commander',
+    requiredAugment: 'extended_slash',
+    applyStack: () => {}
+  },
+
+  // --- Commander RMB ---
+  buff_cmd_twin_edge: {
+    id: 'buff_cmd_twin_edge',
+    name: 'Twin Edge',
+    category: 'COMMANDER AUGMENT • SCISSOR SLASH',
+    description: '+3% Scissor Slash damage per stack (max 8).',
+    icon: '/assets/attack_power.png',
+    accentColor: '#f43f5e',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 8,
+    heroFilter: 'commander',
+    requiredAugment: 'scissor_slash',
+    applyStack: () => {}
+  },
+  buff_cmd_serrated_cut: {
+    id: 'buff_cmd_serrated_cut',
+    name: 'Serrated Cut',
+    category: 'COMMANDER AUGMENT • SCISSOR SLASH',
+    description: 'Applies bleed dealing 1% target current HP/s per stack over 2s, non-boss cap 4%/s (max 6).',
     icon: '/assets/life_steal.png',
-    accentColor: '#ec4899',
-    exclusiveEvent: 'void_corruption',
-    applyStack: (stats: CalculatedStats) => {
-      stats.damageMultiplier += 0.35;
-      stats.moveSpeed *= 1.20;
-      stats.lifestealOnKill += 15;
-    }
+    accentColor: '#e11d48',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'scissor_slash',
+    applyStack: () => {}
   },
-  buff_corruption_chitin: {
-    id: 'buff_corruption_chitin',
-    name: 'MUTATION: Void Chitin Carapace',
-    category: '★ CORRUPTION MUTATION',
-    description: 'Permanent +180 Max Energy Shield, +25% Damage Reduction, and 60 Thorns reflected to attackers.',
-    icon: '/assets/armor.png',
-    accentColor: '#8b5cf6',
-    exclusiveEvent: 'void_corruption',
-    applyStack: (stats: CalculatedStats) => {
-      stats.maxEnergyShield += 180;
-      stats.damageReduction = Math.min(0.65, stats.damageReduction + 0.25);
-      stats.thornsDamage += 60;
-    }
+  buff_cmd_shatter_nova: {
+    id: 'buff_cmd_shatter_nova',
+    name: 'Shatter Nova',
+    category: 'COMMANDER AUGMENT • FROST BURST',
+    description: '+5% Frost Burst radius and +3% burst damage per stack (max 6).',
+    icon: '/assets/proj_wave.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'frost_burst',
+    applyStack: () => {}
   },
-  buff_corruption_catalyst: {
-    id: 'buff_corruption_catalyst',
-    name: 'MUTATION: Bio-Catalyst Overdrive',
-    category: '★ CORRUPTION MUTATION',
-    description: 'Permanent -30% Cooldowns across all skills, +30% Attack Speed, and enemies drop +100% bonus Genes.',
+  buff_cmd_deep_freeze: {
+    id: 'buff_cmd_deep_freeze',
+    name: 'Deep Freeze',
+    category: 'COMMANDER AUGMENT • FROST BURST',
+    description: '+0.2s Frost Burst chill duration and +3% slow intensity per stack (max 5).',
+    icon: '/assets/energy_flare.png',
+    accentColor: '#22d3ee',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'frost_burst',
+    applyStack: () => {}
+  },
+  buff_cmd_orbital_extension: {
+    id: 'buff_cmd_orbital_extension',
+    name: 'Orbital Extension',
+    category: 'COMMANDER AUGMENT • ORBITING BLADE',
+    description: '+0.3s Orbiting Blade duration and +3% blade orbital speed per stack (max 6).',
+    icon: '/assets/rune_circle.png',
+    accentColor: '#a855f7',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'orbiting_blade',
+    applyStack: () => {}
+  },
+  buff_cmd_razor_satellites: {
+    id: 'buff_cmd_razor_satellites',
+    name: 'Razor Satellites',
+    category: 'COMMANDER AUGMENT • ORBITING BLADE',
+    description: '+3% Orbiting Blade damage per stack (max 8).',
+    icon: '/assets/critical_damage.png',
+    accentColor: '#c084fc',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 8,
+    heroFilter: 'commander',
+    requiredAugment: 'orbiting_blade',
+    applyStack: () => {}
+  },
+
+  // --- Commander Dash ---
+  buff_cmd_impulse_capacitor: {
+    id: 'buff_cmd_impulse_capacitor',
+    name: 'Impulse Capacitor',
+    category: 'COMMANDER AUGMENT • EXTENDED DASH',
+    description: '-3% Dash cooldown per stack (max 6).',
     icon: '/assets/cooldown_reduction.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'extended_dash',
+    applyStack: (stats, n) => {
+      stats.dashCooldownMultiplier -= 0.03 * n;
+    }
+  },
+  buff_cmd_kinetic_stride: {
+    id: 'buff_cmd_kinetic_stride',
+    name: 'Kinetic Stride',
+    category: 'COMMANDER AUGMENT • EXTENDED DASH',
+    description: '+4% Dash travel distance per stack (max 5).',
+    icon: '/assets/combat_dash.png',
+    accentColor: '#60a5fa',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'extended_dash',
+    applyStack: () => {}
+  },
+  buff_cmd_kinetic_shell: {
+    id: 'buff_cmd_kinetic_shell',
+    name: 'Kinetic Shell',
+    category: 'COMMANDER AUGMENT • SHOCK DASH',
+    description: 'Shock Dash grants a Kinetic Shell barrier (+0.15s duration & +3% barrier durability per stack, max 6).',
+    icon: '/assets/defensive_protocol.png',
+    accentColor: '#22d3ee',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'shock_dash',
+    applyStack: () => {}
+  },
+  buff_cmd_concussive_wave: {
+    id: 'buff_cmd_concussive_wave',
+    name: 'Concussive Wave',
+    category: 'COMMANDER AUGMENT • SHOCK DASH',
+    description: '+5% Shock Dash shockwave radius and +3% shockwave damage per stack (max 6).',
+    icon: '/assets/tactical_strike.png',
+    accentColor: '#facc15',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'shock_dash',
+    applyStack: () => {}
+  },
+  buff_cmd_adrenal_extension: {
+    id: 'buff_cmd_adrenal_extension',
+    name: 'Adrenal Extension',
+    category: 'COMMANDER AUGMENT • TELEPORT',
+    description: '+0.25s post-Teleport speed surge & +0.15s arrival stun duration per stack (max 5).',
+    icon: '/assets/attack_speed.png',
+    accentColor: '#4ade80',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'teleport',
+    applyStack: () => {}
+  },
+  buff_cmd_velocity_surge: {
+    id: 'buff_cmd_velocity_surge',
+    name: 'Velocity Surge',
+    category: 'COMMANDER AUGMENT • TELEPORT',
+    description: '+4% post-Teleport movement speed burst per stack (max 6).',
+    icon: '/assets/movement_speed.png',
+    accentColor: '#34d399',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'teleport',
+    applyStack: () => {}
+  },
+
+  // --- Commander Ultimate ---
+  buff_cmd_gravitational_pull: {
+    id: 'buff_cmd_gravitational_pull',
+    name: 'Gravitational Pull',
+    category: 'COMMANDER AUGMENT • SINGULARITY',
+    description: '+5% Singularity pull strength and +3% pull duration per stack (max 6).',
+    icon: '/assets/orbital_reticle.png',
+    accentColor: '#a855f7',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'singularity',
+    applyStack: () => {}
+  },
+  buff_cmd_event_horizon: {
+    id: 'buff_cmd_event_horizon',
+    name: 'Event Horizon',
+    category: 'COMMANDER AUGMENT • SINGULARITY',
+    description: '+5% Singularity pull radius (capped +50% global) and +3% tick damage per stack (max 5).',
+    icon: '/assets/rune_circle.png',
+    accentColor: '#c084fc',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'singularity',
+    applyStack: (stats, n) => {
+      stats.ultimateRadiusBonusRaw += 0.05 * n;
+    }
+  },
+  buff_cmd_concentrated_salvo: {
+    id: 'buff_cmd_concentrated_salvo',
+    name: 'Concentrated Salvo',
+    category: 'COMMANDER AUGMENT • CONVERGENCE BARRAGE',
+    description: '+3% Convergence Barrage strike damage per stack (max 6).',
+    icon: '/assets/orbital_beam.png',
+    accentColor: '#fb923c',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'convergence_barrage',
+    applyStack: () => {}
+  },
+  buff_cmd_pinpoint_collapse: {
+    id: 'buff_cmd_pinpoint_collapse',
+    name: 'Pinpoint Collapse',
+    category: 'COMMANDER AUGMENT • CONVERGENCE BARRAGE',
+    description: '+4% Convergence Barrage impact radius per stack, globally capped at +50% (max 5).',
+    icon: '/assets/tactical_strike.png',
+    accentColor: '#f59e0b',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'convergence_barrage',
+    applyStack: (stats, n) => {
+      stats.ultimateRadiusBonusRaw += 0.04 * n;
+    }
+  },
+  buff_cmd_subzero_detonation: {
+    id: 'buff_cmd_subzero_detonation',
+    name: 'Subzero Detonation',
+    category: 'COMMANDER AUGMENT • CRYOGENIC IMPACT',
+    description: '+3% Cryogenic Impact freeze damage and +2% slow intensity per stack (max 6).',
+    icon: '/assets/proj_wave.png',
+    accentColor: '#67e8f9',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 6,
+    heroFilter: 'commander',
+    requiredAugment: 'cryogenic_impact',
+    applyStack: () => {}
+  },
+  buff_cmd_permafrost_field: {
+    id: 'buff_cmd_permafrost_field',
+    name: 'Permafrost Field',
+    category: 'COMMANDER AUGMENT • CRYOGENIC IMPACT',
+    description: '+0.3s lingering Cryogenic Impact zone duration per stack (max 5).',
+    icon: '/assets/totem_carving.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 5,
+    heroFilter: 'commander',
+    requiredAugment: 'cryogenic_impact',
+    applyStack: () => {}
+  },
+
+  // =========================================================================
+  // DOCTOR AUGMENT-SPECIFIC BUFFS (24 Total: 6 LMB, 6 RMB, 6 Dash, 6 Ult)
+  // =========================================================================
+  // --- Doctor LMB ---
+  buff_doc_contagion_return: {
+    id: 'buff_doc_contagion_return',
+    name: 'Contagion Return',
+    category: 'DOCTOR AUGMENT • RICOCHET OVERDOSE',
+    description: '+4% ricochet damage per stack (max 4, +16%). Applies to ricochet hits.',
+    icon: '/assets/doctor/icon_toxic_chain.png',
+    accentColor: '#4ade80',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'toxic_chain',
+    applyStack: () => {}
+  },
+  buff_doc_overdose_catalyst: {
+    id: 'buff_doc_overdose_catalyst',
+    name: 'Overdose Catalyst',
+    category: 'DOCTOR AUGMENT • RICOCHET OVERDOSE',
+    description: '+4% poison detonation damage per stack (max 4, +16%).',
+    icon: '/assets/proj_acid.png',
+    accentColor: '#22c55e',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'toxic_chain',
+    applyStack: () => {}
+  },
+  buff_doc_surgical_edge: {
+    id: 'buff_doc_surgical_edge',
+    name: 'Surgical Edge',
+    category: 'DOCTOR AUGMENT • ROTARY SCALPEL',
+    description: '+4% outgoing and returning scalpel blade damage per stack (max 4, +16%).',
+    icon: '/assets/doctor/icon_cryo_scalpel.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'cryogenic_scalpel',
+    applyStack: () => {}
+  },
+  buff_doc_cryogenic_residue: {
+    id: 'buff_doc_cryogenic_residue',
+    name: 'Cryogenic Residue',
+    category: 'DOCTOR AUGMENT • ROTARY SCALPEL',
+    description: '+0.25s chilled ground trail duration per stack (max 4, up to 4s).',
+    icon: '/assets/energy_flare.png',
+    accentColor: '#67e8f9',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'cryogenic_scalpel',
+    applyStack: () => {}
+  },
+  buff_doc_vital_reach: {
+    id: 'buff_doc_vital_reach',
+    name: 'Vital Reach',
+    category: 'DOCTOR AUGMENT • VITAL TETHERS',
+    description: '+4% tether targeting and connection range per stack (max 4, +16%).',
+    icon: '/assets/doctor/icon_vital_extraction.png',
+    accentColor: '#f43f5e',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'vital_extraction',
+    applyStack: () => {}
+  },
+  buff_doc_siphon_efficiency: {
+    id: 'buff_doc_siphon_efficiency',
+    name: 'Siphon Efficiency',
+    category: 'DOCTOR AUGMENT • VITAL TETHERS',
+    description: '+4% healing received from tether health drain per stack (max 4, +16%).',
+    icon: '/assets/life_steal.png',
+    accentColor: '#fb7185',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'vital_extraction',
+    applyStack: () => {}
+  },
+
+  // --- Doctor RMB ---
+  buff_doc_targeting_optics: {
+    id: 'buff_doc_targeting_optics',
+    name: 'Targeting Optics',
+    category: 'DOCTOR AUGMENT • EXPERIMENTAL DRONE',
+    description: '+5% drone targeting range per stack while respecting terrain LOS (max 4, +20%).',
+    icon: '/assets/doctor/icon_experimental_drones.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'experimental_drones',
+    applyStack: () => {}
+  },
+  buff_doc_calibrated_payload: {
+    id: 'buff_doc_calibrated_payload',
+    name: 'Calibrated Payload',
+    category: 'DOCTOR AUGMENT • EXPERIMENTAL DRONE',
+    description: '+4% drone damage per stack across all active drones (max 4, +16%).',
+    icon: '/assets/attack_power.png',
+    accentColor: '#60a5fa',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'experimental_drones',
+    applyStack: () => {}
+  },
+  buff_doc_toxic_diffusion: {
+    id: 'buff_doc_toxic_diffusion',
+    name: 'Toxic Diffusion',
+    category: 'DOCTOR AUGMENT • FRAGMENTATION BOMB',
+    description: '+4% fragmentation poison puddle radius per stack (max 4, +16%).',
+    icon: '/assets/doctor/icon_toxic_cluster.png',
+    accentColor: '#84cc16',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'toxic_cluster_bomb',
+    applyStack: () => {}
+  },
+  buff_doc_corrosive_residue: {
+    id: 'buff_doc_corrosive_residue',
+    name: 'Corrosive Residue',
+    category: 'DOCTOR AUGMENT • FRAGMENTATION BOMB',
+    description: '+0.25s fragmentation poison puddle duration per stack (max 4, +1s).',
+    icon: '/assets/proj_acid.png',
+    accentColor: '#4ade80',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'toxic_cluster_bomb',
+    applyStack: () => {}
+  },
+  buff_doc_projection_integrity: {
+    id: 'buff_doc_projection_integrity',
+    name: 'Projection Integrity',
+    category: 'DOCTOR AUGMENT • HOLOGRAPHIC DECOY',
+    description: '+5% decoy lifetime per stack (max 4, +20%).',
+    icon: '/assets/doctor/icon_holo_decoy.png',
+    accentColor: '#2dd4bf',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'holographic_decoy',
+    applyStack: () => {}
+  },
+  buff_doc_caustic_reprisal: {
+    id: 'buff_doc_caustic_reprisal',
+    name: 'Caustic Reprisal',
+    category: 'DOCTOR AUGMENT • HOLOGRAPHIC DECOY',
+    description: '+4% decoy explosion and toxic-goo damage per stack (max 4, +16%).',
+    icon: '/assets/proj_acid.png',
     accentColor: '#10b981',
-    exclusiveEvent: 'void_corruption',
-    applyStack: (stats: CalculatedStats) => {
-      stats.dashCooldownMultiplier *= 0.70;
-      stats.ultimateCooldownMultiplier *= 0.70;
-      stats.attackSpeedMultiplier += 0.30;
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'holographic_decoy',
+    applyStack: () => {}
+  },
+
+  // --- Doctor Dash ---
+  buff_doc_clinical_reach: {
+    id: 'buff_doc_clinical_reach',
+    name: 'Clinical Reach',
+    category: 'DOCTOR AUGMENT • EXTENDED DASH',
+    description: '+4% healing applied by Doctor Dash per stack (max 4, +16%).',
+    icon: '/assets/doctor/icon_extended_dash.png',
+    accentColor: '#34d399',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'extended_dash',
+    applyStack: () => {}
+  },
+  buff_doc_impact_dosage: {
+    id: 'buff_doc_impact_dosage',
+    name: 'Impact Dosage',
+    category: 'DOCTOR AUGMENT • EXTENDED DASH',
+    description: '+4% damage dealt to enemies passed through during Dash per stack (max 4, +16%).',
+    icon: '/assets/combat_dash.png',
+    accentColor: '#f97316',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'extended_dash',
+    applyStack: () => {}
+  },
+  buff_doc_sterile_interval: {
+    id: 'buff_doc_sterile_interval',
+    name: 'Sterile Interval',
+    category: 'DOCTOR AUGMENT • PHASE BARRIER',
+    description: '+0.1s post-Dash invulnerability per stack (max 3, up to 1.3s).',
+    icon: '/assets/doctor/icon_phase_barrier.png',
+    accentColor: '#38bdf8',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 3,
+    heroFilter: 'doctor',
+    requiredAugment: 'phase_barrier',
+    applyStack: () => {}
+  },
+  buff_doc_protective_triage: {
+    id: 'buff_doc_protective_triage',
+    name: 'Protective Triage',
+    category: 'DOCTOR AUGMENT • PHASE BARRIER',
+    description: '+4% healing applied to allies/self during therapeutic Dash per stack (max 4, +16%).',
+    icon: '/assets/health.png',
+    accentColor: '#4ade80',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'phase_barrier',
+    applyStack: () => {}
+  },
+  buff_doc_rush_persistence: {
+    id: 'buff_doc_rush_persistence',
+    name: 'Rush Persistence',
+    category: 'DOCTOR AUGMENT • ADRENALINE RUSH',
+    description: '+0.2s post-Dash speed-buff duration per stack (max 4, up to 2.3s).',
+    icon: '/assets/doctor/icon_adrenaline_rush.png',
+    accentColor: '#facc15',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'adrenaline_rush',
+    applyStack: () => {}
+  },
+  buff_doc_emergency_reflex: {
+    id: 'buff_doc_emergency_reflex',
+    name: 'Emergency Reflex',
+    category: 'DOCTOR AUGMENT • ADRENALINE RUSH',
+    description: '+2% LMB attack speed per stack while Adrenaline Rush is active (max 4, +8%).',
+    icon: '/assets/attack_speed.png',
+    accentColor: '#fb923c',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'adrenaline_rush',
+    applyStack: () => {}
+  },
+
+  // --- Doctor Ultimate ---
+  buff_doc_orbit_stabilizer: {
+    id: 'buff_doc_orbit_stabilizer',
+    name: 'Orbit Stabilizer',
+    category: 'DOCTOR AUGMENT • MOBILE SANCTUARY',
+    description: '+2% Mobile Sanctuary cross radius per stack, globally capped at +50% (max 4, +8%).',
+    icon: '/assets/doctor/icon_mobile_sanctuary.png',
+    accentColor: '#a855f7',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'mobile_sanctuary',
+    applyStack: (stats, n) => {
+      stats.ultimateRadiusBonusRaw += 0.02 * n;
+    }
+  },
+  buff_doc_vital_rotation: {
+    id: 'buff_doc_vital_rotation',
+    name: 'Vital Rotation',
+    category: 'DOCTOR AUGMENT • MOBILE SANCTUARY',
+    description: '+4% Mobile Sanctuary healing output per stack (max 4, +16%).',
+    icon: '/assets/health.png',
+    accentColor: '#4ade80',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'mobile_sanctuary',
+    applyStack: () => {}
+  },
+  buff_doc_celestial_endurance: {
+    id: 'buff_doc_celestial_endurance',
+    name: 'Celestial Endurance',
+    category: 'DOCTOR AUGMENT • ANGELIC DESCENT',
+    description: '+0.5s angel projection duration per stack (max 4, up to 12s).',
+    icon: '/assets/doctor/icon_divine_intervention.png',
+    accentColor: '#fde047',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'divine_intervention',
+    applyStack: () => {}
+  },
+  buff_doc_consecrated_cross: {
+    id: 'buff_doc_consecrated_cross',
+    name: 'Consecrated Cross',
+    category: 'DOCTOR AUGMENT • ANGELIC DESCENT',
+    description: '+4% initial 3s cross healing and damage per stack (max 4, +16%).',
+    icon: '/assets/doctor/icon_sacred_field.png',
+    accentColor: '#f59e0b',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'divine_intervention',
+    applyStack: () => {}
+  },
+  buff_doc_sustained_rain: {
+    id: 'buff_doc_sustained_rain',
+    name: 'Sustained Rain',
+    category: 'DOCTOR AUGMENT • RAIN OF CROSS',
+    description: '+0.25s rainfall duration per stack (max 4, +1s).',
+    icon: '/assets/doctor/icon_rain_of_crosses.png',
+    accentColor: '#22c55e',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'rain_of_crosses',
+    applyStack: () => {}
+  },
+  buff_doc_restorative_imprint: {
+    id: 'buff_doc_restorative_imprint',
+    name: 'Restorative Imprint',
+    category: 'DOCTOR AUGMENT • RAIN OF CROSS',
+    description: '+4% smaller ground cross healing and DoT damage per stack (max 4, +16%).',
+    icon: '/assets/life_steal.png',
+    accentColor: '#34d399',
+    buffPool: 'augment_specific',
+    dropWeight: 100,
+    maxStacks: 4,
+    heroFilter: 'doctor',
+    requiredAugment: 'rain_of_crosses',
+    applyStack: () => {}
+  },
+
+  // =========================================================================
+  // EXISTING +1 PROJECTILE BUFFS (2 Total: P01–P02)
+  // =========================================================================
+  buff_extra_lmb_projectile: {
+    id: 'buff_extra_lmb_projectile',
+    name: '+1 LMB Projectile',
+    category: 'PROJECTILE SPECIAL • LMB',
+    description: 'Adds +1 LMB projectile or beam per stack (subject to skill-specific limits).',
+    icon: '/assets/proj_pulse.png',
+    accentColor: '#fbbf24',
+    buffPool: 'projectile',
+    dropWeight: 100,
+    isExtraProjectile: true,
+    isUncapped: true,
+    applyStack: (stats, n) => {
+      stats.extraLmbProjectiles += n;
+    }
+  },
+  buff_extra_rmb_projectile: {
+    id: 'buff_extra_rmb_projectile',
+    name: '+1 RMB Projectile',
+    category: 'PROJECTILE SPECIAL • RMB',
+    description: 'Adds +1 RMB projectile/wave/drone/cluster bomb per stack (Drones max 7, Clusters max 5).',
+    icon: '/assets/proj_acid.png',
+    accentColor: '#c084fc',
+    buffPool: 'projectile',
+    dropWeight: 100,
+    isExtraProjectile: true,
+    isUncapped: true,
+    applyStack: (stats, n) => {
+      stats.extraRmbProjectiles += n;
+    }
+  },
+
+  // =========================================================================
+  // STAGE 1 EXPANDED EARLY-ELIGIBLE CATALOG (15 Total: E01–E15, Max Stacks 3)
+  // =========================================================================
+  buff_projectile_mesh: {
+    id: 'buff_projectile_mesh',
+    name: 'Projectile Mesh',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: 'Reduces incoming enemy projectile damage by 8% (+4% per stack, max 3), applied multiplicatively after armor.',
+    icon: '/assets/defensive_protocol.png',
+    accentColor: '#38bdf8',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.projectileDamageMitigation = (stats.projectileDamageMitigation || 0) + (0.08 + 0.04 * (s - 1));
+    }
+  },
+  buff_impact_harness: {
+    id: 'buff_impact_harness',
+    name: 'Impact Harness',
+    category: 'UNIVERSAL BUFF • DEFENSE',
+    description: 'Reduces incoming melee and contact damage by 8% (+4% per stack, max 3), applied multiplicatively after armor.',
+    icon: '/assets/armor.png',
+    accentColor: '#60a5fa',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.meleeDamageMitigation = (stats.meleeDamageMitigation || 0) + (0.08 + 0.04 * (s - 1));
+    }
+  },
+  buff_meltwater_treads: {
+    id: 'buff_meltwater_treads',
+    name: 'Meltwater Treads',
+    category: 'UNIVERSAL BUFF • MOBILITY',
+    description: 'Reduces water movement penalty by +7 percentage points per stack (68% -> 75% / 82% / 89%, max 3).',
+    icon: '/assets/movement_speed.png',
+    accentColor: '#06b6d4',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.waterSpeedBonus = (stats.waterSpeedBonus || 0) + 0.07 * s;
+    }
+  },
+  buff_rangefinder_array: {
+    id: 'buff_rangefinder_array',
+    name: 'Rangefinder Array',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: 'Deals +10% (+5% per stack, max 3) bonus direct damage against enemies at distance >= 500u.',
+    icon: '/assets/tactical_strike.png',
+    accentColor: '#f59e0b',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.longRangeDamageBonus = (stats.longRangeDamageBonus || 0) + (0.10 + 0.05 * (s - 1));
+    }
+  },
+  buff_point_blank_coil: {
+    id: 'buff_point_blank_coil',
+    name: 'Point-Blank Coil',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: 'Deals +8% (+4% per stack, max 3) bonus direct damage when within 220u of target edge.',
+    icon: '/assets/attack_power.png',
+    accentColor: '#fb7185',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.closeRangeDamageBonus = (stats.closeRangeDamageBonus || 0) + (0.08 + 0.04 * (s - 1));
+    }
+  },
+  buff_opening_pulse: {
+    id: 'buff_opening_pulse',
+    name: 'Opening Pulse',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: 'Deals +10% (+5% per stack, max 3) bonus damage to healthy enemies at or above 90% HP.',
+    icon: '/assets/critical_damage.png',
+    accentColor: '#f97316',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.openingPulseBonus = (stats.openingPulseBonus || 0) + (0.10 + 0.05 * (s - 1));
+    }
+  },
+  buff_titanbreaker_matrix: {
+    id: 'buff_titanbreaker_matrix',
+    name: 'Titanbreaker Matrix',
+    category: 'UNIVERSAL BUFF • OFFENSE',
+    description: 'Deals +6% bonus damage per stack (max 3 -> +18%) against Elites and Bosses.',
+    icon: '/assets/enemy_boss.png',
+    accentColor: '#ef4444',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.giantSlayerBonus += 0.06 * s;
+    }
+  },
+  buff_cryo_chem_catalyst: {
+    id: 'buff_cryo_chem_catalyst',
+    name: 'Cryo-Chem Catalyst',
+    category: 'UNIVERSAL BUFF • SYNERGY',
+    description: 'Deals +8% (+4% per stack, max 3) bonus damage to enemies afflicted with Chill, Electrified, or Toxic.',
+    icon: '/assets/proj_acid.png',
+    accentColor: '#22d3ee',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: (stats, n) => {
+      const s = Math.min(3, n);
+      stats.statusSynergyDamageBonus = (stats.statusSynergyDamageBonus || 0) + (0.08 + 0.04 * (s - 1));
+    }
+  },
+  buff_surveyors_beacon: {
+    id: 'buff_surveyors_beacon',
+    name: "Surveyor's Beacon",
+    category: 'UNIVERSAL BUFF • OBJECTIVE',
+    description: 'Each completed enhancement anomaly in the stage grants +4% (+2%/stack) Max HP and +3% (+1.5%/stack) Damage (max 3).',
+    icon: '/assets/overseer_artifact.png',
+    accentColor: '#a855f7',
+    buffPool: 'universal',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Computed dynamically from completedEnhancementCategories.size in calculateStats()
+    }
+  },
+  buff_dash_overclock: {
+    id: 'buff_dash_overclock',
+    name: 'Dash Overclock',
+    category: 'TRIGGER BUFF • UTILITY',
+    description: 'Dashing grants +10% (+4%/stack, max 3) LMB Attack Speed for 3s (8s ICD).',
+    icon: '/assets/combat_dash.png',
+    accentColor: '#38bdf8',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed effect handled in player.activeTimedEffects ('dash_overclock')
+    }
+  },
+  buff_first_contact_protocol: {
+    id: 'buff_first_contact_protocol',
+    name: 'First Contact Protocol',
+    category: 'TRIGGER BUFF • OPENER',
+    description: 'Striking an undamaged (100% HP) enemy grants +10% (+3%/stack, max 3) Attack Speed for 4s (8s ICD).',
+    icon: '/assets/attack_speed.png',
+    accentColor: '#fbbf24',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed effect handled in player.activeTimedEffects ('first_contact_protocol')
+    }
+  },
+  buff_aerial_focus: {
+    id: 'buff_aerial_focus',
+    name: 'Aerial Focus',
+    category: 'TRIGGER BUFF • AERIAL',
+    description: 'Remaining airborne for >= 1.5s grants +10% (+3%/stack, max 3) Crit Chance for 4s (once per jump).',
+    icon: '/assets/critical_chance.png',
+    accentColor: '#a7f3d0',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed effect handled in player.activeTimedEffects ('aerial_focus')
+    }
+  },
+  buff_pod_surge: {
+    id: 'buff_pod_surge',
+    name: 'Pod Surge',
+    category: 'TRIGGER BUFF • EXPLORATION',
+    description: 'Opening a Bio-Sac grants +15% (+5%/stack, max 3) Movement Speed for 8s (refreshes duration).',
+    icon: '/assets/organic_pod.png',
+    accentColor: '#4ade80',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed effect handled in player.activeTimedEffects ('pod_surge')
+    }
+  },
+  buff_apex_barrier: {
+    id: 'buff_apex_barrier',
+    name: 'Apex Barrier',
+    category: 'TRIGGER BUFF • DEFENSE',
+    description: 'Defeating an Elite or Boss grants an 8% (+4%/stack, max 3) Max HP Barrier Shield for 6s (10s ICD).',
+    icon: '/assets/item_vital_core.png',
+    accentColor: '#60a5fa',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed barrier shield handled on Elite/Boss defeat ('apex_barrier')
+    }
+  },
+  buff_resonance_siphon: {
+    id: 'buff_resonance_siphon',
+    name: 'Resonance Siphon',
+    category: 'TRIGGER BUFF • COMBO',
+    description: 'Casting your Secondary (RMB) empowers LMB attacks with +12% (+4%/stack, max 3) bonus damage for 3.5s (6s ICD).',
+    icon: '/assets/proj_pulse.png',
+    accentColor: '#e879f9',
+    buffPool: 'trigger',
+    dropWeight: 100,
+    maxStacks: 3,
+    applyStack: () => {
+      // Timed LMB damage bonus handled in player.activeTimedEffects ('resonance_siphon')
     }
   }
 };
@@ -960,18 +1839,159 @@ export const BUFF_REGISTRY: Record<BuffId, BuffDef> = {
 export const ALL_BUFF_IDS: BuffId[] = Object.keys(BUFF_REGISTRY) as BuffId[];
 
 /**
- * Picks 3 distinct BuffIds using the seeded RNG.
- * If filterEvent is supplied, draws EXCLUSIVELY from that event's pool!
- * If omitted, draws strictly from standard pure attribute upgrades (Chests / Level-up).
+ * Returns the configured flat-pool drop weight for a Buff:
+ * - Additional Jump stacks: 5 (uncapped, exponential decay after guaranteed pickup)
+ * - +1 LMB / RMB Projectile: 100 base (+25/miss after threshold)
+ * - Special buffs: 10
+ * - Ordinary Universal, Trigger, and eligible Augment-Specific buffs: 100
+ */
+export function getEffectiveBuffWeight(def: BuffDef, player?: PlayerState): number {
+  const idLow = def.id.toLowerCase();
+  const nameLow = (def.name || '').toLowerCase();
+  if (
+    def.isAdditionalJump ||
+    idLow.includes('extra_jump') ||
+    idLow.includes('additional_jump') ||
+    idLow.includes('double_jump') ||
+    nameLow.includes('additional jump') ||
+    def.id === 'buff_aerial_boost'
+  ) {
+    // Additional Jump Weight = MAX(0.01, 5 * 0.5^N) where N = additional random stacks after guaranteed pickup
+    const totalStacks = player?.buffs?.[def.id] || 0;
+    const freeOffset = player?.hasCollectedDoubleJumpPickup ? 1 : 0;
+    const randomStacksN = Math.max(0, totalStacks - freeOffset);
+    return Math.max(
+      AERIAL_BOOST_WEIGHT_CONFIG.minWeight,
+      AERIAL_BOOST_WEIGHT_CONFIG.baseWeight * Math.pow(AERIAL_BOOST_WEIGHT_CONFIG.decayFactor, randomStacksN)
+    );
+  }
+  if (
+    def.isExtraProjectile ||
+    def.buffPool === 'projectile' ||
+    idLow.includes('extra_projectile') ||
+    idLow.includes('plus_projectile') ||
+    nameLow.includes('+1 lmb') ||
+    nameLow.includes('+1 rmb') ||
+    nameLow.includes('lmb / rmb projectile')
+  ) {
+    const missStreak = player?.nonProjectileBuffCount ?? 0;
+    return Math.min(
+      PROJECTILE_PITY_CONFIG.maxWeight,
+      PROJECTILE_PITY_CONFIG.baseWeight +
+        Math.max(0, missStreak - PROJECTILE_PITY_CONFIG.threshold) * PROJECTILE_PITY_CONFIG.incrementPerBuff
+    );
+  }
+  if (def.isSpecial || BUFF_RARITY_CONFIG.approvedSpecialBuffIds.has(def.id)) {
+    return BUFF_RARITY_CONFIG.specialWeight;
+  }
+  if (def.dropWeight !== undefined) {
+    return Math.max(0.001, def.dropWeight);
+  }
+  return BUFF_RARITY_CONFIG.ordinaryWeight;
+}
+
+/**
+ * Checks whether a non-augment buff is currently eligible for the given player,
+ * enforcing hero restrictions, selected-augment prerequisites, guaranteed Double Jump gate,
+ * and configured maximum stack limits (Additional Jump stacks remain uncapped).
+ */
+export function isBuffEligibleForPlayer(buffId: BuffId, player: PlayerState): boolean {
+  const def = BUFF_REGISTRY[buffId];
+  if (!def) return false;
+  if (def.exclusiveEvent || def.replacesSkillSlot || def.enhancesSkillSlot) return false;
+  if (def.isAttributeUpgrade === false) return false;
+  if (def.heroFilter && def.heroFilter !== player.heroId) return false;
+  if (def.requiredHero && def.requiredHero !== player.heroId) return false;
+
+  // Player must collect the guaranteed stage pickup before Aerial Boost enters random loot
+  if (buffId === 'buff_aerial_boost' && !player.hasCollectedDoubleJumpPickup && (player.buffs[buffId] || 0) <= 0) {
+    return false;
+  }
+
+  if (def.requiredAugment) {
+    const activeAugments = Object.values(player.skillEnhancements || {});
+    const reqList = Array.isArray(def.requiredAugment) ? def.requiredAugment : [def.requiredAugment];
+    const hasMatch = reqList.some((aug) => activeAugments.includes(aug));
+    if (!hasMatch) return false;
+  }
+
+  if (buffId === 'buff_extra_lmb_projectile' && PROJECTILE_STACK_CONFIG.maxExtraLmbStacks !== null) {
+    if ((player.buffs[buffId] || 0) >= PROJECTILE_STACK_CONFIG.maxExtraLmbStacks) return false;
+  }
+  if (buffId === 'buff_extra_rmb_projectile' && PROJECTILE_STACK_CONFIG.maxExtraRmbStacks !== null) {
+    if ((player.buffs[buffId] || 0) >= PROJECTILE_STACK_CONFIG.maxExtraRmbStacks) return false;
+  }
+
+  const uncapped = Boolean(
+    def.isUncapped ||
+    def.isAdditionalJump ||
+    def.id.toLowerCase().includes('extra_jump') ||
+    def.id.toLowerCase().includes('additional_jump')
+  );
+  if (!uncapped && def.maxStacks !== undefined) {
+    const curStacks = def.linkedItemId
+      ? player.items[def.linkedItemId] || 0
+      : player.buffs[buffId] || 0;
+    if (curStacks >= def.maxStacks) return false;
+  }
+
+  return true;
+}
+
+/**
+ * Returns the deduplicated flat list of all currently eligible buffs
+ * across Universal, Trigger, Special, and unlocked Augment-Specific pools.
+ */
+export function getEligibleBuffPool(player: PlayerState): BuffId[] {
+  const seen = new Set<BuffId>();
+  const out: BuffId[] = [];
+  for (const id of Object.keys(BUFF_REGISTRY) as BuffId[]) {
+    if (seen.has(id)) continue;
+    if (isBuffEligibleForPlayer(id, player)) {
+      seen.add(id);
+      out.push(id);
+    }
+  }
+  return out;
+}
+
+/**
+ * Picks one random eligible buff directly from the complete flat eligible pool using
+ * each buff's individual weight (never category-first selection).
+ * Returns null if no eligible buffs remain.
+ */
+export function rollWeightedRandomBuff(rng: SeededRandom, player: PlayerState): BuffId | null {
+  const pool = getEligibleBuffPool(player);
+  if (pool.length === 0) return null;
+
+  let totalWeight = 0;
+  for (let i = 0; i < pool.length; i++) {
+    totalWeight += getEffectiveBuffWeight(BUFF_REGISTRY[pool[i]], player);
+  }
+  if (totalWeight <= 0) return pool[pool.length - 1];
+
+  let roll = rng.range(0, totalWeight);
+  for (let i = 0; i < pool.length; i++) {
+    const id = pool[i];
+    roll -= getEffectiveBuffWeight(BUFF_REGISTRY[id], player);
+    if (roll <= 0) return id;
+  }
+  return pool[pool.length - 1];
+}
+
+/**
+ * Picks up to 3 distinct BuffIds using the seeded RNG.
+ * If filterEvent is supplied, preserves the exact Augment selection behavior unchanged.
+ * If omitted (Chest draft), draws up to 3 unique weighted eligible buffs from the flat pool.
  */
 export function rollThreeBuffChoices(
   rng: SeededRandom,
   filterEvent?: ExclusiveEventPool,
-  heroId: HeroId = 'commander'
+  heroId: HeroId = 'commander',
+  player?: PlayerState
 ): BuffId[] {
-  let pool: BuffId[];
   if (filterEvent) {
-    pool = (Object.keys(BUFF_REGISTRY) as BuffId[]).filter((id) => {
+    const pool = (Object.keys(BUFF_REGISTRY) as BuffId[]).filter((id) => {
       const def = BUFF_REGISTRY[id];
       if (def.exclusiveEvent !== filterEvent) return false;
       if (def.heroFilter && def.heroFilter !== heroId) return false;
@@ -981,50 +2001,165 @@ export function rollThreeBuffChoices(
     if (filterEvent !== 'void_corruption') {
       return pool.slice(0, 3);
     }
-  } else {
-    pool = (Object.keys(BUFF_REGISTRY) as BuffId[]).filter(
-      (id) =>
-        !BUFF_REGISTRY[id].exclusiveEvent &&
-        !BUFF_REGISTRY[id].replacesSkillSlot &&
-        !BUFF_REGISTRY[id].enhancesSkillSlot &&
-        (!BUFF_REGISTRY[id].heroFilter || BUFF_REGISTRY[id].heroFilter === heroId) &&
-        BUFF_REGISTRY[id].isAttributeUpgrade !== false
-    );
+    const choices: BuffId[] = [];
+    while (choices.length < 3 && pool.length > 0) {
+      const idx = Math.floor(rng.next() * pool.length);
+      choices.push(pool[idx]);
+      pool.splice(idx, 1);
+    }
+    return choices;
   }
 
+  const pool = player
+    ? getEligibleBuffPool(player)
+    : (Object.keys(BUFF_REGISTRY) as BuffId[]).filter(
+        (id) =>
+          !BUFF_REGISTRY[id].exclusiveEvent &&
+          !BUFF_REGISTRY[id].replacesSkillSlot &&
+          !BUFF_REGISTRY[id].enhancesSkillSlot &&
+          (!BUFF_REGISTRY[id].heroFilter || BUFF_REGISTRY[id].heroFilter === heroId) &&
+          BUFF_REGISTRY[id].isAttributeUpgrade !== false
+      );
+
   const choices: BuffId[] = [];
-  while (choices.length < 3 && pool.length > 0) {
-    const idx = Math.floor(rng.next() * pool.length);
-    choices.push(pool[idx]);
-    pool.splice(idx, 1);
+  const remaining = [...pool];
+  while (choices.length < 3 && remaining.length > 0) {
+    let totalWeight = 0;
+    for (let i = 0; i < remaining.length; i++) {
+      totalWeight += getEffectiveBuffWeight(BUFF_REGISTRY[remaining[i]], player);
+    }
+    let roll = rng.range(0, totalWeight);
+    let chosenIdx = remaining.length - 1;
+    for (let i = 0; i < remaining.length; i++) {
+      roll -= getEffectiveBuffWeight(BUFF_REGISTRY[remaining[i]], player);
+      if (roll <= 0) {
+        chosenIdx = i;
+        break;
+      }
+    }
+    choices.push(remaining[chosenIdx]);
+    remaining.splice(chosenIdx, 1);
   }
   return choices;
+}
+
+export function getBuffCatalogCounts(): {
+  universal: number;
+  trigger: number;
+  augmentSpecific: number;
+  projectile: number;
+  augments: number;
+  totalBuffs: number;
+  totalEntries: number;
+} {
+  let universal = 0;
+  let trigger = 0;
+  let augmentSpecific = 0;
+  let projectile = 0;
+  let augments = 0;
+  for (const def of Object.values(BUFF_REGISTRY)) {
+    if (def.exclusiveEvent || def.replacesSkillSlot || def.enhancesSkillSlot) {
+      augments++;
+    } else if (def.buffPool === 'universal') {
+      universal++;
+    } else if (def.buffPool === 'trigger') {
+      trigger++;
+    } else if (def.buffPool === 'augment_specific') {
+      augmentSpecific++;
+    } else if (def.buffPool === 'projectile') {
+      projectile++;
+    }
+  }
+  const totalBuffs = universal + trigger + augmentSpecific + projectile;
+  return {
+    universal,
+    trigger,
+    augmentSpecific,
+    projectile,
+    augments,
+    totalBuffs,
+    totalEntries: totalBuffs + augments
+  };
+}
+
+export interface CalculateStatsOptions {
+  baseDamageReduction?: number;
+  baseHealthRegenPercent?: number;
+  runtimeSpeedBonusFraction?: number;
+  runtimeDamageBonusFraction?: number;
+  runtimeDamageReductionBonus?: number;
+  runtimeLmbAttackSpeedBonusFraction?: number;
+  completedEnhancements?: number;
+  activeTimedEffects?: Partial<Record<TimedEffectId, ActiveTimedEffect>>;
 }
 
 export function calculateStats(
   baseMaxHealth: number,
   baseMoveSpeed: number,
   items: Record<ItemId, number>,
-  buffs?: Record<BuffId, number>
+  buffs?: Record<BuffId, number>,
+  opts?: CalculateStatsOptions
 ): CalculatedStats {
+  const baseDR = opts?.baseDamageReduction ?? 0.02;
+  const _baseRegenPct = opts?.baseHealthRegenPercent ?? 0.002;
+  const momentumStacks = buffs?.buff_momentum || 0;
+  const vitalityStacks = buffs?.buff_vitality || 0;
+  const regenStacks = buffs?.buff_regeneration || 0;
+  const magStacks = buffs?.buff_magnetic_field || 0;
+  const completedEnhCount = Math.max(0, Math.min(4, opts?.completedEnhancements ?? 0));
+  const beaconStacks = Math.min(3, buffs?.buff_surveyors_beacon || 0);
+  const beaconHpBonus = beaconStacks > 0 && completedEnhCount > 0 ? (0.04 + 0.02 * (beaconStacks - 1)) * completedEnhCount : 0;
+  const beaconDmgBonus = beaconStacks > 0 && completedEnhCount > 0 ? (0.03 + 0.015 * (beaconStacks - 1)) * completedEnhCount : 0;
+
+  // Timed effect contributions kept cleanly separated from permanent buff inventory
+  const timed = opts?.activeTimedEffects;
+  const dashOverclockActive = timed?.dash_overclock && timed.dash_overclock.remaining > 0 ? timed.dash_overclock.stacks : 0;
+  const firstContactActive = timed?.first_contact_protocol && timed.first_contact_protocol.remaining > 0 ? timed.first_contact_protocol.stacks : 0;
+  const aerialFocusActive = timed?.aerial_focus && timed.aerial_focus.remaining > 0 ? timed.aerial_focus.stacks : 0;
+  const podSurgeActive = timed?.pod_surge && timed.pod_surge.remaining > 0 ? timed.pod_surge.stacks : 0;
+  const resonanceSiphonActive = timed?.resonance_siphon && timed.resonance_siphon.remaining > 0 ? timed.resonance_siphon.stacks : 0;
+
+  const timedLmbAtkBonus = dashOverclockActive > 0 ? 0.10 + 0.04 * (Math.min(3, dashOverclockActive) - 1) : 0;
+  const timedAtkBonus = firstContactActive > 0 ? 0.10 + 0.03 * (Math.min(3, firstContactActive) - 1) : 0;
+  const timedCritBonus = aerialFocusActive > 0 ? 0.10 + 0.03 * (Math.min(3, aerialFocusActive) - 1) : 0;
+  const timedMoveBonus = podSurgeActive > 0 ? 0.15 + 0.05 * (Math.min(3, podSurgeActive) - 1) : 0;
+  const timedResonanceLmbDmg = resonanceSiphonActive > 0 ? 0.12 + 0.04 * (Math.min(3, resonanceSiphonActive) - 1) : 0;
+
+  const finalMaxHealth = Math.round(baseMaxHealth * (1 + 0.03 * vitalityStacks + beaconHpBonus));
+  const universalBaseRegenPerSec = 1.0;
+  const bonusRegenPerSec = finalMaxHealth * (0.0015 * regenStacks);
+  const moveMult = 1 + 0.02 * momentumStacks + (opts?.runtimeSpeedBonusFraction ?? 0) + timedMoveBonus;
+
   const stats: CalculatedStats = {
-    maxHealth: baseMaxHealth,
-    healthRegen: 0.5,
-    moveSpeed: baseMoveSpeed,
-    attackSpeedMultiplier: 1.0,
-    damageMultiplier: 1.0,
+    maxHealth: finalMaxHealth,
+    healthRegen: universalBaseRegenPerSec + bonusRegenPerSec,
+    moveSpeed: baseMoveSpeed * moveMult,
+    attackSpeedMultiplier: 1.0 + timedAtkBonus,
+    lmbAttackSpeedMultiplier: 1.0 + (opts?.runtimeLmbAttackSpeedBonusFraction ?? 0) + timedLmbAtkBonus,
+    damageMultiplier: 1.0 + (opts?.runtimeDamageBonusFraction ?? 0) + beaconDmgBonus,
     chainSparkChance: 0,
     chainSparkDamage: 20,
-    damageReduction: 0,
+    damageReduction: baseDR + (opts?.runtimeDamageReductionBonus ?? 0),
+    skillCooldownMultiplier: 1.0,
     dashCooldownMultiplier: 1.0,
     ultimateCooldownMultiplier: 1.0,
     ultimateRadiusMultiplier: 1.0,
+    ultimateRadiusBonusRaw: 0,
     aoeRadiusMultiplier: 1.0,
     healingMultiplier: 1.0,
     skillDurationMultiplier: 1.0,
-    pickupRadius: LOOT_CONFIG.basePickupRadius,
+    pickupRadius: LOOT_CONFIG.basePickupRadius * (1 + 0.12 * magStacks),
+    currencyMultiplier: 1.0,
+    jetpackCapacityMultiplier: 1.0,
+    jetpackRegenMultiplier: 1.0,
+    extraAirJumps: 0,
+    lifeSiphonPercent: 0,
+    thornsReflectFraction: 0,
+    emergencyBarrierFraction: 0,
+    extraLmbProjectiles: 0,
+    extraRmbProjectiles: 0,
 
-    critChance: 0.05,
+    critChance: 0.05 + timedCritBonus,
     critMultiplier: 1.5,
     extraProjectiles: 0,
     projectileSpread: 0,
@@ -1046,7 +2181,15 @@ export function calculateStats(
     stunChance: 0,
     flatArmor: 0,
     hasSecondWind: false,
-    bouncingProjectiles: false
+    bouncingProjectiles: false,
+    projectileDamageMitigation: 0,
+    meleeDamageMitigation: 0,
+    waterSpeedBonus: 0,
+    longRangeDamageBonus: 0,
+    closeRangeDamageBonus: 0,
+    openingPulseBonus: 0,
+    statusSynergyDamageBonus: 0,
+    resonanceLmbDamageBonus: timedResonanceLmbDmg
   };
 
   for (const [id, count] of Object.entries(items) as [ItemId, number][]) {
@@ -1062,6 +2205,18 @@ export function calculateStats(
       }
     }
   }
+
+  // Clamp offensive, defensive, mobility, cooldown, and radius bounds safely
+  stats.critChance = Math.min(1.0, Math.max(0, stats.critChance));
+  stats.damageReduction = Math.min(0.85, Math.max(0, stats.damageReduction));
+  stats.moveSpeed = Math.min(baseMoveSpeed * 2.25, Math.max(baseMoveSpeed * 0.4, stats.moveSpeed));
+  stats.projectileDamageMitigation = Math.min(0.45, Math.max(0, stats.projectileDamageMitigation || 0));
+  stats.meleeDamageMitigation = Math.min(0.45, Math.max(0, stats.meleeDamageMitigation || 0));
+  stats.skillCooldownMultiplier = Math.max(0.25, stats.skillCooldownMultiplier);
+  stats.dashCooldownMultiplier = Math.max(0.25, stats.dashCooldownMultiplier);
+  stats.ultimateCooldownMultiplier = Math.max(0.25, stats.ultimateCooldownMultiplier);
+  // Global Ultimate AoE radius cap: +50% maximum
+  stats.ultimateRadiusMultiplier = 1.0 + Math.min(0.50, Math.max(0, stats.ultimateRadiusBonusRaw));
 
   return stats;
 }

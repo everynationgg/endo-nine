@@ -13,6 +13,7 @@ import {
   EnemyType,
   OrganicPodState,
   WorldEventState,
+  DashEventPlatform,
   HeroId,
   RecoveryFieldState,
   ToxicFieldState,
@@ -25,15 +26,17 @@ import {
   FallingCrossState,
   ExclusiveEventPool,
   SkillSlot,
-  SkillEnhancementId
+  SkillEnhancementId,
+  TimedEffectId
 } from './types';
 import { SpatialGrid } from './SpatialGrid';
 import { COMMANDER_SKILLS, DOCTOR_SKILLS, SKILL_REGISTRY } from './SkillDefs';
 import { DOCTOR_CONFIG } from './DoctorConfig';
-import { ENEMY_CONFIGS } from './EnemyDefs';
+import { ENEMY_CONFIGS, ENEMY_PROJECTILE_PERMISSIONS, ENEMY_COMBAT_BALANCE } from './EnemyDefs';
 import {
   LOOT_CONFIG,
-  rollWeightedPassiveItem,
+  rollWeightedRandomBuff,
+  isBuffEligibleForPlayer,
   rollThreeBuffChoices,
   BUFF_REGISTRY,
   ITEM_REGISTRY,
@@ -41,7 +44,19 @@ import {
 } from './ItemDefs';
 import { getDifficultyTier } from './DifficultyDefs';
 import { STAGE1_BOSS_CONFIG } from './Stage1BossConfig';
+import { getStageArtifactPolicy } from './StageProgressionPolicy';
+import { CombatDirector, type CombatDirectorDiagnostics } from './CombatDirector';
+import { generateStagePods, type SceneDirectorReport } from './SceneDirector';
+import { generateFreshRunSeed } from './RngStreams';
+import { SeededRandom } from './ItemDefs';
 import type { StageConfig } from '../dev/StageConfig';
+
+export interface DamageEnemyOptions {
+  isRecursiveTrigger?: boolean;
+  isDirectAttack?: boolean;
+  isPrimaryLmb?: boolean;
+  attackActivationId?: number;
+}
 
 export class Simulation {
   public state: GameState;
@@ -53,11 +68,26 @@ export class Simulation {
   private nextStrikeId: number = 1;
   private nextDropId: number = 1;
   private nextItemDropId: number = 1;
+  private airborneDuration: number = 0;
+  private nextAttackActivationId: number = 1;
+  private isExecutingPrimaryLmb: boolean = false;
+  private nextEnemyAttackInstanceId: number = 1;
+  private cooldownHarvestThisSecond: number = 0;
+  private cooldownHarvestWindowTimer: number = 0;
   private pendingDraftFilters: Array<ExclusiveEventPool | undefined> = [];
   private lastCameraForward?: Vector2;
   private lastCameraRight?: Vector2;
   private navCalcsThisTick: number = 0;
+  private combatDirector: CombatDirector = new CombatDirector();
   private stage1BossCycle: number = 0;
+  private bossEmergePhaseStage: number = 0;
+  private lastSafeGroundedPos: { x: number; y: number; z: number } | null = null;
+  private stuckPrevPos: Vector2 | null = null;
+  private stuckCheckTimer: number = 0;
+  private unstuckCooldown: number = 0;
+  private stage1EnemySpawningUnlocked: boolean = false;
+  private stage1EnemySpawnUnlockReason: string | null = null;
+  private essentialDialogueBusyChecker: (() => boolean) | null = null;
 
   // Development Debugger Toggles (off by default in normal gameplay)
   public devPlayerInvulnerable: boolean = false;
@@ -71,6 +101,86 @@ export class Simulation {
       }
     }
     return false;
+  }
+
+  public unlockStage1EnemySpawning(reason: string): void {
+    this.combatDirector.unlockExploration();
+    if (this.stage1EnemySpawningUnlocked) return;
+    this.stage1EnemySpawningUnlocked = true;
+    this.stage1EnemySpawnUnlockReason = reason;
+    this.enemySpawnTimer = Math.min(this.enemySpawnTimer, 0.45);
+  }
+
+  public getCombatDirectorDiagnostics(): CombatDirectorDiagnostics {
+    return this.combatDirector.getDiagnostics(this.state);
+  }
+
+  private applyGeneratedPodLayout(): SceneDirectorReport {
+    const { pods, report } = generateStagePods(
+      this.state,
+      this.state.layoutRng,
+      this.state.layoutSeed
+    );
+    this.state.pods = pods;
+    this.state.sceneDirectorReport = report;
+    return report;
+  }
+
+  public regenerateRuntimePodLayout(pinnedSeed?: number | null): SceneDirectorReport {
+    if (pinnedSeed === null) {
+      this.state.pinnedLayoutSeed = null;
+      const freshSeed = generateFreshRunSeed();
+      this.state.layoutSeed = freshSeed;
+      this.state.layoutRng = new SeededRandom(freshSeed);
+    } else if (typeof pinnedSeed === 'number' && Number.isFinite(pinnedSeed) && pinnedSeed > 0) {
+      const normalized = (Math.floor(pinnedSeed) >>> 0) || 1;
+      this.state.pinnedLayoutSeed = normalized;
+      this.state.layoutSeed = normalized;
+      this.state.layoutRng = new SeededRandom(normalized);
+    } else {
+      this.state.layoutRng = new SeededRandom(this.state.layoutSeed || 1);
+    }
+    return this.applyGeneratedPodLayout();
+  }
+
+  public isStage1EnemySpawningUnlocked(): boolean {
+    return this.stage1EnemySpawningUnlocked;
+  }
+
+  public setEssentialDialogueBusyChecker(checker: (() => boolean) | null): void {
+    this.essentialDialogueBusyChecker = checker;
+  }
+
+  public isEssentialDepartureDialogueBusy(): boolean {
+    return this.essentialDialogueBusyChecker ? Boolean(this.essentialDialogueBusyChecker()) : false;
+  }
+
+  public getStage1EnemySpawnUnlockReason(): string | null {
+    return this.stage1EnemySpawnUnlockReason;
+  }
+
+  /**
+   * Computes safe initial exploration radius around spawn based on the outer activation edge
+   * of the closest world event (falls back to 1200u if no events exist, minimum 300u).
+   */
+  public getStage1SpawnSafeRadius(): number {
+    if (!this.state.worldEvents || this.state.worldEvents.length === 0) {
+      return 1200;
+    }
+    const spawn =
+      this.state.terrain.isCustomTestMap && this.state.terrain.testSpawnPos
+        ? this.state.terrain.testSpawnPos
+        : this.state.playerSpawnPos;
+    let minEdgeDist = Infinity;
+    for (let i = 0; i < this.state.worldEvents.length; i++) {
+      const ev = this.state.worldEvents[i];
+      const dist = Math.hypot(ev.pos.x - spawn.x, ev.pos.y - spawn.y);
+      const edgeDist = Math.max(0, dist - (ev.radius || 110));
+      if (edgeDist < minEdgeDist) {
+        minEdgeDist = edgeDist;
+      }
+    }
+    return Number.isFinite(minEdgeDist) ? Math.max(300, minEdgeDist) : 1200;
   }
 
   constructor(stateOrSeed?: GameState | number, initialStageConfig?: StageConfig | null) {
@@ -87,7 +197,7 @@ export class Simulation {
   }
 
   public isPointInSanctuaryCross(pos: Vector2, z: number, cross: SanctuaryCrossState, radius: number = 0): boolean {
-    if (Math.abs(z - cross.z) > 70) return false;
+    if (Math.abs(z - cross.z) > 140) return false;
     let rx = pos.x - cross.pos.x;
     let ry = pos.y - cross.pos.y;
     if (cross.rotation) {
@@ -218,7 +328,8 @@ export class Simulation {
   /**
    * Called when the player clicks "Initiate Drop" to begin gameplay cleanly at 00:00
    */
-  public startRun(): void {
+  public startRun(forcedRunSeed?: number): void {
+    this.state.reseedRunStreams(forcedRunSeed);
     this.state.isGameStarted = true;
     this.state.gameTime = 0;
     this.currentDifficultyTier = 0;
@@ -246,6 +357,9 @@ export class Simulation {
     this.state.currencyDrops = [];
     this.state.itemDrops = [];
     this.enemySpawnTimer = 0;
+    this.stage1EnemySpawningUnlocked = false;
+    this.stage1EnemySpawnUnlockReason = null;
+    this.combatDirector.reset(this.state.directorRng);
     this.nextEnemyId = 1;
     this.nextProjId = 1;
     this.nextStrikeId = 1;
@@ -256,6 +370,7 @@ export class Simulation {
     if (this.state.activeStageConfig) {
       this.state.applyStageConfig(this.state.activeStageConfig);
     }
+    this.state.resetArtifactProgression();
 
     // Reset hero stats and equipped skills cleanly without run-to-run leakage
     this.state.selectHero(this.state.selectedHeroId);
@@ -271,13 +386,19 @@ export class Simulation {
     p.health = p.maxHealth;
     p.defenseBonusTimer = 0;
     p.hurtInvulnTimer = 0;
-    p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
+    p.enemyProjectileGraceTimer = 0;
+    p.hitByEnemyAttackInstanceIds?.clear();
+    this.nextEnemyAttackInstanceId = 1;
+    p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y, 1e6, 22).height;
     p.vz = 0;
     p.groundZ = p.z;
     p.isGrounded = true;
     p.isJumping = false;
     p.isGliding = false;
     p.jetpackFuel = 100;
+    p.maxAirJumps = 0;
+    p.airJumpsRemaining = 0;
+    p.inWater = false;
     p.primaryCooldownRemaining = 0;
     p.secondaryCooldownRemaining = 0;
     p.utilityCooldownRemaining = 0;
@@ -290,6 +411,59 @@ export class Simulation {
     p.toxicRainTimer = 0;
     p.toxicRainTickTimer = 0;
     p.toxicRainOrigin = undefined;
+    p.tempShieldAmount = 0;
+    p.tempShieldTimer = 0;
+    p.emergencyBarrierCooldown = 0;
+    p.chainReactionCooldown = 0;
+    p.secondWindCooldown = 0;
+    p.staticDischargeCooldown = 0;
+    p.aftershockCooldown = 0;
+    p.reactiveShieldCooldown = 0;
+    p.survivalInstinctCooldown = 0;
+    p.bloodRushTimer = 0;
+    p.bloodRushRecentKills = 0;
+    p.bloodRushKillWindowTimer = 0;
+    p.combatFocusHitCount = 0;
+    p.killingMomentumTimer = 0;
+    p.killingMomentumStacks = 0;
+    p.isCarryingEventPayload = false;
+    p.carryingEventId = null;
+    this.state.terrain.activeDashPlatforms = [];
+    for (let i = 0; i < this.state.worldEvents.length; i++) {
+      const ev = this.state.worldEvents[i];
+      ev.isActive = false;
+      ev.isCompleted = false;
+      ev.chargeProgress = 0;
+      ev.activeEliteId = null;
+      ev.eliteWaveIndex = 0;
+      ev.dashPlatforms = undefined;
+      ev.highestPlatformReached = 0;
+      ev.payloadPos = undefined;
+      ev.payloadCollected = false;
+    }
+    p.retaliationTimer = 0;
+    p.survivalInstinctTimer = 0;
+    p.stunImmunityTimer = 0;
+    p.postDashSpeedTimer = 0;
+    p.lifeSiphonSecondTimer = 0;
+    p.lifeSiphonSecondAmount = 0;
+    p.wasAirborneLastFrame = false;
+    p.hasCollectedDoubleJumpPickup = false;
+    p.nonProjectileBuffCount = 0;
+    p.usedCombatFocusActivations?.clear();
+    p.activeTimedEffects = {};
+    p.timedEffectCooldowns = {};
+    p.aerialFocusLatched = false;
+    p.buffsBySource = { level: 0, pod: 0, elite: 0, event: 0 };
+    this.isExecutingPrimaryLmb = false;
+    this.lastSafeGroundedPos = null;
+    this.stuckPrevPos = null;
+    this.stuckCheckTimer = 0;
+    this.unstuckCooldown = 0;
+    this.airborneDuration = 0;
+    this.nextAttackActivationId = 1;
+    this.cooldownHarvestThisSecond = 0;
+    this.cooldownHarvestWindowTimer = 0;
     p.level = 1;
     p.xp = 0;
     p.xpNeeded = 8;
@@ -309,23 +483,11 @@ export class Simulation {
     this.state.updateCalculatedStats();
     p.health = p.maxHealth;
 
-    // Reset artifact, pods, and world events
-    if (this.state.artifact) {
-      this.state.artifact.chargeProgress = 0;
-      this.state.artifact.isCharged = false;
-      this.state.artifact.isTeleporterReady = false;
-      this.state.artifact.isSummoning = false;
-      this.state.artifact.summonTimer = 0;
-      this.state.artifact.isBossSpawned = false;
-      this.state.artifact.isBossDefeated = false;
-      this.state.artifact.isCompleted = false;
-    }
-    this.state.hasBossSpawned = false;
+    // Reset artifact, pods (via SceneDirector), and world events cleanly
+    this.state.resetArtifactProgression();
     this.stage1BossCycle = 0;
     p.floatingSwords = [];
-    for (let i = 0; i < this.state.pods.length; i++) {
-      this.state.pods[i].isOpened = false;
-    }
+    this.applyGeneratedPodLayout();
     for (let i = 0; i < this.state.worldEvents.length; i++) {
       const ev = this.state.worldEvents[i];
       ev.chargeProgress = 0;
@@ -337,6 +499,58 @@ export class Simulation {
       ev.hasSpawnedBoss50 = false;
     }
     this.pendingDraftFilters = [];
+
+    // Guaranteed free Double Jump pickup placed at the first step of the Teleporter Tower
+    if (this.state.terrain.isCustomTestMap && this.state.terrain.testDoubleJumpPos) {
+      const rawDj = this.state.terrain.testDoubleJumpPos;
+      const djPos = rawDj.z !== undefined ? { x: rawDj.x, y: rawDj.y } : this.resolvePickupClearSpot(rawDj);
+      const djElev =
+        rawDj.z !== undefined
+          ? rawDj.z
+          : this.state.terrain.getElevation(djPos.x, djPos.y, 1e6, 22).height;
+      this.state.itemDrops.push({
+        id: 'double_jump_test_pickup',
+        isDoubleJumpTestPickup: true,
+        pos: { x: djPos.x, y: djPos.y },
+        vel: { x: 0, y: 0 },
+        z: djElev,
+        vz: 0,
+        settled: true,
+        lifetime: 999999
+      });
+    } else if (this.state.artifact) {
+      const artPos = this.state.artifact.pos;
+      const djPos = this.resolvePickupClearSpot({ x: artPos.x, y: artPos.y + 95 });
+      const djElev = this.state.terrain.getElevation(djPos.x, djPos.y, 1e6, 22).height;
+      this.state.itemDrops.push({
+        id: 'double_jump_test_pickup',
+        isDoubleJumpTestPickup: true,
+        pos: { x: djPos.x, y: djPos.y },
+        vel: { x: 0, y: 0 },
+        z: djElev,
+        vz: 0,
+        settled: true,
+        lifetime: 999999
+      });
+    }
+  }
+
+  /** Ensures a stage pickup cannot overlap any obstacle collider while staying on valid ground. */
+  public resolvePickupClearSpot(origin: Vector2): Vector2 {
+    const pos = { x: origin.x, y: origin.y };
+    for (const obs of this.state.obstacles) {
+      const minDist = (obs.radius || 22) + 32;
+      const dx = pos.x - obs.pos.x;
+      const dy = pos.y - obs.pos.y;
+      const d = Math.hypot(dx, dy);
+      if (d < minDist) {
+        const nx = d > 0.01 ? dx / d : 0;
+        const ny = d > 0.01 ? dy / d : 1;
+        pos.x = obs.pos.x + nx * minDist;
+        pos.y = obs.pos.y + ny * minDist;
+      }
+    }
+    return pos;
   }
 
   /**
@@ -346,24 +560,52 @@ export class Simulation {
     if (!this.state.isPausedForBuffChoice) return;
     if (!this.state.currentBuffChoices.includes(buffId)) return;
 
-    this.applyBuffToPlayer(buffId);
+    const chosenDef = BUFF_REGISTRY[buffId];
+    this.applyBuffToPlayer(buffId, chosenDef?.exclusiveEvent ? 'augment' : 'chest');
 
-    if (this.state.pendingBuffDrafts > 0) {
+    while (this.state.pendingBuffDrafts > 0) {
       this.state.pendingBuffDrafts--;
       const nextFilter = this.pendingDraftFilters.shift();
-      this.state.currentBuffChoices = rollThreeBuffChoices(this.state.rng, nextFilter, this.state.player.heroId);
-    } else {
-      this.state.isPausedForBuffChoice = false;
-      this.state.currentBuffChoices = [];
+      const nextChoices = rollThreeBuffChoices(this.state.lootRng, nextFilter, this.state.player.heroId, this.state.player);
+      if (nextChoices.length > 0) {
+        this.state.currentBuffChoices = nextChoices;
+        return;
+      }
     }
+    this.state.isPausedForBuffChoice = false;
+    this.state.currentBuffChoices = [];
   }
 
   /** Applies a buff, passive stack, replacement skill, or slot augment directly to the active player. */
-  public applyBuffToPlayer(buffId: BuffId): void {
+  public applyBuffToPlayer(
+    buffId: BuffId,
+    source: 'augment' | 'chest' | 'enemy_drop' | 'pickup' = 'augment',
+    dropOrigin: 'level' | 'elite' = 'level'
+  ): void {
     const p = this.state.player;
     const def = BUFF_REGISTRY[buffId];
     if (!def) return;
     p.buffs[buffId] = (p.buffs[buffId] || 0) + 1;
+    if (!p.buffsBySource) {
+      p.buffsBySource = { level: 0, pod: 0, elite: 0, event: 0 };
+    }
+    if (source === 'chest') p.buffsBySource.pod++;
+    else if (source === 'augment') p.buffsBySource.event++;
+    else if (source === 'enemy_drop') {
+      if (dropOrigin === 'elite') p.buffsBySource.elite++;
+      else p.buffsBySource.level++;
+    }
+    if (buffId === 'buff_aerial_boost') {
+      p.hasCollectedDoubleJumpPickup = true;
+      p.airJumpsRemaining = (p.airJumpsRemaining || 0) + 1;
+    }
+    if (source === 'enemy_drop' || source === 'chest') {
+      if (buffId === 'buff_extra_lmb_projectile' || buffId === 'buff_extra_rmb_projectile') {
+        p.nonProjectileBuffCount = 0;
+      } else if (!def.exclusiveEvent) {
+        p.nonProjectileBuffCount = (p.nonProjectileBuffCount || 0) + 1;
+      }
+    }
 
     if (def.linkedItemId) {
       const itemId = def.linkedItemId;
@@ -437,7 +679,8 @@ export class Simulation {
       data: {
         buffId,
         name: def.name,
-        stackCount: p.buffs[buffId]
+        stackCount: p.buffs[buffId],
+        source
       }
     });
   }
@@ -704,17 +947,17 @@ export class Simulation {
     const slotEnhancements: Record<SkillSlot, SkillEnhancementId[]> =
       p.heroId === 'doctor'
         ? {
-            primary: ['toxic_chain', 'cryogenic_scalpel', 'vital_extraction'],
-            secondary: ['experimental_drones', 'toxic_cluster_bomb', 'holographic_decoy'],
-            utility: ['extended_dash', 'phase_barrier', 'adrenaline_rush'],
-            ultimate: ['mobile_sanctuary', 'divine_intervention', 'rain_of_crosses']
-          }
+          primary: ['toxic_chain', 'cryogenic_scalpel', 'vital_extraction'],
+          secondary: ['experimental_drones', 'toxic_cluster_bomb', 'holographic_decoy'],
+          utility: ['extended_dash', 'phase_barrier', 'adrenaline_rush'],
+          ultimate: ['mobile_sanctuary', 'divine_intervention', 'rain_of_crosses']
+        }
         : {
-            primary: ['chill_beam', 'piercing_laser', 'extended_slash'],
-            secondary: ['scissor_slash', 'frost_burst', 'orbiting_blade'],
-            utility: ['extended_dash', 'shock_dash', 'teleport'],
-            ultimate: ['singularity', 'convergence_barrage', 'cryogenic_impact']
-          };
+          primary: ['chill_beam', 'piercing_laser', 'extended_slash'],
+          secondary: ['scissor_slash', 'frost_burst', 'orbiting_blade'],
+          utility: ['extended_dash', 'shock_dash', 'teleport'],
+          ultimate: ['singularity', 'convergence_barrage', 'cryogenic_impact']
+        };
 
     const current = p.skillEnhancements?.[slot] || null;
     const list = slotEnhancements[slot];
@@ -736,9 +979,12 @@ export class Simulation {
   }
 
   public queueBuffDraft(filterEvent?: ExclusiveEventPool): void {
+    const previewChoices = rollThreeBuffChoices(this.state.lootRng, filterEvent, this.state.player.heroId, this.state.player);
+    if (previewChoices.length === 0) return;
+
     if (!this.state.isPausedForBuffChoice) {
       this.state.isPausedForBuffChoice = true;
-      this.state.currentBuffChoices = rollThreeBuffChoices(this.state.rng, filterEvent, this.state.player.heroId);
+      this.state.currentBuffChoices = previewChoices;
       this.state.events.push({
         type: 'buff_choices_ready',
         data: { choices: this.state.currentBuffChoices, level: this.state.player.level }
@@ -762,17 +1008,104 @@ export class Simulation {
     if ((p.hurtInvulnTimer ?? 0) > 0) {
       p.hurtInvulnTimer = Math.max(0, (p.hurtInvulnTimer ?? 0) - dt);
     }
-    if ((p.phaseBarrierTimer ?? 0) > 0) {
-      p.phaseBarrierTimer = Math.max(0, (p.phaseBarrierTimer ?? 0) - dt);
+    if ((p.enemyProjectileGraceTimer ?? 0) > 0) {
+      p.enemyProjectileGraceTimer = Math.max(0, (p.enemyProjectileGraceTimer ?? 0) - dt);
     }
+    if (p.hitByEnemyAttackInstanceIds && p.hitByEnemyAttackInstanceIds.size > 0) {
+      for (const [instId, ttl] of p.hitByEnemyAttackInstanceIds) {
+        const nextTtl = ttl - dt;
+        if (nextTtl <= 0) {
+          p.hitByEnemyAttackInstanceIds.delete(instId);
+        } else {
+          p.hitByEnemyAttackInstanceIds.set(instId, nextTtl);
+        }
+      }
+    }
+    let statsDirty = false;
+    const dec = (val: number | undefined): number => Math.max(0, (val ?? 0) - dt);
+
+    if ((p.phaseBarrierTimer ?? 0) > 0) p.phaseBarrierTimer = dec(p.phaseBarrierTimer);
     if ((p.adrenalineRushTimer ?? 0) > 0) {
-      p.adrenalineRushTimer = Math.max(0, (p.adrenalineRushTimer ?? 0) - dt);
-      if (p.adrenalineRushTimer <= 0) {
-        this.state.updateCalculatedStats();
+      p.adrenalineRushTimer = dec(p.adrenalineRushTimer);
+      if (p.adrenalineRushTimer <= 0) statsDirty = true;
+    }
+    if ((p.tempShieldTimer ?? 0) > 0) {
+      p.tempShieldTimer = dec(p.tempShieldTimer);
+      if (p.tempShieldTimer <= 0) p.tempShieldAmount = 0;
+    }
+    if (p.emergencyBarrierCooldown > 0) p.emergencyBarrierCooldown = dec(p.emergencyBarrierCooldown);
+    if (p.chainReactionCooldown > 0) p.chainReactionCooldown = dec(p.chainReactionCooldown);
+    if (p.secondWindCooldown > 0) p.secondWindCooldown = dec(p.secondWindCooldown);
+    if (p.staticDischargeCooldown > 0) p.staticDischargeCooldown = dec(p.staticDischargeCooldown);
+    if (p.aftershockCooldown > 0) p.aftershockCooldown = dec(p.aftershockCooldown);
+    if (p.reactiveShieldCooldown > 0) p.reactiveShieldCooldown = dec(p.reactiveShieldCooldown);
+    if (p.survivalInstinctCooldown > 0) p.survivalInstinctCooldown = dec(p.survivalInstinctCooldown);
+    if (p.bloodRushKillWindowTimer > 0) {
+      p.bloodRushKillWindowTimer = dec(p.bloodRushKillWindowTimer);
+      if (p.bloodRushKillWindowTimer <= 0) p.bloodRushRecentKills = 0;
+    }
+    if (p.bloodRushTimer > 0) {
+      p.bloodRushTimer = dec(p.bloodRushTimer);
+      if (p.bloodRushTimer <= 0) statsDirty = true;
+    }
+    if (p.killingMomentumTimer > 0) {
+      p.killingMomentumTimer = dec(p.killingMomentumTimer);
+      if (p.killingMomentumTimer <= 0) {
+        p.killingMomentumStacks = 0;
+        statsDirty = true;
+      }
+    }
+    if (p.retaliationTimer > 0) {
+      p.retaliationTimer = dec(p.retaliationTimer);
+      if (p.retaliationTimer <= 0) statsDirty = true;
+    }
+    if (p.survivalInstinctTimer > 0) {
+      p.survivalInstinctTimer = dec(p.survivalInstinctTimer);
+      if (p.survivalInstinctTimer <= 0) statsDirty = true;
+    }
+    if (p.stunImmunityTimer > 0) p.stunImmunityTimer = dec(p.stunImmunityTimer);
+    if (p.postDashSpeedTimer > 0) {
+      p.postDashSpeedTimer = dec(p.postDashSpeedTimer);
+      if (p.postDashSpeedTimer <= 0) statsDirty = true;
+    }
+
+    if (p.lifeSiphonSecondTimer > 0) {
+      p.lifeSiphonSecondTimer = dec(p.lifeSiphonSecondTimer);
+      if (p.lifeSiphonSecondTimer <= 0) p.lifeSiphonSecondAmount = 0;
+    }
+    if (this.cooldownHarvestWindowTimer > 0) {
+      this.cooldownHarvestWindowTimer = dec(this.cooldownHarvestWindowTimer);
+      if (this.cooldownHarvestWindowTimer <= 0) this.cooldownHarvestThisSecond = 0;
+    }
+
+    if (p.timedEffectCooldowns) {
+      for (const key of Object.keys(p.timedEffectCooldowns) as TimedEffectId[]) {
+        const rem = (p.timedEffectCooldowns[key] ?? 0) - dt;
+        if (rem <= 0) {
+          delete p.timedEffectCooldowns[key];
+        } else {
+          p.timedEffectCooldowns[key] = rem;
+        }
       }
     }
 
-    // Rain of Crosses active storm spawner (5s fixed window; fields expire when rain ends)
+    if (p.activeTimedEffects) {
+      for (const key of Object.keys(p.activeTimedEffects) as TimedEffectId[]) {
+        const eff = p.activeTimedEffects[key];
+        if (!eff) continue;
+        eff.remaining -= dt;
+        if (eff.remaining <= 0) {
+          delete p.activeTimedEffects[key];
+          statsDirty = true;
+        }
+      }
+    }
+
+    if (statsDirty) {
+      this.state.updateCalculatedStats();
+    }
+
+    // Rain of Crosses active storm spawner
     if ((p.toxicRainTimer ?? 0) > 0) {
       p.toxicRainTimer = Math.max(0, (p.toxicRainTimer ?? 0) - dt);
       if (p.toxicRainTimer > 0) {
@@ -785,19 +1118,20 @@ export class Simulation {
     }
 
     if (p.calculatedStats.healthRegen > 0 && p.health < p.maxHealth) {
+      const wasBelow40 = p.health / Math.max(1, p.maxHealth) < 0.40;
       p.health = Math.min(p.maxHealth, p.health + p.calculatedStats.healthRegen * dt);
-    }
-
-    // Doctor Survivor Passive: Bio-Cellular Triage (3 HP/s baseline, 7 HP/s when < 50% HP)
-    if (p.heroId === 'doctor' && p.health < p.maxHealth) {
-      const triageRegen = (p.health < p.maxHealth * 0.5) ? 7.0 : 3.0;
-      p.health = Math.min(p.maxHealth, p.health + triageRegen * dt);
+      const nowBelow40 = p.health / Math.max(1, p.maxHealth) < 0.40;
+      if (wasBelow40 && !nowBelow40 && (p.buffs.buff_final_stand || 0) > 0) {
+        this.state.updateCalculatedStats();
+      }
     }
 
     // Active Orbiting Electric Swords (Secondary Upgrade 3: 360° Orbit, Max 7 Swords, Independent Kinetic Attack Strikes)
     if (p.orbitingBladeActive) {
+      const orbExtStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_orbital_extension || 0) : 0;
+      const orbSpeedMult = 1 + 0.03 * orbExtStacks;
       p.orbitingBladeTimer = (p.orbitingBladeTimer ?? 0) - dt;
-      p.orbitingBladeAngle = (p.orbitingBladeAngle ?? 0) + 4.6 * dt; // Full 360° continuous orbital sweep
+      p.orbitingBladeAngle = (p.orbitingBladeAngle ?? 0) + 4.6 * orbSpeedMult * dt;
 
       if (p.orbitingBladeTimer <= 0) {
         p.orbitingBladeActive = false;
@@ -805,11 +1139,12 @@ export class Simulation {
         p.orbitingBladeHitCooldowns = {};
         this.state.events.push({ type: 'orbiting_blade_expired', data: {} });
       } else {
-        const extra = p.calculatedStats.extraProjectiles || 0;
+        const extra = p.calculatedStats.extraRmbProjectiles || 0;
         const swordCount = Math.min(7, Math.max(1, 1 + extra));
+        const razorStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_razor_satellites || 0) : 0;
         p.orbitingSwordCount = swordCount;
-        const rad = p.orbitingBladeRadius ?? 82;
-        const dmg = p.orbitingBladeDamage ?? (34 * p.calculatedStats.damageMultiplier);
+        const rad = p.orbitingBladeRadius ?? 164;
+        const dmg = (p.orbitingBladeDamage ?? (34 * p.calculatedStats.damageMultiplier)) * (1 + 0.03 * razorStacks);
 
         if (!p.floatingSwords) p.floatingSwords = [];
         while (p.floatingSwords.length < swordCount) {
@@ -818,7 +1153,7 @@ export class Simulation {
           p.floatingSwords.push({
             x: p.pos.x + Math.cos(sAngle) * rad,
             y: p.pos.y + Math.sin(sAngle) * rad,
-            z: p.z + 18,
+            z: p.z + 44,
             state: 'hover',
             stateTimer: 0,
             attackCooldown: 0.12 * s,
@@ -844,7 +1179,7 @@ export class Simulation {
           const sAngle = (p.orbitingBladeAngle ?? 0) + (Math.PI * 2 / swordCount) * s;
           const homeX = p.pos.x + Math.cos(sAngle) * rad;
           const homeY = p.pos.y + Math.sin(sAngle) * rad;
-          const homeZ = p.z + 18 + Math.sin(p.orbitingBladeAngle * 0.8 + s * 1.2) * 2.5;
+          const homeZ = p.z + 44 + Math.sin(p.orbitingBladeAngle * 0.8 + s * 1.2) * 5.0;
 
           if (sw.state === 'hover') {
             // Smoothly track current orbital home position
@@ -853,9 +1188,9 @@ export class Simulation {
             sw.z = homeZ;
 
             sw.attackCooldown = (sw.attackCooldown ?? 0) - dt;
-            if (sw.attackCooldown <= 0) {
-              // Search for living enemies relative to this specific sword's position (reach ~170 units)
-              const nearby = this.spatialGrid.getNearby({ x: sw.x, y: sw.y }, 180);
+            if (sw.attackCooldown <= 0 && !p.isCarryingEventPayload) {
+              // Search for living enemies relative to this specific sword's position (reach ~320 units)
+              const nearby = this.spatialGrid.getNearby({ x: sw.x, y: sw.y }, 340);
               let bestEnemy: EnemyState | null = null;
               let bestDist = Infinity;
               let fallbackEnemy: EnemyState | null = null;
@@ -865,7 +1200,7 @@ export class Simulation {
                 const e = nearby[eIdx];
                 if (e.health > 0) {
                   const ed = Math.hypot(e.pos.x - sw.x, e.pos.y - sw.y);
-                  if (ed <= 165) {
+                  if (ed <= 320 && Math.abs(e.z - p.z) <= 180) {
                     // Prioritize an enemy not currently targeted by another lunging sword
                     if (!alreadyTargeted.has(e.id) && ed < bestDist) {
                       bestDist = ed;
@@ -886,7 +1221,7 @@ export class Simulation {
                 sw.targetEnemyId = chosen.id;
                 sw.targetX = chosen.pos.x;
                 sw.targetY = chosen.pos.y;
-                sw.targetZ = chosen.z + (chosen.radius || 18) * 0.8;
+                sw.targetZ = chosen.z + (chosen.radius || 32) * 0.8;
                 sw.hitApplied = false;
                 alreadyTargeted.add(chosen.id);
               }
@@ -901,7 +1236,7 @@ export class Simulation {
               if (targetEnemy) {
                 sw.targetX = targetEnemy.pos.x;
                 sw.targetY = targetEnemy.pos.y;
-                sw.targetZ = targetEnemy.z + (targetEnemy.radius || 18) * 0.8;
+                sw.targetZ = targetEnemy.z + (targetEnemy.radius || 32) * 0.8;
               }
             }
 
@@ -912,7 +1247,7 @@ export class Simulation {
             const ldy = ty - sw.y;
             const ldz = tz - sw.z;
             const ldist = Math.hypot(ldx, ldy, ldz) || 1;
-            const lungeSpeed = 700;
+            const lungeSpeed = 1200;
             const step = Math.min(ldist, lungeSpeed * dt);
 
             sw.x += (ldx / ldist) * step;
@@ -920,7 +1255,7 @@ export class Simulation {
             sw.z += (ldz / ldist) * step;
 
             // When impaling target or timeout reached:
-            if (ldist <= 22 || sw.stateTimer >= 0.22) {
+            if (ldist <= 38 || sw.stateTimer >= 0.24) {
               if (!sw.hitApplied) {
                 sw.hitApplied = true;
                 if (targetEnemy && targetEnemy.health > 0) {
@@ -943,14 +1278,14 @@ export class Simulation {
             const rdy = homeY - sw.y;
             const rdz = homeZ - sw.z;
             const rdist = Math.hypot(rdx, rdy, rdz) || 1;
-            const returnSpeed = 550;
+            const returnSpeed = 950;
             const rstep = Math.min(rdist, returnSpeed * dt);
 
             sw.x += (rdx / rdist) * rstep;
             sw.y += (rdy / rdist) * rstep;
             sw.z += (rdz / rdist) * rstep;
 
-            if (rdist <= 20 || sw.stateTimer >= 0.26) {
+            if (rdist <= 34 || sw.stateTimer >= 0.28) {
               sw.state = 'hover';
               sw.x = homeX;
               sw.y = homeY;
@@ -994,12 +1329,15 @@ export class Simulation {
     if (input.wantDash && p.utilityCooldownRemaining <= 0 && !p.isDashing) {
       const utilDef = p.equippedSkills.utility;
       p.utilityCooldownRemaining =
-        utilDef.cooldown * p.calculatedStats.dashCooldownMultiplier;
+        utilDef.cooldown *
+        p.calculatedStats.dashCooldownMultiplier *
+        p.calculatedStats.skillCooldownMultiplier;
       p.dashShockwaveTriggered = false;
       p.dashHitIds = new Set<string>();
+      this.triggerTimedEffect('dash_overclock', 3.0, 8.0, 'buff_dash_overclock');
 
       if (utilDef.id === 'recovery_field') {
-        const radiusMult = (p.calculatedStats.aoeRadiusMultiplier || 1.0) * (p.calculatedStats.ultimateRadiusMultiplier || 1.0);
+        const radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
         const durMult = p.calculatedStats.skillDurationMultiplier || 1.0;
         const healMult = p.calculatedStats.healingMultiplier || 1.0;
         // Deploy localized bio-regenerative nanite field on terrain
@@ -1007,7 +1345,7 @@ export class Simulation {
           id: `recov_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
           pos: { x: p.pos.x, y: p.pos.y },
           z: p.z,
-          radius: 140 * radiusMult,
+          radius: 270 * radiusMult,
           durationRemaining: 5.0 * durMult,
           healPerSecond: 14.0 * healMult,
           tickTimer: 0.25
@@ -1039,7 +1377,9 @@ export class Simulation {
         p.dashDurationTimer = cfg.duration;
         p.dashHitIds = new Set<string>();
 
-        const healMult = p.calculatedStats.healingMultiplier || 1.0;
+        const clinicalReachStacks = p.skillEnhancements?.utility === 'extended_dash' ? (p.buffs.buff_doc_clinical_reach || 0) : 0;
+        const protectiveTriageStacks = p.skillEnhancements?.utility === 'phase_barrier' ? (p.buffs.buff_doc_protective_triage || 0) : 0;
+        const healMult = (p.calculatedStats.healingMultiplier || 1.0) * (1 + 0.04 * (clinicalReachStacks + protectiveTriageStacks));
         const selfHeal = Math.round(cfg.selfHeal * healMult);
         p.health = Math.min(p.maxHealth, p.health + selfHeal);
         this.state.events.push({
@@ -1048,7 +1388,9 @@ export class Simulation {
         });
 
         if (p.skillEnhancements?.utility === 'phase_barrier') {
-          p.phaseBarrierTimer = cfg.duration + DOCTOR_CONFIG.phaseBarrier.postDashImmunityDuration;
+          const sterileStacks = p.buffs.buff_doc_sterile_interval || 0;
+          const postDashInvuln = Math.min(1.3, DOCTOR_CONFIG.phaseBarrier.postDashImmunityDuration + 0.1 * sterileStacks);
+          p.phaseBarrierTimer = cfg.duration + postDashInvuln;
           this.state.events.push({
             type: 'phase_barrier_activated',
             data: { pos: { ...p.pos }, z: p.z, duration: p.phaseBarrierTimer }
@@ -1090,20 +1432,21 @@ export class Simulation {
           bdy = input.cameraForward ? input.cameraForward.y : cosY;
         }
         const blen = Math.hypot(bdx, bdy) || 1;
-        const targetX = p.pos.x + (bdx / blen) * 210;
-        const targetY = p.pos.y + (bdy / blen) * 210;
-        const trav = this.state.terrain.checkTraversable(p.pos, { x: targetX, y: targetY }, p.z, false);
+        const targetX = p.pos.x + (bdx / blen) * 440;
+        const targetY = p.pos.y + (bdy / blen) * 440;
+        const trav = this.state.terrain.checkTraversable(p.pos, { x: targetX, y: targetY }, p.z, false, 30);
         p.pos.x = trav.newPos.x;
         p.pos.y = trav.newPos.y;
-        p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
+        const stepLimBlink = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+        p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepLimBlink).height;
         p.groundZ = p.z;
 
         // Arrival shockwave
-        const shockRadius = 95 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
+        const shockRadius = 190 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
         const shockDamage = utilDef.baseDamage * p.calculatedStats.damageMultiplier;
         const victims = this.spatialGrid.getNearby(p.pos, shockRadius);
         for (const v of victims) {
-          if (v.health > 0) {
+          if (v.health > 0 && Math.abs(v.z - p.z) <= 180) {
             this.damageEnemy(v, shockDamage, v.pos);
             v.isStunned = true;
             v.stunTimer = 1.2;
@@ -1117,6 +1460,8 @@ export class Simulation {
         // Dash Upgrade 3: Teleport — Instantly relocates to target position with violet portals
         const fromPos = { ...p.pos };
         const fromZ = p.z;
+        const aeStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_adrenal_extension || 0) : 0;
+        const vsStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_velocity_surge || 0) : 0;
         let bdx = worldMx;
         let bdy = worldMy;
         if (bdx === 0 && bdy === 0) {
@@ -1124,23 +1469,29 @@ export class Simulation {
           bdy = input.cameraForward ? input.cameraForward.y : cosY;
         }
         const blen = Math.hypot(bdx, bdy) || 1;
-        const targetX = p.pos.x + (bdx / blen) * 230;
-        const targetY = p.pos.y + (bdy / blen) * 230;
-        const trav = this.state.terrain.checkTraversable(p.pos, { x: targetX, y: targetY }, p.z, false);
+        const targetX = p.pos.x + (bdx / blen) * 440;
+        const targetY = p.pos.y + (bdy / blen) * 440;
+        const trav = this.state.terrain.checkTraversable(p.pos, { x: targetX, y: targetY }, p.z, false, 30);
         p.pos.x = trav.newPos.x;
         p.pos.y = trav.newPos.y;
-        p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
+        const stepLim = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+        p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepLim).height;
         p.groundZ = p.z;
 
-        // Arrival stun & spatial disruption
-        const stunRadius = 85;
+        // Arrival stun & spatial disruption (+ Adrenal Extension & Velocity Surge support)
+        const stunRadius = 190;
+        const stunDur = 1.0 + 0.15 * aeStacks;
         const victims = this.spatialGrid.getNearby(p.pos, stunRadius);
         for (const v of victims) {
-          if (v.health > 0) {
+          if (v.health > 0 && Math.abs(v.z - p.z) <= 180) {
             this.damageEnemy(v, 48 * p.calculatedStats.damageMultiplier, v.pos);
             v.isStunned = true;
-            v.stunTimer = 1.0;
+            v.stunTimer = Math.max(v.stunTimer || 0, stunDur);
           }
+        }
+        if (aeStacks > 0 || vsStacks > 0) {
+          p.postDashSpeedTimer = Math.max(p.postDashSpeedTimer || 0, 1.5 + 0.25 * aeStacks);
+          this.state.updateCalculatedStats();
         }
         this.state.events.push({
           type: 'teleport_executed',
@@ -1150,6 +1501,18 @@ export class Simulation {
         const isExtended = p.skillEnhancements?.utility === 'extended_dash';
         p.isDashing = true;
         p.dashDurationTimer = isExtended ? 0.32 : 0.22;
+
+        // Commander Shock Dash + Kinetic Shell buff: grant protective Kinetic Shell barrier on dash activation
+        if (p.heroId === 'commander' && p.skillEnhancements?.utility === 'shock_dash') {
+          const ksStacks = p.buffs.buff_cmd_kinetic_shell || 0;
+          if (ksStacks > 0) {
+            const shellDur = 0.65 + 0.15 * ksStacks;
+            const shieldGain = Math.round(p.maxHealth * (0.04 * (1 + 0.03 * ksStacks)));
+            p.phaseBarrierTimer = Math.max(p.phaseBarrierTimer ?? 0, shellDur);
+            p.tempShieldAmount = Math.max(p.tempShieldAmount || 0, shieldGain);
+            p.tempShieldTimer = Math.max(p.tempShieldTimer || 0, shellDur + 0.6);
+          }
+        }
 
         if (worldMx !== 0 || worldMy !== 0) {
           const len = Math.hypot(worldMx, worldMy) || 1;
@@ -1169,24 +1532,44 @@ export class Simulation {
       }
     }
 
-    // 2. Jump (Space)
-    if (input.wantJump && p.isGrounded) {
-      p.vz = 340;
-      p.isGrounded = false;
-      p.isJumping = true;
-      p.isGliding = false;
-      this.state.events.push({ type: 'jump_started', data: { pos: { ...p.pos }, z: p.z } });
+    // 2. Jump (Space) — Ground jump + Double/Triple Air Jump compatibility (scaled for 2x hero stature)
+    if (input.wantJump) {
+      if (p.isGrounded) {
+        p.vz = 470;
+        p.isGrounded = false;
+        p.isJumping = true;
+        p.isGliding = false;
+        this.airborneDuration = 0;
+        p.airJumpsRemaining = p.maxAirJumps ?? 0;
+        this.state.events.push({ type: 'jump_started', data: { pos: { ...p.pos }, z: p.z } });
+      } else if ((p.airJumpsRemaining ?? 0) > 0) {
+        p.airJumpsRemaining--;
+        p.vz = 470;
+        p.isJumping = true;
+        p.isGliding = false;
+        this.state.events.push({ type: 'jump_started', data: { pos: { ...p.pos }, z: p.z, isAirJump: true } });
+      }
     }
 
-    // 3. Jetpack Glide (Hold Space while airborne)
-    const canGlide = !p.isGrounded && input.holdJump && p.vz < 60 && p.jetpackFuel > 0;
+    if (!p.isGrounded) {
+      this.airborneDuration += dt;
+      if (this.airborneDuration >= 1.5 && !p.aerialFocusLatched && (p.buffs.buff_aerial_focus || 0) > 0) {
+        p.aerialFocusLatched = true;
+        this.triggerTimedEffect('aerial_focus', 4.0, 0, 'buff_aerial_focus');
+      }
+    } else {
+      this.airborneDuration = 0;
+    }
+
+    // 3. Jetpack Glide (Hold Space while airborne) — Drain 40/sec
+    const canGlide = !p.isGrounded && input.holdJump && p.vz < 70 && p.jetpackFuel > 0;
     if (canGlide) {
       if (!p.isGliding) {
         p.isGliding = true;
         this.state.events.push({ type: 'glide_started', data: {} });
       }
-      p.vz = Math.max(-55, p.vz); // Slow, floaty descent
-      p.jetpackFuel = Math.max(0, p.jetpackFuel - 32 * dt);
+      p.vz = Math.max(-70, p.vz); // Slow, floaty descent
+      p.jetpackFuel = Math.max(0, p.jetpackFuel - 40 * dt);
     } else {
       if (p.isGliding) {
         p.isGliding = false;
@@ -1195,49 +1578,68 @@ export class Simulation {
     }
 
     // 4. Vertical Integration & Gravity
-    const gravity = p.isGliding ? 220 : 760;
+    const prevPlayerZ = p.z;
+    const gravity = p.isGliding ? 250 : 960;
     p.vz -= gravity * dt;
     p.z += p.vz * dt;
+    if (p.vz > 0 && this.state.terrain.meshCollider) {
+      const ceilY = this.state.terrain.meshCollider.queryCeiling(p.pos.x, p.pos.y, prevPlayerZ);
+      const charHeight = this.state.terrain.isCustomTestMap ? 90 : 46;
+      if (ceilY < Infinity && p.z + charHeight > ceilY - 4) {
+        p.z = Math.min(p.z, Math.max(prevPlayerZ, ceilY - charHeight - 4));
+        p.vz = 0;
+      }
+    }
 
-    // Ground elevation check from TerrainSystem
-    const terrainSample = this.state.terrain.getElevation(p.pos.x, p.pos.y);
+    // Ground elevation check from TerrainSystem (using pre-step Z when falling so thin bridges/platforms never tunnel)
+    const queryZ = p.vz <= 0 ? Math.max(p.z, prevPlayerZ) : p.z;
+    const initialStepLimit = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+    const terrainSample = this.state.terrain.getElevation(p.pos.x, p.pos.y, queryZ, initialStepLimit);
     p.groundZ = terrainSample.height;
+    const maxSnapDrop = this.state.terrain.isCustomTestMap ? 95 : 28;
 
     // Step-down snapping: if grounded and walking downhill on a slope, keep glued to ground
     if (p.isGrounded && !p.isJumping) {
       const drop = p.z - p.groundZ;
-      if (drop >= 0 && drop <= 24) {
+      if (drop >= 0 && drop <= maxSnapDrop) {
         p.z = p.groundZ;
         p.vz = 0;
       }
     }
 
-    if (p.z <= p.groundZ && p.vz <= 0) {
+    if (p.z <= p.groundZ && p.vz <= 0 && p.groundZ <= Math.max(prevPlayerZ, p.z) + initialStepLimit) {
       p.z = p.groundZ;
       p.vz = 0;
       if (!p.isGrounded) {
-        p.isGrounded = true;
-        p.isJumping = false;
-        if (p.isGliding) {
-          p.isGliding = false;
-          this.state.events.push({ type: 'glide_ended', data: {} });
-        }
-        this.state.events.push({ type: 'landed', data: { z: p.z } });
+        this.onPlayerLanded();
       }
-      // Rapid recharge of jetpack fuel while on solid ground
-      p.jetpackFuel = Math.min(p.maxJetpackFuel, p.jetpackFuel + 75 * dt);
+      // Base recharge 25/sec scaled by Fuel Recycler
+      p.jetpackFuel = Math.min(
+        p.maxJetpackFuel,
+        p.jetpackFuel + 25 * (p.calculatedStats.jetpackRegenMultiplier || 1) * dt
+      );
     } else if (p.z > p.groundZ + 20) {
       p.isGrounded = false;
     }
+
+    // Water physics check: smooth wading resistance (~68% movement speed base, eased by Meltwater Treads)
+    p.inWater = Boolean(terrainSample.isInWater && p.z <= terrainSample.height + 10);
+    const waterSpeedMult = p.inWater
+      ? Math.min(0.92, 0.68 + (p.calculatedStats.waterSpeedBonus || 0))
+      : 1.0;
 
     // 5. Horizontal Movement with Per-Axis Wall-Sliding Collision
     const airMultiplier = p.isGliding ? 1.25 : 1.0;
     const isMedicalRush = p.equippedSkills.utility.id === 'medical_rush';
     const isExtendedDash = p.skillEnhancements?.utility === 'extended_dash';
-    let dashSpeedMult = 3.2;
+    const kineticStrideMult =
+      p.heroId === 'commander' && isExtendedDash
+        ? 1 + 0.04 * (p.buffs.buff_cmd_kinetic_stride || 0)
+        : 1.0;
+    let dashSpeedMult = 3.5;
     if (isMedicalRush) {
       // Therapeutic Pass = exact 1.5x Commander base dash distance (Extended Dash doubles -> 3.0x)
-      const commanderDistFactor = 3.2 * 0.22;
+      const commanderDistFactor = 3.5 * 0.22;
       dashSpeedMult =
         (commanderDistFactor * DOCTOR_CONFIG.therapeuticPass.commanderDistanceFactor) /
         DOCTOR_CONFIG.therapeuticPass.duration;
@@ -1245,12 +1647,11 @@ export class Simulation {
         dashSpeedMult *= 2.0;
       }
     } else if (isExtendedDash) {
-      dashSpeedMult = 6.4;
+      dashSpeedMult = 7.0 * kineticStrideMult;
     }
-    if (p.skillEnhancements?.utility === 'phase_dash') {
-      dashSpeedMult *= 1.35;
-    }
-    const currentSpeed = p.isDashing ? p.moveSpeed * dashSpeedMult : p.moveSpeed * airMultiplier;
+    const currentSpeed = (p.isDashing ? p.moveSpeed * dashSpeedMult : p.moveSpeed * airMultiplier) * waterSpeedMult;
+    const preMoveX = p.pos.x;
+    const preMoveY = p.pos.y;
 
     if (p.isDashing) {
       p.dashDurationTimer -= dt;
@@ -1258,13 +1659,16 @@ export class Simulation {
         p.isDashing = false;
         if (isMedicalRush) {
           if (p.skillEnhancements?.utility === 'phase_barrier') {
-            p.phaseBarrierTimer = Math.max(
-              p.phaseBarrierTimer ?? 0,
-              DOCTOR_CONFIG.phaseBarrier.postDashImmunityDuration
-            );
+            const sterileStacks = p.buffs.buff_doc_sterile_interval || 0;
+            const postDashInvuln = Math.min(1.3, DOCTOR_CONFIG.phaseBarrier.postDashImmunityDuration + 0.1 * sterileStacks);
+            p.phaseBarrierTimer = Math.max(p.phaseBarrierTimer ?? 0, postDashInvuln);
           }
           if (p.skillEnhancements?.utility === 'adrenaline_rush') {
-            p.adrenalineRushTimer = DOCTOR_CONFIG.adrenalineRush.duration;
+            const rushPersistStacks = p.buffs.buff_doc_rush_persistence || 0;
+            p.adrenalineRushTimer = Math.min(
+              2.3,
+              DOCTOR_CONFIG.adrenalineRush.duration + 0.2 * rushPersistStacks
+            );
             this.state.updateCalculatedStats();
             this.state.events.push({
               type: 'adrenaline_activated',
@@ -1272,46 +1676,31 @@ export class Simulation {
             });
           }
         }
-        // Phase Surge arrival shockwave
-        if (p.skillEnhancements?.utility === 'phase_dash') {
-          const arrivalRadius = 95;
-          const arrivalDmg = 36 * p.calculatedStats.damageMultiplier;
-          const nearby = this.spatialGrid.getNearby(p.pos, arrivalRadius);
-          for (let k = 0; k < nearby.length; k++) {
-            const v = nearby[k];
-            if (v.health > 0) {
-              this.damageEnemy(v, arrivalDmg, v.pos, 'lightning');
-            }
-          }
-          this.state.events.push({
-            type: 'dash_shockwave',
-            data: { pos: { ...p.pos }, z: p.z, radius: arrivalRadius, dir: { ...p.dashDir } }
-          });
-        }
       }
 
       // Dash Upgrade 1: Shock Dash — Creates a shockwave at the first enemy hit with AOE & knockback!
       if (p.skillEnhancements?.utility === 'shock_dash') {
         if (!p.dashHitIds) p.dashHitIds = new Set<string>();
-        const nearby = this.spatialGrid.getNearby(p.pos, 44);
+        const cwStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_concussive_wave || 0) : 0;
+        const nearby = this.spatialGrid.getNearby(p.pos, 115);
         for (let sv = 0; sv < nearby.length; sv++) {
           const target = nearby[sv];
-          if (target.health > 0 && !p.dashHitIds.has(target.id)) {
+          if (target.health > 0 && !p.dashHitIds.has(target.id) && Math.abs(target.z - p.z) <= 160) {
             p.dashHitIds.add(target.id);
             if (!p.dashShockwaveTriggered) {
               p.dashShockwaveTriggered = true;
-              const shockRadius = 115;
-              const shockDmg = 68 * p.calculatedStats.damageMultiplier;
+              const shockRadius = 240 * (1 + 0.05 * cwStacks);
+              const shockDmg = 68 * (1 + 0.03 * cwStacks) * p.calculatedStats.damageMultiplier;
               const aoeVictims = this.spatialGrid.getNearby(p.pos, shockRadius);
               for (const av of aoeVictims) {
-                if (av.health > 0) {
+                if (av.health > 0 && Math.abs(av.z - p.z) <= 165) {
                   this.damageEnemy(av, shockDmg, av.pos);
                   // Strong kinetic knockback impulse
                   const kdx = av.pos.x - p.pos.x;
                   const kdy = av.pos.y - p.pos.y;
                   const kdist = Math.hypot(kdx, kdy) || 1;
-                  av.pos.x += (kdx / kdist) * 48;
-                  av.pos.y += (kdy / kdist) * 48;
+                  av.pos.x += (kdx / kdist) * 88;
+                  av.pos.y += (kdy / kdist) * 88;
                 }
               }
               this.state.events.push({
@@ -1333,10 +1722,11 @@ export class Simulation {
       for (let s = 0; s < dashSubSteps; s++) {
         const nextX = p.pos.x + p.dashDir.x * currentSpeed * stepDt;
         const nextY = p.pos.y + p.dashDir.y * currentSpeed * stepDt;
-        if (this.moveWithTerrainSlide(p.pos, p.z, nextX, nextY, !p.isGrounded, 18)) {
+        if (this.moveWithTerrainSlide(p.pos, p.z, nextX, nextY, !p.isGrounded, 30)) {
           if (p.isGrounded && !p.isJumping) {
-            const h = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
-            if (h <= p.z + 14) p.z = h;
+            const stepLim = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+            const h = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepLim).height;
+            if (h <= p.z + stepLim && h >= p.z - 95) p.z = h;
           }
         }
       }
@@ -1345,14 +1735,14 @@ export class Simulation {
       const utilDef = p.equippedSkills.utility;
       if (utilDef.id === 'tactical_dash' && !p.dashShockwaveTriggered) {
         // Commander Impact Dash: Colliding with an enemy triggers a one-time shockwave
-        const candidates = this.spatialGrid.getNearby(p.pos, 48);
+        const candidates = this.spatialGrid.getNearby(p.pos, 160);
         let primaryHit: EnemyState | null = null;
         for (let i = 0; i < candidates.length; i++) {
           const enemy = candidates[i];
           if (enemy.health <= 0) continue;
-          if (Math.abs(enemy.z - p.z) > 55) continue;
+          if (Math.abs(enemy.z - p.z) > 160) continue;
           const dist = Math.hypot(enemy.pos.x - p.pos.x, enemy.pos.y - p.pos.y);
-          if (dist <= 24 + enemy.radius) {
+          if (dist <= 74 + enemy.radius) {
             primaryHit = enemy;
             break;
           }
@@ -1362,19 +1752,19 @@ export class Simulation {
           p.dashShockwaveTriggered = true;
           const impactPos = { x: primaryHit.pos.x, y: primaryHit.pos.y };
           const directDmg = utilDef.baseDamage * p.calculatedStats.damageMultiplier;
-          const shockRadius = 115 * (p.calculatedStats.aoeRadiusMultiplier || 1.0) * (p.calculatedStats.ultimateRadiusMultiplier || 1.0);
+          const shockRadius = 225 * (p.calculatedStats.aoeRadiusMultiplier || 1.0) * (p.calculatedStats.ultimateRadiusMultiplier || 1.0);
 
           // Primary enemy takes direct impact damage + directional kinetic knockback
           this.damageEnemy(primaryHit, directDmg, impactPos);
-          primaryHit.velocity.x += p.dashDir.x * 320;
-          primaryHit.velocity.y += p.dashDir.y * 320;
+          primaryHit.velocity.x += p.dashDir.x * 520;
+          primaryHit.velocity.y += p.dashDir.y * 520;
 
           // Nearby enemies take shockwave area damage once per dash impact
           const nearby = this.spatialGrid.getNearby(impactPos, shockRadius);
           for (let j = 0; j < nearby.length; j++) {
             const v = nearby[j];
             if (v.health <= 0 || v.id === primaryHit.id) continue;
-            if (Math.abs(v.z - primaryHit.z) > 65) continue;
+            if (Math.abs(v.z - primaryHit.z) > 160) continue;
             const d = Math.hypot(v.pos.x - impactPos.x, v.pos.y - impactPos.y);
             if (d <= shockRadius + v.radius) {
               this.damageEnemy(v, directDmg * 0.85, impactPos);
@@ -1383,17 +1773,6 @@ export class Simulation {
               const klen = Math.hypot(kdx, kdy) || 1;
               v.velocity.x += (kdx / klen) * 280;
               v.velocity.y += (kdy / klen) * 280;
-            }
-          }
-
-          if (p.skillEnhancements?.utility === 'cryo_dash') {
-            const cryoVictims = this.spatialGrid.getNearby(impactPos, 110);
-            for (let cv = 0; cv < cryoVictims.length; cv++) {
-              const cEnemy = cryoVictims[cv];
-              if (cEnemy.health > 0) {
-                cEnemy.isChilled = true;
-                cEnemy.chillTimer = 2.5;
-              }
             }
           }
 
@@ -1431,7 +1810,9 @@ export class Simulation {
 
           if (distToSeg <= cfg.sweepHitRadius + enemy.radius) {
             p.dashHitIds.add(enemy.id);
-            this.damageEnemy(enemy, rushDmg, enemy.pos, 'medical');
+            const impactDosageStacks = p.skillEnhancements?.utility === 'extended_dash' ? (p.buffs.buff_doc_impact_dosage || 0) : 0;
+            const actualRushDmg = rushDmg * (1 + 0.04 * impactDosageStacks);
+            this.damageEnemy(enemy, actualRushDmg, enemy.pos, 'medical');
             this.state.events.push({
               type: 'medical_rush_hit',
               data: { pos: { ...enemy.pos }, z: enemy.z }
@@ -1444,7 +1825,7 @@ export class Simulation {
         const nextX = p.pos.x + worldMx * currentSpeed * dt;
         const nextY = p.pos.y + worldMy * currentSpeed * dt;
 
-        this.moveWithTerrainSlide(p.pos, p.z, nextX, nextY, !p.isGrounded, 18);
+        this.moveWithTerrainSlide(p.pos, p.z, nextX, nextY, !p.isGrounded, 30);
 
         // Camera-relative facing: selects sprite view based strictly on screen direction
         if (p.castFacingLockTimer <= 0) {
@@ -1463,25 +1844,34 @@ export class Simulation {
     p.pos.x = clampedPlayer.pos.x;
     p.pos.y = clampedPlayer.pos.y;
 
-    this.resolveObstacleCollisions(p.pos, 22);
-    if (p.isGrounded && !p.isJumping) {
-      this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 18);
-    }
+    this.resolveObstacleCollisions(p.pos, 38);
+    // Run wall push-out even while airborne/dashing so entities never settle inside hollow tower/waterfall meshes
+    this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 30);
 
-    // Reliable ground surface tracking: Keep feet firmly anchored to terrain without clipping or falling through
-    let finalElev = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
-    const stepUpLimit = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y, finalElev);
+    // Reliable ground surface tracking: Keep feet firmly anchored to terrain without wall-teleporting up cliffs
+    const stepUpLimit = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+    let finalSample = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepUpLimit);
+    let finalElev = finalSample.height;
     if (p.isGrounded && !p.isJumping) {
       const drop = p.z - finalElev;
-      if (drop > 24) {
+      if (drop > maxSnapDrop) {
         // Ground dropped suddenly beneath player (walked off sheer cliff edge or ledge) -> enter free fall
         p.isGrounded = false;
       } else if (finalElev > p.z + stepUpLimit) {
-        // Shoved into a steep cliff face: push downhill onto valid footing and re-sample elevation
-        if (this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 18)) {
-          finalElev = this.state.terrain.getElevation(p.pos.x, p.pos.y).height;
+        // Shoved into a steep cliff face or overhang lip: push out or revert horizontal move rather than teleporting upward
+        if (this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 30)) {
+          finalSample = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepUpLimit);
+          finalElev = finalSample.height;
         }
-        p.z = Math.max(p.z, Math.min(finalElev, p.z + stepUpLimit));
+        if (finalElev > p.z + stepUpLimit) {
+          p.pos.x = preMoveX;
+          p.pos.y = preMoveY;
+          finalSample = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, stepUpLimit);
+          finalElev = finalSample.height;
+        }
+        if (finalElev <= p.z + stepUpLimit) {
+          p.z = finalElev;
+        }
         p.vz = 0;
       } else {
         // Walkable ground or slope: stay firmly glued to terrain surface
@@ -1489,22 +1879,170 @@ export class Simulation {
         p.vz = 0;
       }
     } else {
-      // Airborne / falling / jumping: only land when moving downwards (vz <= 0) and hitting ground
-      if (p.z <= finalElev && p.vz <= 0) {
-        p.z = finalElev;
-        p.vz = 0;
-        if (!p.isGrounded) {
-          p.isGrounded = true;
-          p.isJumping = false;
-          if (p.isGliding) {
-            p.isGliding = false;
-            this.state.events.push({ type: 'glide_ended', data: {} });
+      // Airborne / falling / jumping: land cleanly when descending onto solid surfaces without snapping up walls
+      if (finalSample.sourceTag === 'event:dash_platform') {
+        if (p.z <= finalElev && p.vz <= 0) {
+          p.z = finalElev;
+          p.vz = 0;
+          if (!p.isGrounded) {
+            this.onPlayerLanded();
           }
-          this.state.events.push({ type: 'landed', data: { z: p.z } });
+        }
+      } else if (
+        p.z <= finalElev &&
+        finalElev <= Math.max(prevPlayerZ, p.z) + stepUpLimit &&
+        (p.vz <= 0 || finalElev - p.z <= 28)
+      ) {
+        p.z = finalElev;
+        if (p.vz <= 0) {
+          p.vz = 0;
+          if (!p.isGrounded) {
+            this.onPlayerLanded();
+          }
         }
       }
     }
     p.groundZ = finalElev;
+    p.inWater = Boolean(finalSample.isInWater && p.z <= terrainSample.height + 10);
+
+    // Non-looping last-safe-grounded & unstuck safeguard
+    if (this.unstuckCooldown > 0) {
+      this.unstuckCooldown = Math.max(0, this.unstuckCooldown - dt);
+    }
+    if (
+      p.isGrounded &&
+      !p.isJumping &&
+      finalSample.isWalkable &&
+      finalSample.category !== 'cliff' &&
+      finalSample.category !== 'solid_obstacle' &&
+      Math.abs(p.z - finalElev) <= 4 &&
+      this.unstuckCooldown <= 0
+    ) {
+      const blockedByObs = this.state.obstacles.some(
+        (obs) => Math.hypot(p.pos.x - obs.pos.x, p.pos.y - obs.pos.y) < obs.radius * 0.78
+      );
+      if (!blockedByObs) {
+        this.lastSafeGroundedPos = { x: p.pos.x, y: p.pos.y, z: finalElev };
+      }
+    }
+
+    if (this.unstuckCooldown <= 0 && !p.isDashing) {
+      if (
+        !p.isGrounded &&
+        !p.isJumping &&
+        p.vz <= 0 &&
+        p.z < finalElev - 60 &&
+        finalElev - p.z <= 120 &&
+        (!this.state.terrain.meshCollider || this.state.terrain.meshCollider.queryCeiling(p.pos.x, p.pos.y, p.z) === Infinity)
+      ) {
+        p.z = finalElev + 2;
+        p.vz = 0;
+        p.isGrounded = true;
+        this.stuckCheckTimer = 0;
+        this.unstuckCooldown = 0.85;
+      } else if ((worldMx !== 0 || worldMy !== 0) && this.stuckPrevPos) {
+        const movedStep = Math.hypot(p.pos.x - this.stuckPrevPos.x, p.pos.y - this.stuckPrevPos.y);
+        const insideSolid =
+          !finalSample.isWalkable ||
+          finalSample.category === 'cliff' ||
+          finalSample.category === 'solid_obstacle';
+        if (movedStep < 10 * dt && insideSolid) {
+          this.stuckCheckTimer += dt;
+          if (this.stuckCheckTimer >= 0.45 && this.lastSafeGroundedPos) {
+            p.pos.x = this.lastSafeGroundedPos.x;
+            p.pos.y = this.lastSafeGroundedPos.y;
+            p.z = this.lastSafeGroundedPos.z + 2;
+            p.vz = 0;
+            p.isGrounded = true;
+            this.stuckCheckTimer = 0;
+            this.unstuckCooldown = 0.9;
+          }
+        } else {
+          this.stuckCheckTimer = Math.max(0, this.stuckCheckTimer - dt * 3);
+        }
+      }
+    }
+    this.stuckPrevPos = { x: p.pos.x, y: p.pos.y };
+  }
+
+  private onPlayerLanded(): void {
+    const p = this.state.player;
+    p.isGrounded = true;
+    p.isJumping = false;
+    p.airJumpsRemaining = p.maxAirJumps ?? 0;
+    if (p.isGliding) {
+      p.isGliding = false;
+      this.state.events.push({ type: 'glide_ended', data: {} });
+    }
+    this.state.events.push({ type: 'landed', data: { z: p.z } });
+
+    // T08 Aftershock: landing from air (> 150ms) triggers 200u shockwave for 4% * n base LMB damage (3s ICD)
+    const aftershockStacks = p.buffs.buff_aftershock || 0;
+    if (aftershockStacks > 0 && this.airborneDuration > 0.15 && p.aftershockCooldown <= 0) {
+      p.aftershockCooldown = 3.0;
+      const shockDmg = 0.04 * aftershockStacks * p.baseLmbDamage * p.calculatedStats.damageMultiplier;
+      const victims = this.spatialGrid.getNearby(p.pos, 200);
+      for (let i = 0; i < victims.length; i++) {
+        const v = victims[i];
+        if (v.health > 0 && Math.abs(v.z - p.z) <= 160) {
+          this.damageEnemy(v, shockDmg, v.pos, 'physical', { isRecursiveTrigger: true });
+        }
+      }
+      this.state.events.push({
+        type: 'dash_shockwave',
+        data: { pos: { ...p.pos }, z: p.z, radius: 200, variant: 'aftershock' }
+      });
+    }
+    this.airborneDuration = 0;
+    p.aerialFocusLatched = false;
+  }
+
+  private triggerTimedEffect(
+    effectId: TimedEffectId,
+    durationSec: number,
+    icdSec: number,
+    sourceBuffId: BuffId
+  ): boolean {
+    const p = this.state.player;
+    const stacks = Math.min(3, p.buffs[sourceBuffId] || 0);
+    if (stacks <= 0) return false;
+    if (!p.timedEffectCooldowns) p.timedEffectCooldowns = {};
+    if (!p.activeTimedEffects) p.activeTimedEffects = {};
+    if ((p.timedEffectCooldowns[effectId] ?? 0) > 0) return false;
+
+    if (icdSec > 0) {
+      p.timedEffectCooldowns[effectId] = icdSec;
+    }
+    const def = BUFF_REGISTRY[sourceBuffId];
+    const prev = p.activeTimedEffects[effectId];
+    const needsStatsUpdate = !prev || prev.remaining <= 0 || prev.stacks !== stacks;
+    p.activeTimedEffects[effectId] = {
+      id: effectId,
+      name: def?.name || effectId,
+      icon: def?.icon || '/assets/attack_speed.png',
+      remaining: durationSec,
+      duration: durationSec,
+      stacks,
+      sourceBuffId,
+      color: def?.accentColor || '#38bdf8'
+    };
+    if (needsStatsUpdate) {
+      this.state.updateCalculatedStats();
+    }
+    return true;
+  }
+
+  private runPrimaryLmbCast(fn: () => void): void {
+    const startIdx = this.state.projectiles.length;
+    this.isExecutingPrimaryLmb = true;
+    try {
+      fn();
+    } finally {
+      this.isExecutingPrimaryLmb = false;
+      for (let i = startIdx; i < this.state.projectiles.length; i++) {
+        this.state.projectiles[i].isPrimaryLmb = true;
+      }
+    }
   }
 
   /**
@@ -1570,12 +2108,36 @@ export class Simulation {
       return true;
     }
 
+    // Smooth corner-bevel slide: if tangent projection nudges slightly into a curved mesh crease,
+    // deflect slightly outward along the surface normal while advancing tangentially.
+    const stepMag = Math.hypot(mDx, mDy);
+    if (nLen > 0.001 && stepMag > 0.05) {
+      const sMag = Math.hypot(sDx, sDy);
+      const tX = sMag > 0.05 ? sDx : -ny * stepMag * 0.7;
+      const tY = sMag > 0.05 ? sDy : nx * stepMag * 0.7;
+      for (const nudgeScale of [0.35, 0.75]) {
+        const escapeTrav = this.state.terrain.checkTraversable(
+          pos,
+          { x: pos.x + tX + nx * stepMag * nudgeScale, y: pos.y + tY + ny * stepMag * nudgeScale },
+          z,
+          isAirborne,
+          radius
+        );
+        if (escapeTrav.allowed) {
+          pos.x = escapeTrav.newPos.x;
+          pos.y = escapeTrav.newPos.y;
+          return true;
+        }
+      }
+    }
+
     return false;
   }
 
   private resolveObstacleCollisions(pos: Vector2, radius: number, isTitan: boolean = false): void {
     for (let i = 0; i < this.state.obstacles.length; i++) {
       const obs = this.state.obstacles[i];
+      if (this.state.terrain.isCustomTestMap && obs.type === 'tree') continue;
       if (isTitan) {
         // Colossal titan easily steps over small flora, mushrooms, low pebbles, and spaceship hull
         if (obs.id.startsWith('ship_')) continue;
@@ -1771,11 +2333,21 @@ export class Simulation {
 
   private updateSkills(dt: number, input: InputSnapshot): void {
     const p = this.state.player;
+    if (p.isCarryingEventPayload) {
+      p.beamChargeTimer = 0;
+      p.beamTargetPos = null;
+      if (this.state.vitalTethers.length > 0) {
+        this.state.vitalTethers = [];
+      }
+      return;
+    }
     const stats = p.calculatedStats;
 
     // --- Primary Weapon Slot ---
     const primaryDef = p.equippedSkills.primary;
-    const primaryCd = primaryDef.cooldown / stats.attackSpeedMultiplier;
+    const primaryCd =
+      primaryDef.cooldown /
+      Math.max(0.1, (stats.lmbAttackSpeedMultiplier || 1.0) * (stats.attackSpeedMultiplier || 1.0));
     const primaryEnh = p.skillEnhancements?.primary;
 
     if (p.heroId === 'doctor' && primaryEnh === 'vital_extraction') {
@@ -1798,7 +2370,8 @@ export class Simulation {
         if (p.beamChargeTimer <= 0) {
           p.beamChargeTimer = 0;
           if (p.beamTargetPos) {
-            this.fireHyperBeam(p.beamTargetPos);
+            const beamTarget = p.beamTargetPos;
+            this.runPrimaryLmbCast(() => this.fireHyperBeam(beamTarget));
             p.primaryCooldownRemaining = primaryCd;
           }
           p.beamTargetPos = null;
@@ -1808,7 +2381,7 @@ export class Simulation {
         if (input.wantPrimaryManual) {
           target = { ...input.mouseWorldPos };
         } else if (p.autoCastPrimary) {
-          const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+          const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
           const candidates = this.spatialGrid.getNearby(p.pos, primaryDef.range * 1.15);
           let bestEnemy: EnemyState | null = null;
           const inRange: Array<{ cand: EnemyState; d3D: number; candCenter3D: Vector3 }> = [];
@@ -1849,13 +2422,13 @@ export class Simulation {
     } else {
       if (p.primaryCooldownRemaining <= 0) {
         let target: Vector2 | null = null;
-        let targetZ: number = p.z + 26;
+        let targetZ: number = p.z + 52;
 
         if (input.wantPrimaryManual) {
           target = { ...input.mouseWorldPos };
           targetZ = input.mouseWorldPos3D?.z ?? (this.state.terrain.calculateHeight(target.x, target.y) + 16);
         } else if (p.autoCastPrimary) {
-          const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+          const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
           const candidates = this.spatialGrid.getNearby(p.pos, primaryDef.range * 1.15);
           let bestEnemy: EnemyState | null = null;
           const inRange: Array<{ cand: EnemyState; d3D: number; candCenter3D: Vector3 }> = [];
@@ -1885,27 +2458,30 @@ export class Simulation {
         }
 
         if (target) {
-          if (primaryEnh === 'toxic_chain') {
-            this.fireToxicChain(target, targetZ);
-          } else if (primaryEnh === 'cryogenic_scalpel') {
-            this.fireCryoScalpel(target, targetZ);
-          } else if (primaryEnh === 'chill_beam') {
-            this.fireChillBeam(target, targetZ);
-          } else if (primaryEnh === 'piercing_laser') {
-            this.firePiercingLaser(target, targetZ);
-          } else if (primaryEnh === 'extended_slash') {
-            this.fireExtendedSlash(target, targetZ);
-          } else if (primaryDef.id === 'medical_pulse') {
-            this.fireMedicalPulse(target, targetZ);
-          } else if (primaryDef.id === 'scatter_blaster') {
-            this.fireScatterBlaster(target, targetZ);
-          } else if (primaryDef.id === 'arc_cannon') {
-            this.fireArcCannon(target);
-          } else if (primaryDef.id === 'gatling_minigun') {
-            this.fireGatlingMinigun(target, targetZ);
-          } else {
-            this.firePrimaryPulse(target, targetZ);
-          }
+          const castTarget = target;
+          this.runPrimaryLmbCast(() => {
+            if (primaryEnh === 'toxic_chain') {
+              this.fireToxicChain(castTarget, targetZ);
+            } else if (primaryEnh === 'cryogenic_scalpel') {
+              this.fireCryoScalpel(castTarget, targetZ);
+            } else if (primaryEnh === 'chill_beam') {
+              this.fireChillBeam(castTarget, targetZ);
+            } else if (primaryEnh === 'piercing_laser') {
+              this.firePiercingLaser(castTarget, targetZ);
+            } else if (primaryEnh === 'extended_slash') {
+              this.fireExtendedSlash(castTarget, targetZ);
+            } else if (primaryDef.id === 'medical_pulse') {
+              this.fireMedicalPulse(castTarget, targetZ);
+            } else if (primaryDef.id === 'scatter_blaster') {
+              this.fireScatterBlaster(castTarget, targetZ);
+            } else if (primaryDef.id === 'arc_cannon') {
+              this.fireArcCannon(castTarget);
+            } else if (primaryDef.id === 'gatling_minigun') {
+              this.fireGatlingMinigun(castTarget, targetZ);
+            } else {
+              this.firePrimaryPulse(castTarget, targetZ);
+            }
+          });
           p.primaryCooldownRemaining = primaryCd;
         }
       }
@@ -1913,10 +2489,12 @@ export class Simulation {
 
     // --- Secondary Weapon Slot ---
     const secDef = p.equippedSkills.secondary;
-    const secondaryCd = secDef.cooldown / stats.attackSpeedMultiplier;
+    const secondaryCd =
+      (secDef.cooldown * (stats.skillCooldownMultiplier || 1.0)) /
+      Math.max(0.1, stats.attackSpeedMultiplier || 1.0);
     if (p.secondaryCooldownRemaining <= 0) {
       let target: Vector2 | null = null;
-      let targetZ: number = p.z + 26;
+      let targetZ: number = p.z + 52;
 
       if (input.wantSecondaryManual) {
         if (input.mouseWorldPos && Number.isFinite(input.mouseWorldPos.x) && Number.isFinite(input.mouseWorldPos.y)) {
@@ -1927,7 +2505,7 @@ export class Simulation {
           targetZ = p.z + 16;
         }
       } else if (p.autoCastSecondary) {
-        const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+        const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
         const candidates = this.spatialGrid.getNearby(p.pos, secDef.range * 1.15);
         let bestEnemy: EnemyState | null = null;
         const inRange: Array<{ cand: EnemyState; d3D: number; candCenter3D: Vector3 }> = [];
@@ -1960,6 +2538,7 @@ export class Simulation {
       if (secEnh === 'experimental_drones' && (input.wantSecondaryManual || target)) {
         this.triggerExperimentalDroneVolley();
         p.secondaryCooldownRemaining = secondaryCd;
+        this.triggerTimedEffect('resonance_siphon', 3.5, 6.0, 'buff_resonance_siphon');
       } else if (target) {
         if (secEnh === 'toxic_cluster_bomb') {
           this.fireToxicClusterBomb(target, targetZ);
@@ -1985,6 +2564,7 @@ export class Simulation {
           this.firePiercingWave(target, targetZ);
         }
         p.secondaryCooldownRemaining = secondaryCd;
+        this.triggerTimedEffect('resonance_siphon', 3.5, 6.0, 'buff_resonance_siphon');
       }
     }
 
@@ -2025,7 +2605,9 @@ export class Simulation {
         this.fireOrbitalJudgment(playerPos);
       }
       p.ultimateCooldownRemaining =
-        ultDef.cooldown * stats.ultimateCooldownMultiplier;
+        ultDef.cooldown *
+        stats.ultimateCooldownMultiplier *
+        (stats.skillCooldownMultiplier || 1.0);
     }
   }
 
@@ -2042,7 +2624,7 @@ export class Simulation {
       const dy = p.pos.y - field.pos.y;
       const dist = Math.hypot(dx, dy);
 
-      if (dist <= field.radius && Math.abs(p.z - field.z) < 65) {
+      if (dist <= field.radius && Math.abs(p.z - field.z) < 130) {
         if (p.health < p.maxHealth) {
           const healTick = field.healPerSecond * dt;
           p.health = Math.min(p.maxHealth, p.health + healTick);
@@ -2072,11 +2654,11 @@ export class Simulation {
 
     // Offset firing origin perpendicular to aim direction for alternating Left <-> Right pistols
     const perpAngle = baseAngle + (currentHand === 'left' ? -Math.PI / 2 : Math.PI / 2);
-    const handOffset = 11;
+    const handOffset = 42;
     const origin = {
       x: p.pos.x + Math.cos(perpAngle) * handOffset,
       y: p.pos.y + Math.sin(perpAngle) * handOffset,
-      z: p.z + 26
+      z: p.z + 52
     };
 
     const dx = targetPos.x - origin.x;
@@ -2089,13 +2671,14 @@ export class Simulation {
     const isChain = variant === 'toxic_chain';
     const cfg = isChain ? DOCTOR_CONFIG.toxicChain : DOCTOR_CONFIG.lmb;
     const speed = cfg.projectileSpeed * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const count = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const count = 1 + (p.calculatedStats.extraLmbProjectiles || 0);
     const baseSpread = cfg.spreadAngleRad;
     const maxSpread = baseSpread * 3.0;
     const spread = count > 1 ? Math.min(maxSpread, baseSpread + (count - 2) * 0.06) : 0;
     const radius = cfg.projectileRadius * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const pierceCount = isChain ? 1 : 1 + (p.calculatedStats.projectilePierce || 0);
     const baseDamage = cfg.baseDamage * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
 
     this.setFacingToward(targetPos);
 
@@ -2125,7 +2708,10 @@ export class Simulation {
         originZ: origin.z,
         targetZ,
         hand: currentHand,
-        bouncesRemaining: isChain ? DOCTOR_CONFIG.toxicChain.maxBounces : undefined
+        bouncesRemaining: isChain ? DOCTOR_CONFIG.toxicChain.maxBounces : undefined,
+        isRicochet: false,
+        attackActivationId: activationId,
+        isDirectAttack: true
       };
       this.state.projectiles.push(proj);
     }
@@ -2142,7 +2728,7 @@ export class Simulation {
   private fireCryoScalpel(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.cryoScalpel;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 24 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 48 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -2150,13 +2736,15 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.55, Math.min(0.55, dz / dist3D)));
 
-    const count = Math.min(cfg.maxScalpels, 1 + Math.max(0, p.calculatedStats.extraProjectiles || 0));
+    const count = Math.min(cfg.maxScalpels, 1 + Math.max(0, p.calculatedStats.extraLmbProjectiles || 0));
     const maxSpread = 0.65;
     const spread = count > 1 ? Math.min(maxSpread, cfg.spreadAngleRad + (count - 2) * 0.09) : 0;
     const speed = cfg.outboundSpeed * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const damage = cfg.baseDamage * p.calculatedStats.damageMultiplier;
+    const surgicalEdgeStacks = p.heroId === 'doctor' ? (p.buffs.buff_doc_surgical_edge || 0) : 0;
+    const damage = cfg.baseDamage * (1 + 0.04 * surgicalEdgeStacks) * p.calculatedStats.damageMultiplier;
     const radius = cfg.projectileRadius * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const maxDistance = cfg.range * (p.calculatedStats.aoeRadiusMultiplier ? Math.min(1.35, Math.max(1.0, p.calculatedStats.aoeRadiusMultiplier)) : 1.0);
+    const activationId = this.allocateDirectAttackActivationId();
 
     this.setFacingToward(targetPos);
 
@@ -2186,7 +2774,9 @@ export class Simulation {
         trailAccumDist: 0,
         element: 'ice',
         originZ: origin.z,
-        targetZ
+        targetZ,
+        attackActivationId: activationId,
+        isDirectAttack: true
       });
     }
 
@@ -2205,8 +2795,13 @@ export class Simulation {
       return;
     }
 
-    const range = cfg.range * Math.min(1.35, Math.max(1.0, p.calculatedStats.aoeRadiusMultiplier || 1.0));
-    const maxTethers = cfg.baseTetherCount + Math.max(0, p.calculatedStats.extraProjectiles || 0);
+    const vitalReachStacks = p.buffs.buff_doc_vital_reach || 0;
+    const siphonEffStacks = p.buffs.buff_doc_siphon_efficiency || 0;
+    const range =
+      cfg.range *
+      (1 + 0.04 * vitalReachStacks) *
+      Math.min(1.35, Math.max(1.0, p.calculatedStats.aoeRadiusMultiplier || 1.0));
+    const maxTethers = cfg.baseTetherCount + Math.max(0, p.calculatedStats.extraLmbProjectiles || 0);
     const nearby = this.spatialGrid.getNearby(p.pos, range * 1.1);
     const eligible: Array<{ enemy: EnemyState; score: number }> = [];
 
@@ -2215,7 +2810,7 @@ export class Simulation {
       if (cand.health <= 0) continue;
       const d = Math.hypot(cand.pos.x - p.pos.x, cand.pos.y - p.pos.y);
       if (d > range + cand.radius) continue;
-      if (Math.abs(cand.z - p.z) > 130) continue;
+      if (Math.abs(cand.z - p.z) > 240) continue;
       const aimDist = input.wantPrimaryManual && input.mouseWorldPos
         ? Math.hypot(cand.pos.x - input.mouseWorldPos.x, cand.pos.y - input.mouseWorldPos.y)
         : d;
@@ -2238,9 +2833,12 @@ export class Simulation {
       }
     }
 
-    const tickCd = cfg.tickInterval / Math.max(0.5, p.calculatedStats.attackSpeedMultiplier || 1.0);
+    const tickCd =
+      cfg.tickInterval /
+      Math.max(0.5, (p.calculatedStats.lmbAttackSpeedMultiplier || 1.0) * (p.calculatedStats.attackSpeedMultiplier || 1.0));
     const dmgPerTick = cfg.damagePerTick * p.calculatedStats.damageMultiplier;
-    const healMult = p.calculatedStats.healingMultiplier || 1.0;
+    const healMult = (p.calculatedStats.healingMultiplier || 1.0) * (1 + 0.04 * siphonEffStacks);
+    const activationId = this.allocateDirectAttackActivationId();
 
     // Pass 1: assign at most 1 tether per distinct enemy while other valid targets exist
     const assignedTargets: EnemyState[] = [];
@@ -2266,7 +2864,11 @@ export class Simulation {
       if (timer <= 0) {
         timer += tickCd;
         if (target.health > 0) {
-          this.damageEnemy(target, dmgPerTick, target.pos, 'medical');
+          this.damageEnemy(target, dmgPerTick, target.pos, 'medical', {
+            isDirectAttack: true,
+            isPrimaryLmb: true,
+            attackActivationId: activationId
+          });
           const healGain = dmgPerTick * cfg.healFractionOfDamage * healMult;
           totalHealThisStep += healGain;
         }
@@ -2311,7 +2913,7 @@ export class Simulation {
       for (let j = 0; j < nearby.length; j++) {
         const enemy = nearby[j];
         if (enemy.health <= 0) continue;
-        if (Math.abs(enemy.z - trail.z) > 65) continue;
+        if (Math.abs(enemy.z - trail.z) > 130) continue;
         if (Math.hypot(enemy.pos.x - trail.pos.x, enemy.pos.y - trail.pos.y) <= trail.radius + enemy.radius) {
           this.applyChill(enemy, Math.min(0.6, chillDur));
         }
@@ -2326,18 +2928,18 @@ export class Simulation {
   // --- COMMANDER BASE RMB: CROSS SLASH (FORMERLY EXPLOSIVE BOMB) ---
   private fireExplosiveBomb(targetPos: Vector2, targetZ: number = this.state.player.z + 16): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 28 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 56 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const horizDist = Math.min(Math.hypot(dx, dy) || 1, p.equippedSkills.secondary.range);
     const angle = Math.atan2(dy, dx);
 
-    const speed = 520 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const speed = 880 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
     const flightTime = Math.max(0.18, horizDist / speed);
     const dz = targetZ - origin.z;
     const vz = dz / flightTime;
 
-    const extra = p.calculatedStats.extraProjectiles || 0;
+    const extra = p.calculatedStats.extraRmbProjectiles || 0;
     // Cross Slash Layering:
     // +0: Original Cross Slash (extraLayers = 0)
     // +2: Add another layer of crossing blades ABOVE original (+14 Y) -> extraLayers = 1
@@ -2345,7 +2947,7 @@ export class Simulation {
     // +5 onward: Additional stacks increase attack's piercing capability
     const extraLayers = extra >= 4 ? 2 : (extra >= 2 ? 1 : 0);
     const pierceCount = extra >= 5 ? 1 + (extra - 4) : 1;
-    const radius = 18 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 36 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
 
     this.setFacingToward(targetPos);
 
@@ -2379,11 +2981,11 @@ export class Simulation {
   private detonateExplosiveBomb(proj: ProjectileState): void {
     const p = this.state.player;
     const enh = p.skillEnhancements?.secondary;
-    let radiusMult = (p.calculatedStats.aoeRadiusMultiplier || 1.0) * (p.calculatedStats.ultimateRadiusMultiplier || 1.0);
+    let radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
     if (enh === 'vortex_slashes') {
       radiusMult *= 1.45;
     }
-    const blastRadius = 125 * radiusMult;
+    const blastRadius = 240 * radiusMult;
     const impactZ = proj.z ?? this.state.terrain.calculateHeight(proj.pos.x, proj.pos.y);
     const slashAngle = Math.atan2(proj.velocity.y, proj.velocity.x);
     const slashDmg = proj.damage * (enh === 'seismic_slashes' ? 1.30 : 1.0);
@@ -2393,7 +2995,7 @@ export class Simulation {
       const v = victims[i];
       if (v.health <= 0) continue;
       // Respect terrain elevation difference so slashes don't ignore huge vertical cliffs
-      if (Math.abs(v.z - impactZ) > 75) continue;
+      if (Math.abs(v.z - impactZ) > 140) continue;
       const dist = Math.hypot(v.pos.x - proj.pos.x, v.pos.y - proj.pos.y);
       if (dist <= blastRadius + v.radius) {
         this.damageEnemy(v, slashDmg, proj.pos, enh === 'seismic_slashes' ? 'ignite' : enh === 'cryo_slashes' ? 'frost' : 'ignite');
@@ -2402,12 +3004,12 @@ export class Simulation {
         const pullDy = proj.pos.y - v.pos.y;
         const pullLen = Math.hypot(pullDx, pullDy) || 1;
         const pullImpulseMult = enh === 'vortex_slashes' ? 1.4 : 1.0;
-        const pullImpulse = 260 * Math.min(1.0, (pullLen / blastRadius) + 0.35) * pullImpulseMult;
+        const pullImpulse = 420 * Math.min(1.0, (pullLen / blastRadius) + 0.35) * pullImpulseMult;
         if (v.velocity) {
           v.velocity.x += (pullDx / pullLen) * pullImpulse;
           v.velocity.y += (pullDy / pullLen) * pullImpulse;
         }
-        const stepIn = Math.min(pullLen * 0.45 * pullImpulseMult, 48);
+        const stepIn = Math.min(pullLen * 0.45 * pullImpulseMult, 90);
         v.pos.x += (pullDx / pullLen) * stepIn;
         v.pos.y += (pullDy / pullLen) * stepIn;
 
@@ -2530,12 +3132,12 @@ export class Simulation {
     const dist = Math.hypot(dx, dy);
     const clampedDist = Math.min(dist, cfg.range);
     const baseAngle = Math.atan2(dy, dx);
-    const count = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const count = 1 + (p.calculatedStats.extraRmbProjectiles || 0);
     const spread = count > 1 ? Math.min(0.75, cfg.spreadAngleRad + (count - 2) * 0.08) : 0;
     const speed = cfg.throwSpeed * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
     const damage = cfg.baseDamage * p.calculatedStats.damageMultiplier;
-    const radius = 12 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 28 };
+    const radius = 24 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 56 };
 
     this.setFacingToward(targetPos);
 
@@ -2597,7 +3199,7 @@ export class Simulation {
     const cfg = DOCTOR_CONFIG.experimentalDrones;
     const targetCount = Math.min(
       cfg.maxDrones,
-      cfg.baseDrones + Math.max(0, p.calculatedStats.extraProjectiles || 0)
+      cfg.baseDrones + Math.max(0, p.calculatedStats.extraRmbProjectiles || 0)
     );
 
     while (this.state.doctorDrones.length < targetCount) {
@@ -2626,13 +3228,37 @@ export class Simulation {
     }
   }
 
+  private getDroneEffectiveRange(): number {
+    const p = this.state.player;
+    const opticsStacks = p.buffs.buff_doc_targeting_optics || 0;
+    return DOCTOR_CONFIG.experimentalDrones.targetRange * (1 + 0.05 * opticsStacks);
+  }
+
+  private findNearestVisibleDroneTarget(drone: DoctorDroneState, range: number): EnemyState | null {
+    const origin3D = { x: drone.pos.x, y: drone.pos.y, z: drone.z };
+    const candidates = this.spatialGrid.getNearby(drone.pos, range * 1.05);
+    let best: EnemyState | null = null;
+    let bestDist = Infinity;
+    for (let i = 0; i < candidates.length; i++) {
+      const cand = candidates[i];
+      if (cand.health <= 0) continue;
+      const dist = Math.hypot(cand.pos.x - drone.pos.x, cand.pos.y - drone.pos.y);
+      if (dist > range + cand.radius || dist >= bestDist) continue;
+      const target3D = { x: cand.pos.x, y: cand.pos.y, z: cand.z + Math.max(12, cand.radius * 0.7) };
+      if (!this.state.terrain.checkLineOfSight3D(origin3D, target3D)) continue;
+      bestDist = dist;
+      best = cand;
+    }
+    return best;
+  }
+
   private triggerExperimentalDroneVolley(): void {
     this.reconcileDoctorDrones();
     const p = this.state.player;
-    const cfg = DOCTOR_CONFIG.experimentalDrones;
+    const range = this.getDroneEffectiveRange();
     for (let i = 0; i < this.state.doctorDrones.length; i++) {
       const drone = this.state.doctorDrones[i];
-      const target = this.spatialGrid.findNearest(drone.pos, cfg.targetRange);
+      const target = this.findNearestVisibleDroneTarget(drone, range);
       if (target && target.health > 0) {
         this.fireDroneBioBolt(drone, target, 1.35);
       }
@@ -2648,6 +3274,9 @@ export class Simulation {
   private fireDroneBioBolt(drone: DoctorDroneState, target: EnemyState, dmgScale: number = 1.0): void {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.experimentalDrones;
+    const effRange = this.getDroneEffectiveRange();
+    const payloadStacks = p.buffs.buff_doc_calibrated_payload || 0;
+    const payloadMult = 1 + 0.04 * payloadStacks;
     const origin = { x: drone.pos.x, y: drone.pos.y, z: drone.z };
     const targetZ = target.z + Math.max(12, target.radius * 0.7);
     const dx = target.pos.x - origin.x;
@@ -2664,12 +3293,12 @@ export class Simulation {
       velocity: { x: (dx / dist3D) * speed, y: (dy / dist3D) * speed },
       vz: (dz / dist3D) * speed,
       speed,
-      damage: cfg.boltDamage * dmgScale * p.calculatedStats.damageMultiplier,
+      damage: cfg.boltDamage * dmgScale * payloadMult * p.calculatedStats.damageMultiplier,
       pierceCount: 1,
-      maxDistance: cfg.targetRange * 1.2,
+      maxDistance: effRange * 1.2,
       distanceTraveled: 0,
       owner: 'player',
-      radius: 8 * (p.calculatedStats.projectileRadiusMultiplier || 1.0),
+      radius: 16 * (p.calculatedStats.projectileRadiusMultiplier || 1.0),
       hitEnemyIds: new Set(),
       originZ: origin.z,
       targetZ
@@ -2689,6 +3318,7 @@ export class Simulation {
 
     this.reconcileDoctorDrones();
     const cfg = DOCTOR_CONFIG.experimentalDrones;
+    const effRange = this.getDroneEffectiveRange();
     const count = Math.max(1, this.state.doctorDrones.length);
     const timeBase = this.state.gameTime * 1.45;
     const fireInterval = cfg.fireInterval / Math.max(0.5, p.calculatedStats.attackSpeedMultiplier || 1.0);
@@ -2714,9 +3344,11 @@ export class Simulation {
         drone.beamVisualTimer = Math.max(0, drone.beamVisualTimer - dt);
       }
 
+      if (p.isCarryingEventPayload) continue;
+
       drone.fireCooldown -= dt;
       if (drone.fireCooldown <= 0) {
-        const target = this.spatialGrid.findNearest(drone.pos, cfg.targetRange);
+        const target = this.findNearestVisibleDroneTarget(drone, effRange);
         if (target && target.health > 0) {
           this.fireDroneBioBolt(drone, target, 1.0);
           drone.fireCooldown = fireInterval;
@@ -2725,7 +3357,7 @@ export class Simulation {
           drone.chargeRatio = 0;
         }
       } else if (drone.fireCooldown <= chargeWindow) {
-        const aimTarget = this.spatialGrid.findNearest(drone.pos, cfg.targetRange);
+        const aimTarget = this.findNearestVisibleDroneTarget(drone, effRange);
         if (aimTarget && aimTarget.health > 0) {
           drone.lastTargetPos = { x: aimTarget.pos.x, y: aimTarget.pos.y };
           drone.chargeRatio = Math.min(1, Math.max(0, 1 - drone.fireCooldown / chargeWindow));
@@ -2741,28 +3373,28 @@ export class Simulation {
   private fireToxicClusterBomb(targetPos: Vector2, _targetZ?: number): void {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.toxicClusterBomb;
-    const count = Math.min(cfg.maxMainBombs, cfg.baseMainBombs + Math.max(0, p.calculatedStats.extraProjectiles || 0));
+    const count = Math.min(cfg.maxMainBombs, cfg.baseMainBombs + Math.max(0, p.calculatedStats.extraRmbProjectiles || 0));
     const dx = targetPos.x - p.pos.x;
     const dy = targetPos.y - p.pos.y;
     const baseDist = Math.max(60, Math.min(Math.hypot(dx, dy), DOCTOR_CONFIG.rmb.range));
     const baseAngle = Math.atan2(dy, dx);
     const spread = count > 1 ? Math.min(0.95, 0.34 + (count - 2) * 0.14) : 0;
     const damage = cfg.mainDamage * p.calculatedStats.damageMultiplier;
-    const speed = 400 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 30 };
+    const speed = 680 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 58 };
 
     this.setFacingToward(targetPos);
 
     for (let i = 0; i < count; i++) {
       const offset = count > 1 ? -spread / 2 + (spread / (count - 1)) * i : 0;
       const ang = baseAngle + offset;
-      const distJitter = count > 1 ? ((i % 2 === 0 ? 1 : -1) * 28) : 0;
-      const d = Math.max(55, baseDist + distJitter);
+      const distJitter = count > 1 ? ((i % 2 === 0 ? 1 : -1) * 48) : 0;
+      const d = Math.max(85, baseDist + distJitter);
       const dest = {
         x: p.pos.x + Math.cos(ang) * d,
         y: p.pos.y + Math.sin(ang) * d
       };
-      this.launchArcingToxicProjectile('cluster_main', origin, dest, speed, damage, 16);
+      this.launchArcingToxicProjectile('cluster_main', origin, dest, speed, damage, 32);
     }
 
     this.state.events.push({
@@ -2775,10 +3407,10 @@ export class Simulation {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.toxicClusterBomb;
     const radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
-    const blastRadius = 96 * radiusMult;
+    const blastRadius = 190 * radiusMult;
     const groundZ = this.state.terrain.calculateHeight(proj.pos.x, proj.pos.y);
 
-    const victims = this.spatialGrid.getNearby(proj.pos, blastRadius + 25);
+    const victims = this.spatialGrid.getNearby(proj.pos, blastRadius + 36);
     for (let i = 0; i < victims.length; i++) {
       const v = victims[i];
       if (v.health <= 0) continue;
@@ -2795,7 +3427,7 @@ export class Simulation {
     // Scatter configurable sub-bombs outward across irregular radii/angles
     const subCount = cfg.subBombsPerMainBomb;
     const subDamage = cfg.subDamage * p.calculatedStats.damageMultiplier;
-    const subOrigin = { x: proj.pos.x, y: proj.pos.y, z: groundZ + 18 };
+    const subOrigin = { x: proj.pos.x, y: proj.pos.y, z: groundZ + 32 };
     const phaseShift = this.state.rng.range(0, Math.PI * 2);
 
     for (let s = 0; s < subCount; s++) {
@@ -2808,7 +3440,7 @@ export class Simulation {
         x: Math.max(40, Math.min(this.state.worldWidth - 40, proj.pos.x + Math.cos(ang) * scatterR)),
         y: Math.max(40, Math.min(this.state.worldHeight - 40, proj.pos.y + Math.sin(ang) * scatterR))
       };
-      this.launchArcingToxicProjectile('cluster_sub', subOrigin, dest, 270, subDamage, 10);
+      this.launchArcingToxicProjectile('cluster_sub', subOrigin, dest, 480, subDamage, 20);
     }
   }
 
@@ -2817,7 +3449,9 @@ export class Simulation {
     const cfg = DOCTOR_CONFIG.toxicClusterBomb;
     const radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
     const durMult = p.calculatedStats.skillDurationMultiplier || 1.0;
-    const subRadius = cfg.subPuddleRadius * radiusMult;
+    const diffusionStacks = p.buffs.buff_doc_toxic_diffusion || 0;
+    const corrosiveStacks = p.buffs.buff_doc_corrosive_residue || 0;
+    const subRadius = cfg.subPuddleRadius * radiusMult * (1 + 0.04 * diffusionStacks);
     const groundZ = this.state.terrain.calculateHeight(proj.pos.x, proj.pos.y);
 
     const victims = this.spatialGrid.getNearby(proj.pos, subRadius + 24);
@@ -2834,7 +3468,7 @@ export class Simulation {
       proj.pos,
       groundZ,
       subRadius,
-      cfg.subPuddleDuration * durMult,
+      (cfg.subPuddleDuration + 0.25 * corrosiveStacks) * durMult,
       cfg.subPuddleDamagePerTick * p.calculatedStats.damageMultiplier,
       cfg.subPuddleTickInterval
     );
@@ -2843,8 +3477,10 @@ export class Simulation {
   private fireHolographicDecoy(targetPos: Vector2): void {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.holographicDecoy;
-    const count = cfg.baseDecoys + Math.max(0, p.calculatedStats.extraProjectiles || 0);
-    const durMult = p.calculatedStats.skillDurationMultiplier || 1.0;
+    const count = cfg.baseDecoys + Math.max(0, p.calculatedStats.extraRmbProjectiles || 0);
+    const projIntegStacks = p.buffs.buff_doc_projection_integrity || 0;
+    const causticStacks = p.buffs.buff_doc_caustic_reprisal || 0;
+    const durMult = (p.calculatedStats.skillDurationMultiplier || 1.0) * (1 + 0.05 * projIntegStacks);
     const radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
 
     let dx = targetPos.x - p.pos.x;
@@ -2887,7 +3523,7 @@ export class Simulation {
         maxDuration: cfg.duration * durMult,
         tauntRadius: cfg.tauntRadius * Math.min(1.5, Math.max(1.0, radiusMult)),
         explosionRadius: cfg.explosionRadius * radiusMult,
-        explosionDamage: cfg.explosionDamage * p.calculatedStats.damageMultiplier,
+        explosionDamage: cfg.explosionDamage * (1 + 0.04 * causticStacks) * p.calculatedStats.damageMultiplier,
         facing: this.computeCameraFacing(dirX, dirY)
       };
       this.state.holographicDecoys.push(decoy);
@@ -2907,6 +3543,7 @@ export class Simulation {
     const cfg = DOCTOR_CONFIG.holographicDecoy;
     const radiusMult = p.calculatedStats.aoeRadiusMultiplier || 1.0;
     const durMult = p.calculatedStats.skillDurationMultiplier || 1.0;
+    const causticStacks = p.heroId === 'doctor' ? (p.buffs.buff_doc_caustic_reprisal || 0) : 0;
 
     const victims = this.spatialGrid.getNearby(decoy.pos, decoy.explosionRadius + 24);
     for (let i = 0; i < victims.length; i++) {
@@ -2923,7 +3560,7 @@ export class Simulation {
       decoy.z,
       cfg.puddleRadius * radiusMult,
       cfg.puddleDuration * durMult,
-      DOCTOR_CONFIG.rmb.puddleDamagePerTick * p.calculatedStats.damageMultiplier,
+      DOCTOR_CONFIG.rmb.puddleDamagePerTick * (1 + 0.04 * causticStacks) * p.calculatedStats.damageMultiplier,
       DOCTOR_CONFIG.rmb.puddleTickInterval
     );
 
@@ -2976,7 +3613,7 @@ export class Simulation {
         for (let j = 0; j < victims.length; j++) {
           const enemy = victims[j];
           if (enemy.health <= 0) continue;
-          if (Math.abs(enemy.z - field.z) > 65) continue;
+          if (Math.abs(enemy.z - field.z) > 130) continue;
           const d = Math.hypot(enemy.pos.x - field.pos.x, enemy.pos.y - field.pos.y);
           if (d <= field.radius + enemy.radius) {
             this.damageEnemy(enemy, field.damagePerTick, field.pos, 'acid');
@@ -3002,7 +3639,8 @@ export class Simulation {
     const cfg = DOCTOR_CONFIG.sacredField;
 
     if (enh === 'rain_of_crosses') {
-      const rainDur = DOCTOR_CONFIG.rainOfCrosses.duration;
+      const sustainedStacks = p.buffs.buff_doc_sustained_rain || 0;
+      const rainDur = DOCTOR_CONFIG.rainOfCrosses.duration + 0.25 * sustainedStacks;
       p.toxicRainTimer = rainDur;
       p.toxicRainTickTimer = DOCTOR_CONFIG.rainOfCrosses.spawnInterval;
       p.toxicRainOrigin = { x: centerPos.x, y: centerPos.y };
@@ -3026,7 +3664,10 @@ export class Simulation {
         : isMobile
           ? DOCTOR_CONFIG.mobileSanctuary.duration
           : cfg.duration) * durMult;
-    const pulseDamage = cfg.pulseDamage * p.calculatedStats.damageMultiplier;
+    const consecratedStacks = isDivine ? (p.buffs.buff_doc_consecrated_cross || 0) : 0;
+    const vitalRotationStacks = isMobile ? (p.buffs.buff_doc_vital_rotation || 0) : 0;
+    const pulseDamage = cfg.pulseDamage * (1 + 0.04 * consecratedStacks) * p.calculatedStats.damageMultiplier;
+    const crossHealPerSec = cfg.healPerSecond * healMult * (1 + 0.04 * (consecratedStacks + vitalRotationStacks));
 
     const cross: SanctuaryCrossState = {
       id: `cross_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
@@ -3036,7 +3677,7 @@ export class Simulation {
       armHalfWidth,
       durationRemaining: duration,
       maxDuration: duration,
-      healPerSecond: cfg.healPerSecond * healMult,
+      healPerSecond: crossHealPerSec,
       pulseDamage,
       pulseInterval: cfg.pulseInterval,
       pulseTimer: 0.1,
@@ -3050,7 +3691,8 @@ export class Simulation {
 
     if (isDivine) {
       const dCfg = DOCTOR_CONFIG.divineIntervention;
-      const angelDur = dCfg.angelDuration * durMult;
+      const celestialStacks = p.buffs.buff_doc_celestial_endurance || 0;
+      const angelDur = (dCfg.angelDuration + 0.5 * celestialStacks) * durMult;
       const quadrantAngles = [Math.PI * 0.25, Math.PI * 0.75, Math.PI * 1.25, Math.PI * 1.75];
       const summonedPositions: Array<{ x: number; y: number; z: number }> = [];
 
@@ -3103,7 +3745,9 @@ export class Simulation {
     const p = this.state.player;
     const cfg = DOCTOR_CONFIG.rainOfCrosses;
     const radiusMult = (p.calculatedStats.aoeRadiusMultiplier || 1.0) * (p.calculatedStats.ultimateRadiusMultiplier || 1.0);
-    const waveCount = cfg.baseCrossesPerWave + Math.max(0, p.calculatedStats.extraProjectiles || 0);
+    const waveCount =
+      cfg.baseCrossesPerWave +
+      Math.max(0, (p.calculatedStats.extraLmbProjectiles || 0) + (p.calculatedStats.extraRmbProjectiles || 0));
     const center = p.pos;
     const rainEndGameTime = this.state.gameTime + Math.max(0.05, p.toxicRainTimer ?? 0);
 
@@ -3150,6 +3794,8 @@ export class Simulation {
 
         const remainingRainTime = fc.rainEndGameTime - this.state.gameTime;
         if (remainingRainTime > 0.05) {
+          const restStacks = p.buffs.buff_doc_restorative_imprint || 0;
+          const restMult = 1 + 0.04 * restStacks;
           this.state.sanctuaryCrosses.push({
             id: `raincross_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
             pos: { x: fc.targetPos.x, y: fc.targetPos.y },
@@ -3158,8 +3804,8 @@ export class Simulation {
             armHalfWidth: fc.fieldHalfWidth,
             durationRemaining: remainingRainTime,
             maxDuration: remainingRainTime,
-            healPerSecond: cfg.groundFieldHealPerSecond * healMult,
-            pulseDamage: cfg.groundFieldPulseDamage * p.calculatedStats.damageMultiplier,
+            healPerSecond: cfg.groundFieldHealPerSecond * healMult * restMult,
+            pulseDamage: cfg.groundFieldPulseDamage * restMult * p.calculatedStats.damageMultiplier,
             pulseInterval: cfg.groundFieldPulseInterval,
             pulseTimer: 0.1,
             rotation: this.state.rng.range(-0.35, 0.35),
@@ -3230,7 +3876,7 @@ export class Simulation {
             maxDistance: cfg.targetRange * 1.25,
             distanceTraveled: 0,
             owner: 'player',
-            radius: 10 * (p.calculatedStats.projectileRadiusMultiplier || 1.0),
+            radius: 20 * (p.calculatedStats.projectileRadiusMultiplier || 1.0),
             hitEnemyIds: new Set(),
             originZ: angel.z,
             targetZ
@@ -3316,7 +3962,7 @@ export class Simulation {
 
   private fireSedativeDose(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -3324,12 +3970,12 @@ export class Simulation {
     const angle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
 
-    const speed = 780 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const speed = 1250 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
     const horizSpeed = Math.cos(pitch) * speed;
     const vx = Math.cos(angle) * horizSpeed;
     const vy = Math.sin(angle) * horizSpeed;
     const vz = Math.sin(pitch) * speed;
-    const radius = 14 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 28 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
 
     this.setFacingToward(targetPos);
 
@@ -3364,7 +4010,7 @@ export class Simulation {
     const healAmount = (50 + p.maxHealth * 0.15) * healMult;
     p.health = Math.min(p.maxHealth, p.health + healAmount);
 
-    const radius = 260 * radiusMult;
+    const radius = 500 * radiusMult;
     const damage = ultDef.baseDamage * p.calculatedStats.damageMultiplier;
     const victims = this.spatialGrid.getNearby(playerPos, radius);
 
@@ -3393,12 +4039,15 @@ export class Simulation {
   // --- COMMANDER LMB UPGRADE 1: CHILL BEAM ---
   private fireChillBeam(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
     const dist3D = Math.hypot(dx, dy, dz) || 1;
-    const range = 520;
+    const cryoAmpStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_cryo_amplification || 0) : 0;
+    const thermalFocusStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_thermal_focus || 0) : 0;
+    const range = 980 * (1 + 0.04 * thermalFocusStacks);
+    const beamHitRadius = 40 * (1 + 0.05 * thermalFocusStacks);
     const nx = dx / dist3D;
     const ny = dy / dist3D;
     const nz = dz / dist3D;
@@ -3409,9 +4058,11 @@ export class Simulation {
     };
 
     this.setFacingToward(targetPos);
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const boltCount = 1 + extra; // Each +1 Projectile fires 1 additional icy bolt consecutively (e.g. +3 = 4 bolts)
-    const baseDamage = (p.equippedSkills.primary.baseDamage * 1.15) * p.calculatedStats.damageMultiplier;
+    const extra = p.calculatedStats.extraLmbProjectiles || 0;
+    const boltCount = 1 + extra;
+    const baseDamage = (p.equippedSkills.primary.baseDamage * 1.15) * (1 + 0.03 * cryoAmpStacks) * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
+    const chillStrength = 0.50 + 0.02 * cryoAmpStacks;
 
     // Raycast against all enemies in path
     const candidates = this.spatialGrid.getNearby(p.pos, range);
@@ -3425,11 +4076,14 @@ export class Simulation {
         const perpX = ex - proj * nx;
         const perpY = ey - proj * ny;
         const distToRay = Math.hypot(perpX, perpY);
-        if (distToRay <= enemy.radius + 20) {
-          // Multi-bolt impact: each consecutive bolt delivers damage and builds chill
-          this.damageEnemy(enemy, baseDamage * (0.85 + 0.15 * boltCount), enemy.pos, 'ice');
+        if (distToRay <= enemy.radius + beamHitRadius) {
+          this.damageEnemy(enemy, baseDamage * (0.85 + 0.15 * boltCount), enemy.pos, 'ice', {
+            isDirectAttack: true,
+            attackActivationId: activationId
+          });
           enemy.isChilled = true;
           enemy.chillTimer = 3.5;
+          enemy.chillStrength = Math.max(enemy.chillStrength ?? 0.50, chillStrength);
         }
       }
     }
@@ -3449,17 +4103,21 @@ export class Simulation {
   // --- COMMANDER LMB UPGRADE 2: PIERCING LASER ---
   private firePiercingLaser(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
-    const range = 560;
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
+    const penCoreStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_penetration_core || 0) : 0;
+    const opticsStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_coherent_optics || 0) : 0;
+    const range = 1050 * (1 + 0.03 * opticsStacks);
+    const beamHitRadius = 44 * (1 + 0.04 * opticsStacks);
 
     this.setFacingToward(targetPos);
-    const damage = (p.equippedSkills.primary.baseDamage * 1.30) * p.calculatedStats.damageMultiplier;
+    const damage = (p.equippedSkills.primary.baseDamage * 1.30) * (1 + 0.02 * penCoreStacks) * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
     const hitEnemyIds = new Set<string>();
 
     // 1. Find primary targeted enemy near targetPos or along the aiming line
     let primaryEnemy: EnemyState | null = null;
-    let minTargetDist = 52;
-    const nearTarget = this.spatialGrid.getNearby(targetPos, 60);
+    let minTargetDist = 96;
+    const nearTarget = this.spatialGrid.getNearby(targetPos, 110);
     for (let i = 0; i < nearTarget.length; i++) {
       const cand = nearTarget[i];
       if (cand.health <= 0) continue;
@@ -3472,7 +4130,6 @@ export class Simulation {
 
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
-    const dz = targetZ - origin.z;
     const aimDist = Math.hypot(dx, dy) || 1;
     const nx = dx / aimDist;
     const ny = dy / aimDist;
@@ -3490,7 +4147,7 @@ export class Simulation {
         if (proj > 0 && proj <= range) {
           const perpX = ex - proj * nx;
           const perpY = ey - proj * ny;
-          if (Math.hypot(perpX, perpY) <= enemy.radius + 22 && proj < closestProj) {
+          if (Math.hypot(perpX, perpY) <= enemy.radius + beamHitRadius && proj < closestProj) {
             closestProj = proj;
             primaryEnemy = enemy;
           }
@@ -3517,7 +4174,10 @@ export class Simulation {
 
     // 3. Apply damage to primary target
     if (primaryEnemy) {
-      this.damageEnemy(primaryEnemy, damage, primaryEnemy.pos, 'lightning');
+      this.damageEnemy(primaryEnemy, damage, primaryEnemy.pos, 'lightning', {
+        isDirectAttack: true,
+        attackActivationId: activationId
+      });
       primaryEnemy.isElectrified = true;
       primaryEnemy.electrifiedTimer = 5.0;
       primaryEnemy.electrifiedMultiplier = 1.35;
@@ -3538,8 +4198,11 @@ export class Simulation {
       if (proj >= 0 && proj <= beamDist + 15) {
         const perpX = ex - proj * bnx;
         const perpY = ey - proj * bny;
-        if (Math.hypot(perpX, perpY) <= enemy.radius + 22) {
-          this.damageEnemy(enemy, damage, enemy.pos, 'lightning');
+        if (Math.hypot(perpX, perpY) <= enemy.radius + beamHitRadius) {
+          this.damageEnemy(enemy, damage, enemy.pos, 'lightning', {
+            isDirectAttack: true,
+            attackActivationId: activationId
+          });
           enemy.isElectrified = true;
           enemy.electrifiedTimer = 5.0;
           enemy.electrifiedMultiplier = 1.35;
@@ -3548,21 +4211,21 @@ export class Simulation {
       }
     }
 
-    // 4. Branching Lightning: Inherent 2 secondary lightning branches + 1 for each extra projectile bonus (up to 6)
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const branchTargetCount = Math.min(6, 2 + extra);
+    // 4. Branching Lightning: Inherent 2 secondary lightning branches + extra LMB projectiles + Penetration Core (+1 per 2 stacks)
+    const extra = p.calculatedStats.extraLmbProjectiles || 0;
+    const branchTargetCount = Math.min(6, 2 + extra) + Math.floor(penCoreStacks / 2);
     const branches: Array<{ from: Vector2; fromZ: number; to: Vector2; toZ: number }> = [];
 
     const branchOrigin = { x: endPos.x, y: endPos.y };
     const branchOriginZ = endPos.z;
-    const secondaryCandidates = this.spatialGrid.getNearby(branchOrigin, 280);
+    const secondaryCandidates = this.spatialGrid.getNearby(branchOrigin, 500);
     const eligibleEnemies: Array<{ enemy: EnemyState; dist: number }> = [];
 
     for (let sc = 0; sc < secondaryCandidates.length; sc++) {
       const e = secondaryCandidates[sc];
       if (e.health > 0 && !hitEnemyIds.has(e.id)) {
         const ed = Math.hypot(e.pos.x - branchOrigin.x, e.pos.y - branchOrigin.y);
-        if (ed <= 260) {
+        if (ed <= 460) {
           eligibleEnemies.push({ enemy: e, dist: ed });
         }
       }
@@ -3573,7 +4236,7 @@ export class Simulation {
     for (let b = 0; b < eligibleEnemies.length && branches.length < branchTargetCount; b++) {
       const entry = eligibleEnemies[b];
       const e = entry.enemy;
-      const enemyTargetZ = e.z + (e.radius || 18) * 0.8;
+      const enemyTargetZ = e.z + (e.radius || 32) * 0.8;
 
       hitEnemyIds.add(e.id);
       this.damageEnemy(e, damage * 0.75, e.pos, 'lightning');
@@ -3592,7 +4255,7 @@ export class Simulation {
     // If fewer enemies exist than available branches, discharge wild electric arc forks outward into the area
     while (branches.length < Math.min(2, branchTargetCount)) {
       const angle = (branches.length * 2.1) + ((this.state.rng ? this.state.rng.next() : Math.random()) - 0.5) * 1.2;
-      const dist = 75 + branches.length * 35;
+      const dist = 140 + branches.length * 65;
       const wildTo = {
         x: branchOrigin.x + Math.cos(angle) * dist,
         y: branchOrigin.y + Math.sin(angle) * dist
@@ -3619,7 +4282,7 @@ export class Simulation {
   }
 
   // --- COMMANDER LMB UPGRADE 3: EXTENDED SLASH ---
-  private fireExtendedSlash(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
+  private fireExtendedSlash(targetPos: Vector2, _targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
     p.slashComboStep = ((p.slashComboStep ?? 0) % 3) + 1;
     const step = p.slashComboStep;
@@ -3628,17 +4291,21 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     this.setFacingToward(targetPos);
 
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const slashCount = 1 + extra; // Each +1 Projectile adds 1 consecutive forward slash
-    const range = step === 3 ? 380 : 320;
-    const arcAngle = step === 3 ? 1.55 : 1.25;
+    const reachStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_blade_reach || 0) : 0;
+    const heavyStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_heavy_swing || 0) : 0;
+    const extra = p.calculatedStats.extraLmbProjectiles || 0;
+    const slashCount = 1 + extra;
+    const range = (step === 3 ? 700 : 580) * (1 + 0.05 * reachStacks);
+    const arcAngle = (step === 3 ? 1.55 : 1.25) * (1 + 0.04 * reachStacks);
     const dmgMult = step === 3 ? 1.6 : 1.15;
-    const damage = (p.equippedSkills.primary.baseDamage * dmgMult) * p.calculatedStats.damageMultiplier;
+    const damage = (p.equippedSkills.primary.baseDamage * dmgMult) * (1 + 0.03 * heavyStacks) * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
 
     const candidates = this.spatialGrid.getNearby(p.pos, range);
     for (let c = 0; c < candidates.length; c++) {
       const enemy = candidates[c];
       if (enemy.health <= 0) continue;
+      if (Math.abs(enemy.z - p.z) > 160) continue;
       const edx = enemy.pos.x - p.pos.x;
       const edy = enemy.pos.y - p.pos.y;
       const edist = Math.hypot(edx, edy);
@@ -3647,10 +4314,13 @@ export class Simulation {
         let diff = Math.abs(enemyAngle - baseAngle);
         while (diff > Math.PI) diff = Math.abs(diff - Math.PI * 2);
         if (diff <= arcAngle * 0.5) {
-          this.damageEnemy(enemy, damage * (1 + (slashCount - 1) * 0.2), enemy.pos);
+          this.damageEnemy(enemy, damage * (1 + (slashCount - 1) * 0.2), enemy.pos, 'physical', {
+            isDirectAttack: true,
+            attackActivationId: activationId
+          });
           if (step === 3 || slashCount >= 3) {
-            enemy.pos.x += Math.cos(baseAngle) * 35;
-            enemy.pos.y += Math.sin(baseAngle) * 35;
+            enemy.pos.x += Math.cos(baseAngle) * 65;
+            enemy.pos.y += Math.sin(baseAngle) * 65;
           }
         }
       }
@@ -3658,54 +4328,71 @@ export class Simulation {
 
     this.state.events.push({
       type: 'extended_slash_fired',
-      data: { pos: { ...p.pos }, z: p.z + 18, angle: baseAngle, step, range, slashCount }
+      data: { pos: { ...p.pos }, z: p.z + 42, angle: baseAngle, step, range, slashCount }
     });
   }
 
   // --- COMMANDER RMB UPGRADE 1: SCISSOR SLASH ---
-  private fireScissorSlash(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
+  private fireScissorSlash(targetPos: Vector2, _targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
     const dx = targetPos.x - p.pos.x;
     const dy = targetPos.y - p.pos.y;
     const angle = Math.atan2(dy, dx);
     this.setFacingToward(targetPos);
 
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const totalSlashes = 1 + extra; // Each +1 Projectile adds another scissor-slash motion before final central explosion
+    const twinStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_twin_edge || 0) : 0;
+    const serratedStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_serrated_cut || 0) : 0;
+    const extra = p.calculatedStats.extraRmbProjectiles || 0;
+    const totalSlashes = 1 + extra;
 
-    const focusDist = 95;
+    const focusDist = 185;
     const focusPos = {
       x: p.pos.x + Math.cos(angle) * focusDist,
       y: p.pos.y + Math.sin(angle) * focusDist
     };
-    const radius = 125;
-    const damage = (145 * (1 + (totalSlashes - 1) * 0.25)) * p.calculatedStats.damageMultiplier;
+    const radius = 240;
+    const damage = (145 * (1 + (totalSlashes - 1) * 0.25)) * (1 + 0.03 * twinStacks) * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
 
     const victims = this.spatialGrid.getNearby(focusPos, radius);
     for (let v = 0; v < victims.length; v++) {
       const enemy = victims[v];
-      if (enemy.health > 0) {
-        this.damageEnemy(enemy, damage, enemy.pos);
+      if (enemy.health > 0 && Math.abs(enemy.z - p.z) <= 165) {
+        this.damageEnemy(enemy, damage, enemy.pos, 'physical', {
+          isDirectAttack: true,
+          attackActivationId: activationId
+        });
+        if (serratedStacks > 0 && enemy.health > 0) {
+          const pctRate = enemy.isBoss ? 0.01 * serratedStacks : Math.min(0.04, 0.01 * serratedStacks);
+          enemy.bleedDps = Math.max(enemy.bleedDps ?? 0, enemy.health * pctRate);
+          enemy.bleedTimer = Math.max(enemy.bleedTimer ?? 0, 2.0);
+          if (enemy.bleedTickTimer === undefined) enemy.bleedTickTimer = 0.25;
+        }
         const kx = enemy.pos.x - focusPos.x;
         const ky = enemy.pos.y - focusPos.y;
         const klen = Math.hypot(kx, ky) || 1;
-        enemy.pos.x += (kx / klen) * 40;
-        enemy.pos.y += (ky / klen) * 40;
+        enemy.pos.x += (kx / klen) * 75;
+        enemy.pos.y += (ky / klen) * 75;
       }
     }
 
     this.state.events.push({
       type: 'scissor_slash_fired',
-      data: { pos: { ...p.pos }, z: p.z + 18, focusPos, angle, radius, totalSlashes }
+      data: { pos: { ...p.pos }, z: p.z + 42, focusPos, angle, radius, totalSlashes }
     });
   }
 
   // --- COMMANDER RMB UPGRADE 2: FROST BURST (360-DEGREE RADIAL ICE EXPLOSION) ---
   private fireFrostBurst(): void {
     const p = this.state.player;
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const damage = 125 * p.calculatedStats.damageMultiplier;
-    const burstRadius = 210;
+    const extra = p.calculatedStats.extraRmbProjectiles || 0;
+    const shatterStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_shatter_nova || 0) : 0;
+    const deepFreezeStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_deep_freeze || 0) : 0;
+    const damage = 125 * (1 + 0.03 * shatterStacks) * p.calculatedStats.damageMultiplier;
+    const burstRadius = 400 * (1 + 0.05 * shatterStacks);
+    const chillDur = 3.5 + 0.2 * deepFreezeStacks;
+    const chillStr = 0.50 + 0.03 * deepFreezeStacks;
+    const activationId = this.allocateDirectAttackActivationId();
 
     // 1. Instantaneous radial ice explosion centered on Commander
     const victims = this.spatialGrid.getNearby(p.pos, burstRadius);
@@ -3715,13 +4402,17 @@ export class Simulation {
       const dx = enemy.pos.x - p.pos.x;
       const dy = enemy.pos.y - p.pos.y;
       const dist = Math.hypot(dx, dy);
-      if (dist <= burstRadius && Math.abs(enemy.z - p.z) <= 55) {
-        this.damageEnemy(enemy, damage, enemy.pos, 'ice');
+      if (dist <= burstRadius && Math.abs(enemy.z - p.z) <= 135) {
+        this.damageEnemy(enemy, damage, enemy.pos, 'ice', {
+          isDirectAttack: true,
+          attackActivationId: activationId
+        });
         enemy.isChilled = true;
-        enemy.chillTimer = 3.5;
+        enemy.chillTimer = Math.max(enemy.chillTimer ?? 0, chillDur);
+        enemy.chillStrength = Math.max(enemy.chillStrength ?? 0.50, chillStr);
         const kdist = dist || 1;
-        enemy.velocity.x += (dx / kdist) * 260;
-        enemy.velocity.y += (dy / kdist) * 260;
+        enemy.velocity.x += (dx / kdist) * 420;
+        enemy.velocity.y += (dy / kdist) * 420;
       }
     }
 
@@ -3730,20 +4421,24 @@ export class Simulation {
     if (extra > 0) {
       for (let i = 0; i < extra; i++) {
         const sAngle = (i / extra) * Math.PI * 2 + 0.35;
-        const sDist = 80 + ((i * 37) % 55);
+        const sDist = 155 + ((i * 73) % 105);
         const sPos = {
           x: p.pos.x + Math.cos(sAngle) * sDist,
           y: p.pos.y + Math.sin(sAngle) * sDist
         };
         spikePositions.push({ pos: sPos, delay: 0.05 * (i + 1) });
 
-        const subVictims = this.spatialGrid.getNearby(sPos, 65);
+        const subVictims = this.spatialGrid.getNearby(sPos, 130 * (1 + 0.05 * shatterStacks));
         for (let sv = 0; sv < subVictims.length; sv++) {
           const se = subVictims[sv];
-          if (se.health > 0) {
-            this.damageEnemy(se, damage * 0.45, se.pos, 'ice');
+          if (se.health > 0 && Math.abs(se.z - p.z) <= 135) {
+            this.damageEnemy(se, damage * 0.45, se.pos, 'ice', {
+              isDirectAttack: true,
+              attackActivationId: activationId
+            });
             se.isChilled = true;
-            se.chillTimer = 3.5;
+            se.chillTimer = Math.max(se.chillTimer ?? 0, chillDur);
+            se.chillStrength = Math.max(se.chillStrength ?? 0.50, chillStr);
           }
         }
       }
@@ -3751,30 +4446,33 @@ export class Simulation {
 
     this.state.events.push({
       type: 'frost_burst_fired',
-      data: { pos: { ...p.pos }, z: p.z + 16, radius: burstRadius, extraEruptions: extra, spikePositions }
+      data: { pos: { ...p.pos }, z: p.z + 36, radius: burstRadius, extraEruptions: extra, spikePositions }
     });
   }
 
   // --- COMMANDER RMB UPGRADE 3: ORBITING ELECTRIC SWORDS (FULL 360° ORBIT, MAX 7) ---
   private fireOrbitingBlade(): void {
     const p = this.state.player;
-    const extra = p.calculatedStats.extraProjectiles || 0;
-    const swordCount = Math.min(7, 1 + extra); // Strict formula: activeSwordCount = Math.min(7, 1 + bonusProjectiles)
+    const extra = p.calculatedStats.extraRmbProjectiles || 0;
+    const swordCount = Math.min(7, 1 + extra);
+    const orbExtStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_orbital_extension || 0) : 0;
+    const razorStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_razor_satellites || 0) : 0;
+    const duration = 12.0 + 0.3 * orbExtStacks;
 
     p.orbitingBladeActive = true;
-    p.orbitingBladeTimer = 12.0;
+    p.orbitingBladeTimer = duration;
     p.orbitingBladeAngle = p.orbitingBladeAngle ?? 0;
-    p.orbitingBladeRadius = 82;
-    p.orbitingBladeDamage = 34 * p.calculatedStats.damageMultiplier;
+    p.orbitingBladeRadius = 164;
+    p.orbitingBladeDamage = 34 * (1 + 0.03 * razorStacks) * p.calculatedStats.damageMultiplier;
     p.orbitingSwordCount = swordCount;
     p.orbitingBladeHitCooldowns = {};
 
     p.floatingSwords = [];
     for (let s = 0; s < swordCount; s++) {
       const sAngle = (p.orbitingBladeAngle ?? 0) + (Math.PI * 2 / swordCount) * s;
-      const swX = p.pos.x + Math.cos(sAngle) * 82;
-      const swY = p.pos.y + Math.sin(sAngle) * 82;
-      const swZ = p.z + 18;
+      const swX = p.pos.x + Math.cos(sAngle) * 164;
+      const swY = p.pos.y + Math.sin(sAngle) * 164;
+      const swZ = p.z + 44;
       p.floatingSwords.push({
         x: swX,
         y: swY,
@@ -3789,14 +4487,14 @@ export class Simulation {
 
     this.state.events.push({
       type: 'orbiting_blade_summoned',
-      data: { duration: 12.0, radius: 82, swordCount }
+      data: { duration: 12.0, radius: 164, swordCount }
     });
   }
 
   private firePrimaryPulse(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
     const enh = p.skillEnhancements?.primary;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -3804,16 +4502,17 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
 
-    let speed = 680 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    let count = 1 + (p.calculatedStats.extraProjectiles || 0);
+    let speed = 1150 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    let count = 1 + (p.calculatedStats.extraLmbProjectiles || 0);
     let baseSpread = 0.22;
-    const radius = 13 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 24 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     let pierceCount = 1 + (p.calculatedStats.projectilePierce || 0);
     let damage = p.equippedSkills.primary.baseDamage * p.calculatedStats.damageMultiplier;
+    const activationId = this.allocateDirectAttackActivationId();
 
     // Additive Primary Enhancements (Service Pistol remains the base Gold Blaster Bolt)
     if (enh === 'scatter_burst') {
-      count = 3 + (p.calculatedStats.extraProjectiles || 0);
+      count = 3 + (p.calculatedStats.extraLmbProjectiles || 0);
       baseSpread = 0.24;
       pierceCount += 1;
     } else if (enh === 'piercing_lance') {
@@ -3830,10 +4529,11 @@ export class Simulation {
 
     this.setFacingToward(targetPos);
 
-    const primaryCd = p.equippedSkills.primary.cooldown / Math.max(0.1, p.calculatedStats.attackSpeedMultiplier || 1.0);
+    const primaryCd =
+      p.equippedSkills.primary.cooldown /
+      Math.max(0.1, (p.calculatedStats.lmbAttackSpeedMultiplier || 1.0) * (p.calculatedStats.attackSpeedMultiplier || 1.0));
     const attackAnimDuration = Math.max(0.08, Math.min(0.28, primaryCd * 0.85));
     const attackFps = 4 / attackAnimDuration;
-    // Frame 2 (0-indexed: 0=Ready, 1=Aim, 2=Fire/Muzzle Flash, 3=Recovery) starts at 50% of the 4-frame sequence
     const fireFrameDelay = p.heroId === 'commander' ? attackAnimDuration * 0.5 : 0;
 
     for (let i = 0; i < count; i++) {
@@ -3843,7 +4543,7 @@ export class Simulation {
       const vx = Math.cos(angle) * horizSpeed;
       const vy = Math.sin(angle) * horizSpeed;
       const vz = Math.sin(pitch) * speed;
-      const muzzleDist = 14;
+      const muzzleDist = 28;
 
       const proj: ProjectileState = {
         id: `proj_${this.nextProjId++}`,
@@ -3854,7 +4554,6 @@ export class Simulation {
         vz,
         speed,
         damage,
-        element: enh === 'arc_conduit' ? 'lightning' : undefined,
         pierceCount,
         maxDistance: p.equippedSkills.primary.range * 1.2,
         distanceTraveled: 0,
@@ -3864,7 +4563,9 @@ export class Simulation {
         originZ: origin.z,
         targetZ,
         spawnDelayRemaining: fireFrameDelay > 0 ? fireFrameDelay : undefined,
-        muzzleOffset: { x: Math.cos(angle) * muzzleDist, y: Math.sin(angle) * muzzleDist }
+        muzzleOffset: { x: Math.cos(angle) * muzzleDist, y: Math.sin(angle) * muzzleDist },
+        attackActivationId: activationId,
+        isDirectAttack: true
       };
       this.state.projectiles.push(proj);
     }
@@ -3884,7 +4585,7 @@ export class Simulation {
 
   private fireScatterBlaster(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -3892,12 +4593,12 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
 
-    const speed = 720 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const pellets = 5 + (p.calculatedStats.extraProjectiles || 0);
+    const speed = 1180 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const pellets = 5 + (p.calculatedStats.extraLmbProjectiles || 0);
     const baseSpread = 0.42;
     const maxSpread = baseSpread * 2.5; // 1.05 rad (2.5x max limit)
     const spreadAngle = pellets > 5 ? Math.min(maxSpread, baseSpread + (pellets - 5) * 0.126) : baseSpread;
-    const radius = 12 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 22 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const pierceCount = 2 + (p.calculatedStats.projectilePierce || 0);
 
     this.setFacingToward(targetPos);
@@ -3945,10 +4646,10 @@ export class Simulation {
 
     const baseDamage = p.equippedSkills.primary.baseDamage * p.calculatedStats.damageMultiplier;
     const maxJumps = 4 + (p.calculatedStats.projectilePierce || 0);
-    const arcCount = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const arcCount = 1 + (p.calculatedStats.extraLmbProjectiles || 0);
     const hitIds = new Set<string>();
 
-    const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin3D = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const candidates = this.spatialGrid
       .getNearby(p.pos, p.equippedSkills.primary.range * 1.15)
       .filter(e => {
@@ -3998,7 +4699,7 @@ export class Simulation {
 
         currentOrigin = { ...currentTarget.pos };
         const nextNearby = this.spatialGrid
-          .getNearby(currentOrigin, 260)
+          .getNearby(currentOrigin, 500)
           .filter(e => e.health > 0 && !hitIds.has(e.id))
           .sort((x, y) => {
             const da = Math.hypot(x.pos.x - currentOrigin.x, x.pos.y - currentOrigin.y);
@@ -4017,9 +4718,9 @@ export class Simulation {
     const dy = targetPos.y - p.pos.y;
     const baseAngle = Math.atan2(dy, dx);
     const beamLength = p.equippedSkills.primary.range * 1.15;
-    const beamWidth = 24 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const beamWidth = 48 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const beamDamage = p.equippedSkills.primary.baseDamage * p.calculatedStats.damageMultiplier;
-    const beamCount = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const beamCount = 1 + (p.calculatedStats.extraLmbProjectiles || 0);
     const baseSpread = 0.20;
     const maxSpread = baseSpread * 2.5; // 0.50 rad (2.5x max limit)
     const spread = beamCount > 1 ? Math.min(maxSpread, baseSpread + (beamCount - 2) * 0.075) : 0;
@@ -4067,7 +4768,7 @@ export class Simulation {
 
   private fireGatlingMinigun(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -4075,15 +4776,15 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
 
-    const speed = 1040 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const count = 2 + (p.calculatedStats.extraProjectiles || 0);
-    const baseWidth = 9;
-    const maxWidth = baseWidth * 2.5; // 22.5 units (2.5x max limit)
-    const currentWidth = count > 2 ? Math.min(maxWidth, baseWidth + (count - 2) * 2.7) : baseWidth;
+    const speed = 1580 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const count = 2 + (p.calculatedStats.extraLmbProjectiles || 0);
+    const baseWidth = 18;
+    const maxWidth = baseWidth * 2.5; // 45 units (2.5x max limit)
+    const currentWidth = count > 2 ? Math.min(maxWidth, baseWidth + (count - 2) * 5.4) : baseWidth;
     const lateralSpacing = count > 1 ? currentWidth / (count - 1) : 0;
     const perpX = -Math.sin(baseAngle);
     const perpY = Math.cos(baseAngle);
-    const radius = 10 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 18 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const pierceCount = 1 + (p.calculatedStats.projectilePierce || 0);
 
     this.setFacingToward(targetPos);
@@ -4124,7 +4825,7 @@ export class Simulation {
 
   private firePiercingWave(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
@@ -4132,12 +4833,12 @@ export class Simulation {
     const baseAngle = Math.atan2(dy, dx);
     const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
 
-    const speed = 540 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
-    const waveCount = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const speed = 920 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const waveCount = 1 + (p.calculatedStats.extraRmbProjectiles || 0);
     const baseSpread = 0.28;
     const maxSpread = 0.70;
     const spread = waveCount > 1 ? Math.min(maxSpread, baseSpread + (waveCount - 2) * 0.10) : 0;
-    const radius = 26 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 50 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
     const pierceCount = 8 + (p.calculatedStats.projectilePierce || 0);
 
     this.setFacingToward(targetPos);
@@ -4177,20 +4878,20 @@ export class Simulation {
 
   private fireCryoGrenade(targetPos: Vector2, targetZ: number = this.state.player.z): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
     const dist2D = Math.hypot(dx, dy) || 1;
-    const baseSpeed = 440 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
+    const baseSpeed = 740 * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
     const travelDist = Math.min(dist2D, p.equippedSkills.secondary.range);
     const timeToTarget = travelDist / baseSpeed;
     const gravity = 360;
-    const grenadeCount = 1 + (p.calculatedStats.extraProjectiles || 0);
+    const grenadeCount = 1 + (p.calculatedStats.extraRmbProjectiles || 0);
     const baseAngle = Math.atan2(dy, dx);
     const baseSpread = 0.20;
     const spread = grenadeCount > 1 ? Math.min(0.50, baseSpread + (grenadeCount - 2) * 0.08) : 0;
-    const radius = 18 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
+    const radius = 34 * (p.calculatedStats.projectileRadiusMultiplier || 1.0);
 
     this.setFacingToward(targetPos);
 
@@ -4226,12 +4927,12 @@ export class Simulation {
 
   private fireGravityVortex(targetPos: Vector2, targetZ: number = this.state.player.z + 26): void {
     const p = this.state.player;
-    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 26 };
+    const origin = { x: p.pos.x, y: p.pos.y, z: p.z + 52 };
     const dx = targetPos.x - origin.x;
     const dy = targetPos.y - origin.y;
     const dz = targetZ - origin.z;
     const dist3D = Math.hypot(dx, dy, dz) || 1;
-    const speed = 280;
+    const speed = 480;
 
     this.setFacingToward(targetPos);
 
@@ -4252,7 +4953,7 @@ export class Simulation {
       maxDistance: p.equippedSkills.secondary.range * 1.3,
       distanceTraveled: 0,
       owner: 'player',
-      radius: 28,
+      radius: 54,
       hitEnemyIds: new Set(),
       originZ: origin.z,
       targetZ
@@ -4263,13 +4964,13 @@ export class Simulation {
 
   private fireCarpetNuke(targetPos: Vector2): void {
     const p = this.state.player;
-    const radius = Math.round(190 * p.calculatedStats.ultimateRadiusMultiplier);
+    const radius = Math.round(360 * p.calculatedStats.ultimateRadiusMultiplier);
     const offsets = [
       { x: 0, y: 0 },
-      { x: -115, y: -115 },
-      { x: 115, y: -115 },
-      { x: -115, y: 115 },
-      { x: 115, y: 115 }
+      { x: -220, y: -220 },
+      { x: 220, y: -220 },
+      { x: -220, y: 220 },
+      { x: 220, y: 220 }
     ];
 
     offsets.forEach((off, i) => {
@@ -4294,7 +4995,7 @@ export class Simulation {
 
   private fireOrbitalLance(targetPos: Vector2): void {
     const p = this.state.player;
-    const expandedRadius = Math.round(360 * p.calculatedStats.ultimateRadiusMultiplier);
+    const expandedRadius = Math.round(680 * p.calculatedStats.ultimateRadiusMultiplier);
 
     const strike: OrbitalStrikeState = {
       id: `strike_${this.nextStrikeId++}`,
@@ -4316,8 +5017,7 @@ export class Simulation {
 
   private fireJudgementSingularity(targetPos: Vector2): void {
     const p = this.state.player;
-    // 25% reduction in size: 320 -> 240
-    const expandedRadius = Math.round(240 * p.calculatedStats.ultimateRadiusMultiplier);
+    const expandedRadius = Math.round(460 * p.calculatedStats.ultimateRadiusMultiplier);
 
     const strike: OrbitalStrikeState = {
       id: `strike_${this.nextStrikeId++}`,
@@ -4342,7 +5042,7 @@ export class Simulation {
 
   private fireChronoStasis(targetPos: Vector2): void {
     const p = this.state.player;
-    const expandedRadius = Math.round(330 * p.calculatedStats.ultimateRadiusMultiplier);
+    const expandedRadius = Math.round(620 * p.calculatedStats.ultimateRadiusMultiplier);
 
     const strike: OrbitalStrikeState = {
       id: `strike_${this.nextStrikeId++}`,
@@ -4364,8 +5064,8 @@ export class Simulation {
 
   private fireOrbitalJudgment(targetPos: Vector2): void {
     const p = this.state.player;
-    // Massive ground shockwave radius (260 base, scaling with Orbital Capacitor buff)
-    const expandedRadius = Math.round(260 * p.calculatedStats.ultimateRadiusMultiplier);
+    // Massive ground shockwave radius (480 base scaled for 2x entities, scaling with Area Amplifier buffs)
+    const expandedRadius = Math.round(480 * p.calculatedStats.ultimateRadiusMultiplier);
     const enhancement = p.skillEnhancements?.ultimate;
 
     // 6-frame Ultimate cast sequence at 10 FPS (0.60s total):
@@ -4378,31 +5078,34 @@ export class Simulation {
     let subStrikes: Vector2[] | undefined = undefined;
 
     if (enhancement === 'singularity') {
-      // Phase 2 lasts 2.80s after impact (total 3.20s from R press <= 4.0s) before collapse detonation
-      durationRemaining = 2.80;
+      const gravStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_gravitational_pull || 0) : 0;
+      durationRemaining = 2.80 * (1 + 0.03 * gravStacks);
       dotTimer = 0.25;
     } else if (enhancement === 'convergence_barrage') {
       // 4 balanced outer orbital strikes in a symmetric ring around the central strike
-      const ringDist = Math.round(175 * p.calculatedStats.ultimateRadiusMultiplier);
+      const ringDist = Math.round(330 * p.calculatedStats.ultimateRadiusMultiplier);
       const angles = [Math.PI * 0.25, Math.PI * 0.75, Math.PI * 1.25, Math.PI * 1.75];
       subStrikes = angles.map((ang) => ({
         x: lockedPos.x + Math.cos(ang) * ringDist,
         y: lockedPos.y + Math.sin(ang) * ringDist
       }));
-      // Phase 2 inward spiral convergence lasts 0.95s after the 5 simultaneous impacts (total 1.35s from R press <= 4.0s)
       durationRemaining = 0.95;
     } else if (enhancement === 'cryogenic_impact') {
-      // Phase 2 & 3 freezing field persists for 3.10s after impact (total 3.50s from R press <= 4.0s) with 0.44s frost DoT ticks
-      durationRemaining = 3.10;
+      const permafrostStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_permafrost_field || 0) : 0;
+      durationRemaining = 3.10 + 0.3 * permafrostStacks;
       dotTimer = 0.44;
     }
+
+    const salvoStacks = enhancement === 'convergence_barrage' && p.heroId === 'commander' ? (p.buffs.buff_cmd_concentrated_salvo || 0) : 0;
+    const subzeroStacks = enhancement === 'cryogenic_impact' && p.heroId === 'commander' ? (p.buffs.buff_cmd_subzero_detonation || 0) : 0;
+    const ultDmgMult = 1 + 0.03 * (salvoStacks + subzeroStacks);
 
     const strike: OrbitalStrikeState = {
       id: `strike_${this.nextStrikeId++}`,
       targetPos: lockedPos,
       delayRemaining: strikeDelay,
       radius: expandedRadius,
-      damage: p.equippedSkills.ultimate.baseDamage * p.calculatedStats.damageMultiplier,
+      damage: p.equippedSkills.ultimate.baseDamage * ultDmgMult * p.calculatedStats.damageMultiplier,
       hasStruck: false,
       durationRemaining,
       variant: 'judgment',
@@ -4446,7 +5149,7 @@ export class Simulation {
         const mOffY = proj.muzzleOffset ? proj.muzzleOffset.y : 0;
         proj.pos.x = p.pos.x + mOffX;
         proj.pos.y = p.pos.y + mOffY;
-        proj.z = p.z + 26;
+        proj.z = p.z + 52;
         if (proj.spawnDelayRemaining > 0) {
           alive.push(proj);
           continue;
@@ -4464,7 +5167,7 @@ export class Simulation {
       // Anchored Gravitational Singularity Vortex (Stationary Black Hole)
       if (proj.type === 'vortex' && proj.isAnchored) {
         proj.lifetimeRemaining = (proj.lifetimeRemaining ?? 2.8) - dt;
-        const pullRadius = 195;
+        const pullRadius = 360;
         const victims = this.spatialGrid.getNearby(proj.pos, pullRadius);
         for (let v = 0; v < victims.length; v++) {
           const enemy = victims[v];
@@ -4472,7 +5175,7 @@ export class Simulation {
           const vdx = proj.pos.x - enemy.pos.x;
           const vdy = proj.pos.y - enemy.pos.y;
           const vdist = Math.hypot(vdx, vdy) || 1;
-          const pullSpeed = Math.min(290, 420 * (1 - vdist / pullRadius) + 95);
+          const pullSpeed = Math.min(440, 620 * (1 - vdist / pullRadius) + 145);
           enemy.pos.x += (vdx / vdist) * pullSpeed * dt;
           enemy.pos.y += (vdy / vdist) * pullSpeed * dt;
           enemy.velocity.x *= 0.86;
@@ -4491,7 +5194,7 @@ export class Simulation {
         }
 
         if (proj.lifetimeRemaining <= 0) {
-          const blastRadius = 150;
+          const blastRadius = 290;
           for (let v = 0; v < victims.length; v++) {
             const enemy = victims[v];
             if (enemy.health > 0) {
@@ -4499,8 +5202,8 @@ export class Simulation {
               const kdx = enemy.pos.x - proj.pos.x;
               const kdy = enemy.pos.y - proj.pos.y;
               const klen = Math.hypot(kdx, kdy) || 1;
-              enemy.velocity.x += (kdx / klen) * 440;
-              enemy.velocity.y += (kdy / klen) * 440;
+              enemy.velocity.x += (kdx / klen) * 620;
+              enemy.velocity.y += (kdy / klen) * 620;
             }
           }
           this.state.events.push({
@@ -4553,13 +5256,15 @@ export class Simulation {
             }
           }
           if (!hasOverlap) {
+            const cryoResStacks = p.heroId === 'doctor' ? (p.buffs.buff_doc_cryogenic_residue || 0) : 0;
+            const trailDur = sCfg.trailDuration + 0.25 * cryoResStacks;
             this.state.frostTrails.push({
               id: `ftrail_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
               pos: { x: proj.pos.x, y: proj.pos.y },
               z: tz,
               radius: trailRadius,
-              durationRemaining: sCfg.trailDuration,
-              maxDuration: sCfg.trailDuration
+              durationRemaining: trailDur,
+              maxDuration: trailDur
             });
             while (this.state.frostTrails.length > sCfg.maxActiveTrailSegments) {
               this.state.frostTrails.shift();
@@ -4569,54 +5274,69 @@ export class Simulation {
         if (proj.returnPhase) {
           const rdx = p.pos.x - proj.pos.x;
           const rdy = p.pos.y - proj.pos.y;
-          const rdz = (p.z + 24) - proj.z;
+          const rdz = (p.z + 48) - proj.z;
           const rDist3D = Math.hypot(rdx, rdy, rdz) || 1;
           const retSpeed = sCfg.returnSpeed * (p.calculatedStats.projectileSpeedMultiplier || 1.0);
           proj.speed = retSpeed;
           proj.velocity.x = (rdx / rDist3D) * retSpeed;
           proj.velocity.y = (rdy / rDist3D) * retSpeed;
           proj.vz = (rdz / rDist3D) * retSpeed;
-          if (Math.hypot(rdx, rdy) <= 28 || proj.distanceTraveled > 1800) {
+          if (Math.hypot(rdx, rdy) <= 52 || proj.distanceTraveled > 3200) {
             continue; // Returned safely to Doctor
           }
         }
       }
 
       // Swept 3D Terrain & Obstacle Collision Check: prevents tunneling through ridges or walls
-      const sweptSteps = Math.max(1, Math.min(5, Math.ceil(stepDist / 12)));
       let hitTerrain = false;
       let impactX = proj.pos.x;
       let impactY = proj.pos.y;
       let impactZ = proj.z;
 
-      for (let s = 1; s <= sweptSteps; s++) {
-        const st = s / sweptSteps;
-        const curX = prevX + (proj.pos.x - prevX) * st;
-        const curY = prevY + (proj.pos.y - prevY) * st;
-        const curZ = prevZ + (proj.z - prevZ) * st;
-        const terrainH = this.state.terrain.calculateHeight(curX, curY);
-
-        if (curZ <= terrainH) {
+      if (this.state.terrain.meshCollider) {
+        const rayHit = this.state.terrain.meshCollider.raycast3D(
+          { x: prevX, y: prevY, z: prevZ },
+          { x: proj.pos.x, y: proj.pos.y, z: proj.z },
+          true
+        );
+        if (rayHit.hit && rayHit.point) {
           hitTerrain = true;
-          impactX = curX;
-          impactY = curY;
-          impactZ = terrainH;
-          break;
+          impactX = rayHit.point.x;
+          impactY = rayHit.point.y;
+          impactZ = rayHit.point.z;
         }
+      } else {
+        const sweptSteps = Math.max(1, Math.min(5, Math.ceil(stepDist / 12)));
+        for (let s = 1; s <= sweptSteps; s++) {
+          const st = s / sweptSteps;
+          const curX = prevX + (proj.pos.x - prevX) * st;
+          const curY = prevY + (proj.pos.y - prevY) * st;
+          const curZ = prevZ + (proj.z - prevZ) * st;
+          const terrainH = this.state.terrain.calculateHeight(curX, curY);
 
-        // Solid rock/crystal obstacle collision
-        for (let o = 0; o < this.state.obstacles.length; o++) {
-          const obs = this.state.obstacles[o];
-          const odist = Math.hypot(curX - obs.pos.x, curY - obs.pos.y);
-          if (odist <= obs.radius + proj.radius && curZ <= terrainH + 45) {
+          if (curZ <= terrainH) {
             hitTerrain = true;
             impactX = curX;
             impactY = curY;
-            impactZ = curZ;
+            impactZ = terrainH;
             break;
           }
+
+          // Solid rock/crystal obstacle collision
+          for (let o = 0; o < this.state.obstacles.length; o++) {
+            const obs = this.state.obstacles[o];
+            if (this.state.terrain.isCustomTestMap && obs.type === 'tree') continue;
+            const odist = Math.hypot(curX - obs.pos.x, curY - obs.pos.y);
+            if (odist <= obs.radius + proj.radius && curZ <= terrainH + 45) {
+              hitTerrain = true;
+              impactX = curX;
+              impactY = curY;
+              impactZ = curZ;
+              break;
+            }
+          }
+          if (hitTerrain) break;
         }
-        if (hitTerrain) break;
       }
 
       if (hitTerrain) {
@@ -4643,7 +5363,7 @@ export class Simulation {
           this.detonateClusterSub(proj);
         } else if (proj.type === 'grenade') {
           // Detonate Frost Grenade on terrain impact
-          const blastRadius = 110 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
+          const blastRadius = 220 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
           const victims = this.spatialGrid.getNearby(proj.pos, blastRadius);
           for (const v of victims) {
             if (v.health > 0) {
@@ -4660,24 +5380,24 @@ export class Simulation {
           });
         } else if (proj.type === 'spore_bomb') {
           // Detonate Brood Queen Spore Bomb on terrain impact
-          const blastRadius = 72;
+          const blastRadius = 140;
           const distToPlayer = Math.hypot(p.pos.x - proj.pos.x, p.pos.y - proj.pos.y);
-          if (distToPlayer <= blastRadius && !p.isDashing) {
-            this.damagePlayer(proj.damage);
+          if (distToPlayer <= blastRadius && Math.abs((p.z + 52) - proj.z) <= 135 && !p.isDashing) {
+            this.applyEnemyProjectileHitToPlayer(proj);
           }
           this.state.events.push({
             type: 'orbital_impact',
-            data: { target: { ...proj.pos }, radius: blastRadius, variant: 'acid' }
+            data: { target: { ...proj.pos }, z: proj.z, radius: blastRadius, variant: 'acid' }
           });
         } else if (proj.type === 'elemental_ball') {
-          const blastRadius = 65;
+          const blastRadius = 130;
           const distToPlayer = Math.hypot(p.pos.x - proj.pos.x, p.pos.y - proj.pos.y);
-          if (distToPlayer <= blastRadius && !p.isDashing) {
-            this.damagePlayer(proj.damage);
+          if (distToPlayer <= blastRadius && Math.abs((p.z + 52) - proj.z) <= 145 && !p.isDashing) {
+            this.damagePlayer(proj.damage, false, undefined, 'projectile');
           }
           this.state.events.push({
             type: 'orbital_impact',
-            data: { target: { ...proj.pos }, radius: blastRadius, variant: 'void' }
+            data: { target: { ...proj.pos }, z: proj.z, radius: blastRadius, variant: 'void' }
           });
         }
         continue; // Projectile blocked and destroyed by solid mountain, cliff, or obstacle!
@@ -4706,7 +5426,7 @@ export class Simulation {
           continue;
         } else if (proj.type === 'grenade') {
           // Detonate Frost Grenade
-          const blastRadius = 110 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
+          const blastRadius = 220 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
           const victims = this.spatialGrid.getNearby(proj.pos, blastRadius);
           for (const v of victims) {
             if (v.health > 0) {
@@ -4724,25 +5444,25 @@ export class Simulation {
           continue;
         } else if (proj.type === 'spore_bomb') {
           // Detonate Brood Queen Spore Bomb on impact
-          const blastRadius = 72;
+          const blastRadius = 140;
           const distToPlayer = Math.hypot(p.pos.x - proj.pos.x, p.pos.y - proj.pos.y);
-          if (distToPlayer <= blastRadius && !p.isDashing) {
-            this.damagePlayer(proj.damage);
+          if (distToPlayer <= blastRadius && Math.abs((p.z + 52) - proj.z) <= 135 && !p.isDashing) {
+            this.applyEnemyProjectileHitToPlayer(proj);
           }
           this.state.events.push({
             type: 'orbital_impact',
-            data: { target: { ...proj.pos }, radius: blastRadius, variant: 'acid' }
+            data: { target: { ...proj.pos }, z: proj.z, radius: blastRadius, variant: 'acid' }
           });
           continue;
         } else if (proj.type === 'elemental_ball') {
-          const blastRadius = 65;
+          const blastRadius = 130;
           const distToPlayer = Math.hypot(p.pos.x - proj.pos.x, p.pos.y - proj.pos.y);
-          if (distToPlayer <= blastRadius && !p.isDashing) {
-            this.damagePlayer(proj.damage);
+          if (distToPlayer <= blastRadius && Math.abs((p.z + 52) - proj.z) <= 145 && !p.isDashing) {
+            this.damagePlayer(proj.damage, false, undefined, 'projectile');
           }
           this.state.events.push({
             type: 'orbital_impact',
-            data: { target: { ...proj.pos }, radius: blastRadius, variant: 'void' }
+            data: { target: { ...proj.pos }, z: proj.z, radius: blastRadius, variant: 'void' }
           });
           continue;
         } else if (proj.type === 'vortex') {
@@ -4761,38 +5481,38 @@ export class Simulation {
 
       // Gravitational pull for Vortex orbs in flight
       if (proj.type === 'vortex' && !proj.isAnchored) {
-        const pullRadius = 160 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
+        const pullRadius = 300 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
         const victims = this.spatialGrid.getNearby(proj.pos, pullRadius);
         for (const v of victims) {
           if (v.health <= 0) continue;
           const vdx = proj.pos.x - v.pos.x;
           const vdy = proj.pos.y - v.pos.y;
           const vdist = Math.hypot(vdx, vdy);
-          if (vdist > 5) {
-            v.pos.x += (vdx / vdist) * 160 * dt;
-            v.pos.y += (vdy / vdist) * 160 * dt;
+          if (vdist > 8) {
+            v.pos.x += (vdx / vdist) * 280 * dt;
+            v.pos.y += (vdy / vdist) * 280 * dt;
           }
         }
       }
 
       // Twin Converging Slashes (bomb): herd enemies inward toward the centerline as the blades sweep forward
       if (proj.type === 'bomb') {
-        const sweepRadius = 95 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
+        const sweepRadius = 185 * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
         const victims = this.spatialGrid.getNearby(proj.pos, sweepRadius);
         for (const v of victims) {
           if (v.health <= 0) continue;
           const vdx = proj.pos.x - v.pos.x;
           const vdy = proj.pos.y - v.pos.y;
           const vdist = Math.hypot(vdx, vdy);
-          if (vdist > 6) {
-            v.pos.x += (vdx / vdist) * 185 * dt;
-            v.pos.y += (vdy / vdist) * 185 * dt;
+          if (vdist > 10) {
+            v.pos.x += (vdx / vdist) * 320 * dt;
+            v.pos.y += (vdy / vdist) * 320 * dt;
           }
         }
       }
 
       if (proj.owner === 'player') {
-        const nearby = this.spatialGrid.getNearby(proj.pos, proj.radius + 32);
+        const nearby = this.spatialGrid.getNearby(proj.pos, proj.radius + 145);
 
         for (let j = 0; j < nearby.length; j++) {
           const enemy = nearby[j];
@@ -4829,11 +5549,20 @@ export class Simulation {
               enemy.velocity.x = 0;
               enemy.velocity.y = 0;
             }
+            const ricochetMult =
+              proj.type === 'toxic_chain' && proj.isRicochet && p.heroId === 'doctor'
+                ? 1 + 0.04 * (p.buffs.buff_doc_contagion_return || 0)
+                : 1.0;
             this.damageEnemy(
               enemy,
-              proj.damage,
+              proj.damage * ricochetMult,
               proj.pos,
-              proj.element || (proj.type === 'scatter' ? 'ignite' : proj.type === 'arc' ? 'lightning' : proj.type === 'medical_pulse' || proj.type === 'angel_bolt' ? 'medical' : proj.type === 'toxic_chain' || proj.type === 'drone_bio_bolt' ? 'acid' : undefined)
+              proj.element || (proj.type === 'scatter' ? 'ignite' : proj.type === 'arc' ? 'lightning' : proj.type === 'medical_pulse' || proj.type === 'angel_bolt' ? 'medical' : proj.type === 'toxic_chain' || proj.type === 'drone_bio_bolt' ? 'acid' : undefined),
+              {
+                isDirectAttack: proj.isDirectAttack,
+                isPrimaryLmb: proj.isPrimaryLmb,
+                attackActivationId: proj.attackActivationId
+              }
             );
             if (proj.type === 'drone_bio_bolt') {
               this.state.events.push({
@@ -4848,24 +5577,6 @@ export class Simulation {
               if (bounced) {
                 alive.push(proj);
                 break;
-              }
-            }
-
-            // Arc Conduit enhancement: every blaster bolt hit arcs chain lightning to up to 2 nearby enemies
-            if (proj.type === 'pulse' && p.skillEnhancements?.primary === 'arc_conduit') {
-              const nearbyVictims = this.spatialGrid.getNearby(enemy.pos, 220).filter(e => e.id !== enemy.id && e.health > 0);
-              for (let a = 0; a < Math.min(2, nearbyVictims.length); a++) {
-                const aTarget = nearbyVictims[a];
-                const arcDmg = proj.damage * 0.45;
-                this.damageEnemy(aTarget, arcDmg, aTarget.pos, 'lightning');
-                this.state.events.push({
-                  type: 'chain_spark',
-                  data: {
-                    from: { ...enemy.pos },
-                    to: { ...aTarget.pos },
-                    damage: arcDmg
-                  }
-                });
               }
             }
 
@@ -4898,33 +5609,72 @@ export class Simulation {
         for (let d = 0; d < this.state.holographicDecoys.length; d++) {
           const decoy = this.state.holographicDecoys[d];
           if (decoy.hitsRemaining <= 0) continue;
-          const dDist3D = Math.hypot(proj.pos.x - decoy.pos.x, proj.pos.y - decoy.pos.y, proj.z - (decoy.z + 24));
-          if (dDist3D <= proj.radius + 22) {
+          const dDist3D = Math.hypot(proj.pos.x - decoy.pos.x, proj.pos.y - decoy.pos.y, proj.z - (decoy.z + 48));
+          if (dDist3D <= proj.radius + 38) {
             decoy.hitsRemaining = Math.max(0, decoy.hitsRemaining - 1);
             hitDecoy = true;
             break;
           }
         }
         if (hitDecoy) {
+          if (proj.type === 'elemental_ball') {
+            this.state.events.push({
+              type: 'orbital_impact',
+              data: { target: { ...proj.pos }, z: proj.z, radius: 78, variant: 'void' }
+            });
+          }
           continue;
         }
 
-        // True 3D distance check against player torso
+        // True 3D distance check against 2x-scaled player torso matching visible projectile dimensions
         const dx = proj.pos.x - p.pos.x;
         const dy = proj.pos.y - p.pos.y;
-        const playerCenterZ = p.z + 26;
+        const playerCenterZ = p.z + 52;
         const dz = proj.z - playerCenterZ;
         const dist3D = Math.hypot(dx, dy, dz);
 
-        if (dist3D <= proj.radius + 24) {
+        if (dist3D <= proj.radius + ENEMY_COMBAT_BALANCE.playerProjectileHurtRadius) {
           if (!p.isDashing) {
-            this.damagePlayer(proj.damage);
+            if (proj.type === 'elemental_ball') {
+              this.damagePlayer(proj.damage, false, undefined, 'projectile');
+            } else {
+              this.applyEnemyProjectileHitToPlayer(proj);
+            }
+          }
+          if (proj.type === 'elemental_ball') {
+            this.state.events.push({
+              type: 'orbital_impact',
+              data: { target: { ...proj.pos }, z: proj.z, radius: 78, variant: 'void' }
+            });
           }
           continue;
         }
       }
 
       alive.push(proj);
+    }
+
+    // Performance safeguard for extreme uncapped +Projectile stacking
+    const MAX_ACTIVE_PLAYER_PROJECTILES = 240;
+    if (alive.length > MAX_ACTIVE_PLAYER_PROJECTILES) {
+      let playerCount = 0;
+      for (let i = 0; i < alive.length; i++) {
+        if (alive[i].owner === 'player') playerCount++;
+      }
+      let excess = playerCount - MAX_ACTIVE_PLAYER_PROJECTILES;
+      if (excess > 0) {
+        const trimmed: ProjectileState[] = [];
+        for (let i = 0; i < alive.length; i++) {
+          const item = alive[i];
+          if (excess > 0 && item.owner === 'player' && !item.isAnchored && item.type !== 'cryo_scalpel') {
+            excess--;
+            continue;
+          }
+          trimmed.push(item);
+        }
+        this.state.projectiles = trimmed;
+        return;
+      }
     }
 
     this.state.projectiles = alive;
@@ -4944,8 +5694,9 @@ export class Simulation {
     if (enemy.poisonStacks >= cfg.stacksToExplode) {
       enemy.poisonStacks = 0;
       enemy.poisonStackTimer = 0;
+      const catalystStacks = p.heroId === 'doctor' ? (p.buffs.buff_doc_overdose_catalyst || 0) : 0;
       const blastRadius = cfg.explosionRadius * (p.calculatedStats.aoeRadiusMultiplier || 1.0);
-      const blastDmg = cfg.explosionDamage * p.calculatedStats.damageMultiplier;
+      const blastDmg = cfg.explosionDamage * (1 + 0.04 * catalystStacks) * p.calculatedStats.damageMultiplier;
       const victims = this.spatialGrid.getNearby(enemy.pos, blastRadius + 24);
       for (let v = 0; v < victims.length; v++) {
         const vic = victims[v];
@@ -4982,6 +5733,7 @@ export class Simulation {
     if (!bestTarget) return false;
 
     proj.bouncesRemaining = (proj.bouncesRemaining ?? 1) - 1;
+    proj.isRicochet = true;
     proj.distanceTraveled = 0;
     proj.maxDistance = cfg.bounceRadius + 48;
     proj.damage *= cfg.bounceDamageFalloff;
@@ -5006,7 +5758,7 @@ export class Simulation {
 
   private triggerChainSpark(sourceEnemy: EnemyState): void {
     const p = this.state.player;
-    const nearby = this.spatialGrid.getNearby(sourceEnemy.pos, 260);
+    const nearby = this.spatialGrid.getNearby(sourceEnemy.pos, 500);
     const candidates = nearby.filter(e => e.id !== sourceEnemy.id && e.health > 0);
     if (candidates.length === 0) return;
 
@@ -5031,6 +5783,7 @@ export class Simulation {
   }
 
   private updateOrbitalStrikes(dt: number): void {
+    const p = this.state.player;
     const alive: OrbitalStrikeState[] = [];
 
     for (let i = 0; i < this.state.orbitalStrikes.length; i++) {
@@ -5153,20 +5906,24 @@ export class Simulation {
         // ====================================================================
         if (s.enhancement === 'singularity' || s.variant === 'singularity') {
           const pullRadius = Math.round(s.radius * 1.38);
+          const gravStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_gravitational_pull || 0) : 0;
+          const eventHorizonStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_event_horizon || 0) : 0;
+          const pullStrengthMult = 1 + 0.05 * gravStacks;
+          const pullTickDmgMult = 1 + 0.03 * eventHorizonStacks;
           const pullVictims = this.spatialGrid.getNearby(s.targetPos, pullRadius);
           for (let v = 0; v < pullVictims.length; v++) {
             const enemy = pullVictims[v];
             if (enemy.health <= 0) continue;
-            if (Math.abs(enemy.z - strikeZ) > 65) continue; // Respect elevation boundaries
+            if (Math.abs(enemy.z - strikeZ) > 140) continue; // Respect elevation boundaries
 
             const dx = s.targetPos.x - enemy.pos.x;
             const dy = s.targetPos.y - enemy.pos.y;
             const dist = Math.hypot(dx, dy) || 1;
             const isElite = enemy.isElite || enemy.type === 'elite' || enemy.type === 'boss';
 
-            const pullSpeed = isElite
-              ? Math.min(150, 220 * (1 - dist / pullRadius) + 55)
-              : Math.min(310, 420 * (1 - dist / pullRadius) + 110);
+            const pullSpeed = (isElite
+              ? Math.min(240, 360 * (1 - dist / pullRadius) + 85)
+              : Math.min(480, 660 * (1 - dist / pullRadius) + 170)) * pullStrengthMult;
 
             if (!isElite) {
               enemy.isStunned = true;
@@ -5176,8 +5933,8 @@ export class Simulation {
             enemy.velocity.x *= 0.5;
             enemy.velocity.y *= 0.5;
 
-            if (dist > 18) {
-              const step = Math.min(dist - 14, pullSpeed * dt);
+            if (dist > 30) {
+              const step = Math.min(dist - 24, pullSpeed * dt);
               const nextPos = {
                 x: enemy.pos.x + (dx / dist) * step,
                 y: enemy.pos.y + (dy / dist) * step
@@ -5196,8 +5953,8 @@ export class Simulation {
             s.dotTimer = 0.25;
             for (let v = 0; v < pullVictims.length; v++) {
               const enemy = pullVictims[v];
-              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 65) {
-                this.damageEnemy(enemy, s.damage * 0.12, s.targetPos, 'void');
+              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 140) {
+                this.damageEnemy(enemy, s.damage * 0.12 * pullTickDmgMult, s.targetPos, 'void');
               }
             }
           }
@@ -5212,14 +5969,14 @@ export class Simulation {
           for (let v = 0; v < convVictims.length; v++) {
             const enemy = convVictims[v];
             if (enemy.health <= 0) continue;
-            if (Math.abs(enemy.z - strikeZ) > 65) continue;
+            if (Math.abs(enemy.z - strikeZ) > 140) continue;
 
             const dx = s.targetPos.x - enemy.pos.x;
             const dy = s.targetPos.y - enemy.pos.y;
             const dist = Math.hypot(dx, dy) || 1;
-            if (dist > 22) {
-              const pullSpeed = enemy.isBoss ? 140 : 280;
-              const step = Math.min(dist - 18, pullSpeed * dt);
+            if (dist > 36) {
+              const pullSpeed = enemy.isBoss ? 240 : 460;
+              const step = Math.min(dist - 28, pullSpeed * dt);
               const nextPos = {
                 x: enemy.pos.x + (dx / dist) * step,
                 y: enemy.pos.y + (dy / dist) * step
@@ -5239,17 +5996,20 @@ export class Simulation {
         // ====================================================================
         if (s.enhancement === 'cryogenic_impact') {
           const cryoRadius = Math.round(s.radius * 1.25);
+          const subzeroStacks = p.heroId === 'commander' ? (p.buffs.buff_cmd_subzero_detonation || 0) : 0;
+          const cryoChillStrength = 0.50 + 0.02 * subzeroStacks;
           const cryoVictims = this.spatialGrid.getNearby(s.targetPos, cryoRadius);
           for (let v = 0; v < cryoVictims.length; v++) {
             const enemy = cryoVictims[v];
             if (enemy.health <= 0) continue;
-            if (Math.abs(enemy.z - strikeZ) > 65) continue;
+            if (Math.abs(enemy.z - strikeZ) > 140) continue;
 
             // Freeze / Stun enemies inside the cryogenic field
             enemy.isStunned = true;
             enemy.stunTimer = Math.max(enemy.stunTimer ?? 0, 0.65);
             enemy.isChilled = true;
             enemy.chillTimer = Math.max(enemy.chillTimer ?? 0, 1.5);
+            enemy.chillStrength = Math.max(enemy.chillStrength ?? 0.50, cryoChillStrength);
             enemy.velocity.x = 0;
             enemy.velocity.y = 0;
             enemy.attackCooldownRemaining = Math.max(enemy.attackCooldownRemaining, 0.65);
@@ -5260,7 +6020,7 @@ export class Simulation {
             s.dotTimer = 0.44;
             for (let v = 0; v < cryoVictims.length; v++) {
               const enemy = cryoVictims[v];
-              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 65) {
+              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 140) {
                 this.damageEnemy(enemy, s.damage * 0.175, enemy.pos, 'frost');
               }
             }
@@ -5277,7 +6037,7 @@ export class Simulation {
             const victims = this.spatialGrid.getNearby(s.targetPos, blastRadius);
             for (let v = 0; v < victims.length; v++) {
               const enemy = victims[v];
-              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 65) {
+              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 140) {
                 // Release from singularity lock and apply collapse detonation damage + outward impulse
                 enemy.isStunned = false;
                 enemy.stunTimer = 0;
@@ -5285,8 +6045,8 @@ export class Simulation {
                 const kdx = enemy.pos.x - s.targetPos.x;
                 const kdy = enemy.pos.y - s.targetPos.y;
                 const klen = Math.hypot(kdx, kdy) || 1;
-                enemy.velocity.x += (kdx / klen) * 520;
-                enemy.velocity.y += (kdy / klen) * 520;
+                enemy.velocity.x += (kdx / klen) * 680;
+                enemy.velocity.y += (kdy / klen) * 680;
               }
             }
             this.state.events.push({
@@ -5303,13 +6063,13 @@ export class Simulation {
             const victims = this.spatialGrid.getNearby(s.targetPos, blastRadius);
             for (let v = 0; v < victims.length; v++) {
               const enemy = victims[v];
-              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 65) {
+              if (enemy.health > 0 && Math.abs(enemy.z - strikeZ) <= 140) {
                 this.damageEnemy(enemy, s.damage * 1.45, s.targetPos, 'ignite');
                 const kdx = enemy.pos.x - s.targetPos.x;
                 const kdy = enemy.pos.y - s.targetPos.y;
                 const klen = Math.hypot(kdx, kdy) || 1;
-                enemy.velocity.x += (kdx / klen) * 500;
-                enemy.velocity.y += (kdy / klen) * 500;
+                enemy.velocity.x += (kdx / klen) * 640;
+                enemy.velocity.y += (kdy / klen) * 640;
               }
             }
             this.state.events.push({
@@ -5330,21 +6090,102 @@ export class Simulation {
     this.state.orbitalStrikes = alive;
   }
 
-  public applyChill(enemy: EnemyState, duration: number = 3.5): void {
+  public applyChill(enemy: EnemyState, duration: number = 3.5, strength: number = 0.50): void {
     enemy.isChilled = true;
     enemy.chillTimer = Math.max(enemy.chillTimer || 0, duration);
+    enemy.chillStrength = Math.max(enemy.chillStrength || 0, strength);
   }
 
-  public damageEnemy(enemy: EnemyState, amount: number, hitPos: Vector2, element?: string): void {
+  private allocateDirectAttackActivationId(): number {
+    const id = this.nextAttackActivationId++;
+    const p = this.state.player;
+    if (p.usedCombatFocusActivations && p.usedCombatFocusActivations.size > 32) {
+      p.usedCombatFocusActivations.clear();
+    }
+    return id;
+  }
+
+  public damageEnemy(
+    enemy: EnemyState,
+    amount: number,
+    hitPos: Vector2,
+    element?: string,
+    opts?: DamageEnemyOptions
+  ): void {
     if (enemy.health <= 0) return;
     const p = this.state.player;
+    const isRecursive = Boolean(opts?.isRecursiveTrigger);
+    const isPrimaryLmb = Boolean(opts?.isPrimaryLmb || this.isExecutingPrimaryLmb);
+    const wasFullHealth = enemy.health >= enemy.maxHealth - 0.001;
+
+    // First Contact Protocol: striking an undamaged enemy triggers timed Attack Speed (8s ICD)
+    if (!isRecursive && wasFullHealth && (p.buffs.buff_first_contact_protocol || 0) > 0) {
+      this.triggerTimedEffect('first_contact_protocol', 4.0, 8.0, 'buff_first_contact_protocol');
+    }
+
+    // T04 Executioner: +2% bonus damage per stack against enemies below 30% HP
+    let mult = 1.0;
+    const execStacks = p.buffs.buff_executioner || 0;
+    if (execStacks > 0 && enemy.health / Math.max(1, enemy.maxHealth) < 0.30) {
+      mult *= 1 + 0.02 * execStacks;
+    }
+
+    // Opening Pulse: +10% (+5%/stack) bonus damage vs healthy enemies (>= 90% HP)
+    if ((p.calculatedStats.openingPulseBonus || 0) > 0 && enemy.health / Math.max(1, enemy.maxHealth) >= 0.90) {
+      mult *= 1 + (p.calculatedStats.openingPulseBonus || 0);
+    }
+
+    // Titanbreaker Matrix: +6%/stack vs Elites and Bosses (single || check prevents Boss double-count)
+    if ((p.calculatedStats.giantSlayerBonus || 0) > 0 && (enemy.isElite || enemy.isBoss)) {
+      mult *= 1 + p.calculatedStats.giantSlayerBonus;
+    }
+
+    // Cryo-Chem Catalyst: +8% (+4%/stack) vs status-afflicted enemies
+    if (
+      (p.calculatedStats.statusSynergyDamageBonus || 0) > 0 &&
+      (enemy.isChilled || enemy.isElectrified || enemy.isToxic)
+    ) {
+      mult *= 1 + (p.calculatedStats.statusSynergyDamageBonus || 0);
+    }
+
+    // Resonance Siphon: timed LMB damage empowerment after RMB cast
+    if (isPrimaryLmb && (p.calculatedStats.resonanceLmbDamageBonus || 0) > 0) {
+      mult *= 1 + (p.calculatedStats.resonanceLmbDamageBonus || 0);
+    }
+
+    // Positional direct-attack damage bonuses: Rangefinder Array (>= 500u) & Point-Blank Coil (edge <= 220u)
+    if (!isRecursive) {
+      const targetDist = Math.hypot(p.pos.x - enemy.pos.x, p.pos.y - enemy.pos.y);
+      if ((p.calculatedStats.longRangeDamageBonus || 0) > 0 && targetDist >= 500) {
+        mult *= 1 + (p.calculatedStats.longRangeDamageBonus || 0);
+      }
+      if ((p.calculatedStats.closeRangeDamageBonus || 0) > 0 && targetDist - (enemy.radius || 0) <= 220) {
+        mult *= 1 + (p.calculatedStats.closeRangeDamageBonus || 0);
+      }
+    }
+
+    // T05 Combat Focus: Every 5th direct hit deals +5% bonus damage per stack (max 1 proc per attack activation)
+    const focusStacks = p.buffs.buff_combat_focus || 0;
+    if (!isRecursive && opts?.isDirectAttack && focusStacks > 0) {
+      const actId = opts.attackActivationId ?? this.allocateDirectAttackActivationId();
+      if (!p.usedCombatFocusActivations) p.usedCombatFocusActivations = new Set<number>();
+      if (!p.usedCombatFocusActivations.has(actId)) {
+        p.usedCombatFocusActivations.add(actId);
+        p.combatFocusHitCount = (p.combatFocusHitCount || 0) + 1;
+        if (p.combatFocusHitCount >= 5) {
+          p.combatFocusHitCount = 0;
+          mult *= 1 + 0.05 * focusStacks;
+        }
+      }
+    }
 
     const isCrit = this.state.rng.next() < p.calculatedStats.critChance;
     const isCorruption = this.isCorruptionActive();
     const corruptionVuln = isCorruption ? 1.60 : 1.0;
     const electrifiedVuln = enemy.isElectrified ? (enemy.electrifiedMultiplier ?? 1.35) : 1.0;
+    const rawScaled = amount * mult;
     const finalAmount = Math.round(
-      (isCrit ? amount * (1 + p.calculatedStats.critMultiplier) : amount) * corruptionVuln * electrifiedVuln
+      (isCrit ? rawScaled * p.calculatedStats.critMultiplier : rawScaled) * corruptionVuln * electrifiedVuln
     );
 
     enemy.health -= finalAmount;
@@ -5352,6 +6193,40 @@ export class Simulation {
     const nearbyPack = this.spatialGrid.getNearby(enemy.pos, 750);
     for (let k = 0; k < nearbyPack.length; k++) {
       nearbyPack[k].isAlerted = true;
+    }
+
+    // U12 Life Siphon: Heal for 0.15% * n of damage dealt (capped at 1% max HP per second), non-recursive
+    if (!isRecursive && p.calculatedStats.lifeSiphonPercent > 0 && finalAmount > 0 && p.health > 0 && p.health < p.maxHealth) {
+      if (p.lifeSiphonSecondTimer <= 0) {
+        p.lifeSiphonSecondTimer = 1.0;
+        p.lifeSiphonSecondAmount = 0;
+      }
+      const capPerSec = p.maxHealth * 0.01;
+      const room = Math.max(0, capPerSec - p.lifeSiphonSecondAmount);
+      const healAmt = Math.min(room, finalAmount * p.calculatedStats.lifeSiphonPercent);
+      if (healAmt > 0) {
+        p.health = Math.min(p.maxHealth, p.health + healAmt);
+        p.lifeSiphonSecondAmount += healAmt;
+      }
+    }
+
+    // T07 Static Discharge: Direct attacks every 6s trigger arc lightning (5% * n base LMB damage, max 3 nearby targets)
+    const staticStacks = p.buffs.buff_static_discharge || 0;
+    if (!isRecursive && opts?.isDirectAttack && staticStacks > 0 && p.staticDischargeCooldown <= 0) {
+      p.staticDischargeCooldown = 6.0;
+      const arcDmg = Math.max(1, Math.round(0.05 * staticStacks * p.baseLmbDamage * p.calculatedStats.damageMultiplier));
+      const arcCandidates = this.spatialGrid
+        .getNearby(enemy.pos, 460)
+        .filter((c) => c.health > 0 && c.id !== enemy.id)
+        .sort((a, b) => Math.hypot(a.pos.x - enemy.pos.x, a.pos.y - enemy.pos.y) - Math.hypot(b.pos.x - enemy.pos.x, b.pos.y - enemy.pos.y));
+      for (let a = 0; a < Math.min(3, arcCandidates.length); a++) {
+        const arcTarget = arcCandidates[a];
+        this.damageEnemy(arcTarget, arcDmg, arcTarget.pos, 'lightning', { isRecursiveTrigger: true });
+        this.state.events.push({
+          type: 'chain_spark',
+          data: { from: { ...enemy.pos }, to: { ...arcTarget.pos }, damage: arcDmg }
+        });
+      }
     }
 
     // Status effect procs
@@ -5380,6 +6255,7 @@ export class Simulation {
     });
 
     if (enemy.health <= 0) {
+      const excessDamage = Math.max(0, -enemy.health);
       if (enemy.isStage1Titan) {
         if (enemy.titanState !== 'dying') {
           enemy.health = 0;
@@ -5388,49 +6264,119 @@ export class Simulation {
           enemy.radius = 0; // Disable collision immediately
           this.state.events.push({
             type: 'stage1_boss_death',
-            data: { id: enemy.id, pos: { ...enemy.pos } }
+            data: { id: enemy.id, pos: { ...enemy.pos }, z: enemy.z, isStage1Boss: true }
           });
           this.state.events.push({
             type: 'boss_defeated',
-            data: { name: 'COLOSSAL BIO-CULTIVATOR' }
+            data: { name: 'STAGE 1 BOSS', isStage1Boss: true, pos: { ...enemy.pos }, z: enemy.z }
           });
+          this.handleEliteOrBossKillRewards(enemy);
           if (this.state.artifact) {
-            this.state.artifact.isBossDefeated = true;
+            const art = this.state.artifact;
+            art.isBossDefeated = true;
+            art.isSummoning = false;
+            art.phase = 'exit_ready';
+            art.restorationTimer = 0;
+            art.teleportPrepTimer = 0;
+            art.awaitingDialogueSync = false;
           }
+          this.combatDirector.disable();
         }
       } else {
-        this.killEnemy(enemy);
+        this.killEnemy(enemy, excessDamage, isRecursive);
       }
     }
   }
 
-  private killEnemy(enemy: EnemyState): void {
+  private killEnemy(enemy: EnemyState, excessDamage: number = 0, isRecursiveKill: boolean = false): void {
     const p = this.state.player;
     p.killCount++;
 
-    // Lifesteal on kill
-    if (p.calculatedStats.lifestealOnKill > 0) {
-      p.health = Math.min(p.maxHealth, p.health + p.calculatedStats.lifestealOnKill);
-    }
-
-    // Death explosion
-    if (p.calculatedStats.deathExplosionRadius > 0) {
-      const blastRadius = p.calculatedStats.deathExplosionRadius;
-      const victims = this.spatialGrid.getNearby(enemy.pos, blastRadius);
+    // T01 Chain Reaction: Enemies explode on death for 6% * n base LMB damage in 180u radius (2s ICD, non-recursive)
+    const chainStacks = p.buffs.buff_chain_reaction || 0;
+    if (!isRecursiveKill && chainStacks > 0 && p.chainReactionCooldown <= 0) {
+      p.chainReactionCooldown = 2.0;
+      const blastDmg = Math.max(1, Math.round(0.06 * chainStacks * p.baseLmbDamage * p.calculatedStats.damageMultiplier));
+      const victims = this.spatialGrid.getNearby(enemy.pos, 180);
       for (let v = 0; v < victims.length; v++) {
         const victim = victims[v];
         if (victim.id !== enemy.id && victim.health > 0) {
-          victim.health -= p.calculatedStats.deathExplosionDamage;
-          this.state.events.push({
-            type: 'damage_dealt',
-            data: { enemyId: victim.id, damage: p.calculatedStats.deathExplosionDamage, pos: { ...victim.pos } }
-          });
+          this.damageEnemy(victim, blastDmg, victim.pos, 'ignite', { isRecursiveTrigger: true });
         }
       }
       this.state.events.push({
         type: 'orbital_impact',
-        data: { target: { ...enemy.pos }, radius: blastRadius }
+        data: { target: { ...enemy.pos }, z: enemy.z, radius: 180, variant: 'chain_reaction' }
       });
+    }
+
+    // T02 Blood Rush: 3 kills within 5s grants +3% * n LMB attack speed + +2% * n move speed for 4s
+    const bloodRushStacks = p.buffs.buff_blood_rush || 0;
+    if (bloodRushStacks > 0) {
+      p.bloodRushKillWindowTimer = 5.0;
+      p.bloodRushRecentKills = (p.bloodRushRecentKills || 0) + 1;
+      if (p.bloodRushRecentKills >= 3) {
+        p.bloodRushRecentKills = 0;
+        p.bloodRushTimer = 4.0;
+        this.state.updateCalculatedStats();
+      }
+    }
+
+    // T03 Second Wind: Eliminating an elite or boss restores 3% * n max HP (12s ICD)
+    const secondWindStacks = p.buffs.buff_second_wind || 0;
+    if (secondWindStacks > 0 && (enemy.isElite || enemy.isBoss) && p.secondWindCooldown <= 0 && p.health > 0) {
+      p.secondWindCooldown = 12.0;
+      p.health = Math.min(p.maxHealth, p.health + p.maxHealth * 0.03 * secondWindStacks);
+    }
+    this.handleEliteOrBossKillRewards(enemy);
+
+    // T10 Cooldown Harvest: Each kill reduces active skill cooldowns by 0.08s * n (capped at 0.5s/sec)
+    const harvestStacks = p.buffs.buff_cooldown_harvest || 0;
+    if (harvestStacks > 0) {
+      if (this.cooldownHarvestWindowTimer <= 0) {
+        this.cooldownHarvestWindowTimer = 1.0;
+        this.cooldownHarvestThisSecond = 0;
+      }
+      const allowed = Math.min(0.5 - this.cooldownHarvestThisSecond, 0.08 * harvestStacks);
+      if (allowed > 0) {
+        this.cooldownHarvestThisSecond += allowed;
+        p.secondaryCooldownRemaining = Math.max(0, p.secondaryCooldownRemaining - allowed);
+        p.utilityCooldownRemaining = Math.max(0, p.utilityCooldownRemaining - allowed);
+        p.ultimateCooldownRemaining = Math.max(0, p.ultimateCooldownRemaining - allowed);
+      }
+    }
+
+    // T11 Fuel Harvest: Each kill restores 1.5 * n jetpack fuel
+    const fuelHarvestStacks = p.buffs.buff_fuel_harvest || 0;
+    if (fuelHarvestStacks > 0) {
+      p.jetpackFuel = Math.min(p.maxJetpackFuel, p.jetpackFuel + 1.5 * fuelHarvestStacks);
+    }
+
+    // T12 Killing Momentum: Each kill grants +1% * n move speed for 3s (up to 3 stacks)
+    const kmStacks = p.buffs.buff_killing_momentum || 0;
+    if (kmStacks > 0) {
+      p.killingMomentumTimer = 3.0;
+      p.killingMomentumStacks = Math.min(3, (p.killingMomentumStacks || 0) + 1);
+      this.state.updateCalculatedStats();
+    }
+
+    // T14 Overkill: 4% * n excess killing-blow damage jumps to 1 nearest enemy within 280u (cap 25% base LMB damage)
+    const overkillStacks = p.buffs.buff_overkill || 0;
+    if (!isRecursiveKill && overkillStacks > 0 && excessDamage > 0) {
+      const capDmg = 0.25 * p.baseLmbDamage * p.calculatedStats.damageMultiplier;
+      const spreadDmg = Math.max(1, Math.min(capDmg, excessDamage * 0.04 * overkillStacks));
+      const nearby = this.spatialGrid
+        .getNearby(enemy.pos, 280)
+        .filter((c) => c.id !== enemy.id && c.health > 0)
+        .sort((a, b) => Math.hypot(a.pos.x - enemy.pos.x, a.pos.y - enemy.pos.y) - Math.hypot(b.pos.x - enemy.pos.x, b.pos.y - enemy.pos.y));
+      if (nearby.length > 0) {
+        this.damageEnemy(nearby[0], spreadDmg, nearby[0].pos, 'physical', { isRecursiveTrigger: true });
+      }
+    }
+
+    // Lifesteal on kill (legacy old-save safety)
+    if (p.calculatedStats.lifestealOnKill > 0) {
+      p.health = Math.min(p.maxHealth, p.health + p.calculatedStats.lifestealOnKill);
     }
 
     // 1. Spawn physical Currency Drops (Genes)
@@ -5448,25 +6394,16 @@ export class Simulation {
       this.spawnCurrencyDrop(enemy.pos, val);
     }
 
-    // 2. Check Loot Table for Passive Item Drop
-    let dropChance = 0; // Normal mobs NEVER drop items directly
-    let buffDropChance = 0; // Normal mobs NEVER drop buff capsules directly (0%) - must open Bio-Sacs!
+    // 2. Random Buff Capsule Drop (no legacy passive items, no modal interrupt)
+    let buffDropChance = 0;
     if (enemy.isBoss) {
-      dropChance = LOOT_CONFIG.bossEnemyItemDropChance;
       buffDropChance = 1.0;
     } else if (enemy.isElite) {
-      dropChance = LOOT_CONFIG.eliteEnemyItemDropChance * 0.5;
-      buffDropChance = 0.05; // Rare 5% chance on elites
+      buffDropChance = 0.05;
     }
 
-    if (dropChance > 0 && this.state.rng.next() < dropChance) {
-      const itemId = rollWeightedPassiveItem(this.state.rng);
-      this.spawnPhysicalItemDrop(enemy.pos, itemId);
-    }
-
-    // Physical Buff / Augment Capsule Drop
-    if (this.state.rng.next() < buffDropChance) {
-      this.spawnBuffCapsuleDrop(enemy.pos);
+    if (buffDropChance > 0 && this.state.lootRng.next() < buffDropChance) {
+      this.spawnBuffCapsuleDrop(enemy.pos, 'elite');
     }
 
     // Track kill progress in Trial of Corruption if active
@@ -5484,30 +6421,33 @@ export class Simulation {
       p.level++;
       p.xpNeeded = Math.round(p.xpNeeded * 1.6 + 8);
       // Spawn physical Augment Capsule at enemy death position for player to pick up
-      this.spawnBuffCapsuleDrop(enemy.pos);
+      this.spawnBuffCapsuleDrop(enemy.pos, 'level');
       this.state.events.push({
         type: 'level_up',
         data: { level: p.level }
       });
     }
 
-    // 4. Advance Overseer Artifact charge (2x slower base rate)
-    if (enemy.isBoss) {
-      if (this.state.artifact) {
-        this.state.artifact.isBossDefeated = true;
-      }
+    // 4. Advance Overseer Artifact charge (Stage1Titan already emits boss_defeated at dying start in damageEnemy)
+    if (enemy.isBoss && !enemy.isStage1Titan) {
       this.state.events.push({
         type: 'boss_defeated',
-        data: { name: enemy.isStage1Titan ? 'STAGE 1 TITAN: BIO-CULTIVATOR' : 'Brood Queen' }
+        data: {
+          name: 'Brood Queen',
+          isStage1Boss: false,
+          pos: { ...enemy.pos },
+          z: enemy.z
+        }
       });
     }
 
-    if (!this.state.artifact.isCharged) {
+    const artifactPolicy = getStageArtifactPolicy(this.state.stageNumber);
+    if (artifactPolicy.usesCharging && !this.state.artifact.isCharged) {
       const chargeAmt = enemy.isBoss
         ? this.state.artifact.chargePerKill * 5
         : enemy.isElite
-        ? this.state.artifact.chargePerKill * 2.5
-        : this.state.artifact.chargePerKill;
+          ? this.state.artifact.chargePerKill * 2.5
+          : this.state.artifact.chargePerKill;
 
       this.state.artifact.chargeProgress = Math.min(
         100,
@@ -5517,6 +6457,7 @@ export class Simulation {
         this.state.artifact.chargeProgress = 100;
         this.state.artifact.isCharged = true;
         this.state.artifact.isTeleporterReady = true;
+        this.state.artifact.phase = 'unlocked_ready';
         this.state.events.push({ type: 'artifact_charged', data: {} });
       }
     }
@@ -5527,6 +6468,10 @@ export class Simulation {
         enemyId: enemy.id,
         type: enemy.type,
         pos: { ...enemy.pos },
+        z: enemy.z,
+        radius: enemy.radius,
+        isElite: Boolean(enemy.isElite),
+        isBoss: Boolean(enemy.isBoss),
         reward: enemy.currencyReward
       }
     });
@@ -5568,8 +6513,8 @@ export class Simulation {
   }
 
   public spawnPhysicalItemDrop(origin: Vector2, itemId: ItemId): void {
-    const angle = this.state.rng.range(0, Math.PI * 2);
-    const speed = this.state.rng.range(55, 95);
+    const angle = this.state.lootRng.range(0, Math.PI * 2);
+    const speed = this.state.lootRng.range(55, 95);
     const originElevation = this.state.terrain.getElevation(origin.x, origin.y).height;
 
     this.state.itemDrops.push({
@@ -5589,13 +6534,17 @@ export class Simulation {
     });
   }
 
-  public spawnBuffCapsuleDrop(origin: Vector2): void {
-    const angle = this.state.rng.range(0, Math.PI * 2);
-    const speed = this.state.rng.range(45, 85);
+  public spawnBuffCapsuleDrop(origin: Vector2, dropOrigin: 'level' | 'elite' = 'level'): void {
+    const rolledBuff = rollWeightedRandomBuff(this.state.lootRng, this.state.player);
+    if (!rolledBuff) return;
+
+    const angle = this.state.lootRng.range(0, Math.PI * 2);
+    const speed = this.state.lootRng.range(45, 85);
     const originElevation = this.state.terrain.getElevation(origin.x, origin.y).height;
 
     this.state.itemDrops.push({
-      id: `buffdrop_${this.nextItemDropId++}`,
+      id: `buffdrop_${dropOrigin}_${this.nextItemDropId++}`,
+      buffId: rolledBuff,
       isBuffDrop: true,
       pos: { x: origin.x, y: origin.y },
       vel: { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
@@ -5607,19 +6556,77 @@ export class Simulation {
 
     this.state.events.push({
       type: 'item_dropped',
-      data: { isBuffDrop: true, pos: { ...origin } }
+      data: { isBuffDrop: true, buffId: rolledBuff, pos: { ...origin } }
     });
   }
 
-  private damagePlayer(amount: number, bypassInvuln: boolean = false): void {
+  /**
+   * Enforces per-volley attack-instance deduplication and a short projectile-volley
+   * grace period so multi-projectile volleys never stack unfair overlapping burst damage.
+   */
+  private applyEnemyProjectileHitToPlayer(proj: ProjectileState): boolean {
+    const p = this.state.player;
+    if (this.devPlayerInvulnerable) return false;
+    if (p.isDashing || (p.phaseBarrierTimer ?? 0) > 0 || p.health <= 0) return false;
+
+    if (proj.attackInstanceId !== undefined) {
+      if (!p.hitByEnemyAttackInstanceIds) {
+        p.hitByEnemyAttackInstanceIds = new Map<number, number>();
+      }
+      if (p.hitByEnemyAttackInstanceIds.has(proj.attackInstanceId)) {
+        return false; // Same volley already dealt direct hit damage
+      }
+    }
+
+    if ((p.enemyProjectileGraceTimer ?? 0) > 0) {
+      return false; // Within short projectile-volley burst grace window
+    }
+
+    if (proj.attackInstanceId !== undefined && p.hitByEnemyAttackInstanceIds) {
+      p.hitByEnemyAttackInstanceIds.set(proj.attackInstanceId, 6.0);
+    }
+    p.enemyProjectileGraceTimer = ENEMY_COMBAT_BALANCE.projectileHitGraceSec;
+    this.damagePlayer(proj.damage, false, undefined, 'projectile');
+    return true;
+  }
+
+  private handleEliteOrBossKillRewards(enemy: EnemyState): void {
+    if (!(enemy.isElite || enemy.isBoss)) return;
+    const p = this.state.player;
+    const apexStacks = Math.min(3, p.buffs.buff_apex_barrier || 0);
+    if (apexStacks > 0 && (p.timedEffectCooldowns?.apex_barrier ?? 0) <= 0 && p.health > 0) {
+      const shieldPct = 0.08 + 0.04 * (apexStacks - 1);
+      const barrierGain = Math.round(p.maxHealth * shieldPct);
+      p.tempShieldAmount = Math.max(p.tempShieldAmount || 0, barrierGain);
+      p.tempShieldTimer = Math.max(p.tempShieldTimer || 0, 6.0);
+      this.triggerTimedEffect('apex_barrier', 6.0, 10.0, 'buff_apex_barrier');
+    }
+  }
+
+  private damagePlayer(
+    amount: number,
+    bypassInvuln: boolean = false,
+    attacker?: EnemyState,
+    damageSource: 'projectile' | 'melee' | 'beam' | 'other' = 'other'
+  ): void {
     const p = this.state.player;
     if (this.devPlayerInvulnerable) return;
     if (p.isDashing || (p.phaseBarrierTimer ?? 0) > 0 || p.health <= 0) return;
     if (!bypassInvuln && (p.hurtInvulnTimer ?? 0) > 0) return;
 
-    let actualDamage = amount;
+    // 20% overall enemy damage reduction across all enemy/boss damage sources
+    amount = amount * 0.8;
+
+    const prevHealth = p.health;
+    const dr = Math.min(0.85, Math.max(0, p.calculatedStats.damageReduction || 0));
+    let actualDamage = amount * (1 - dr);
+    if (damageSource === 'projectile' && (p.calculatedStats.projectileDamageMitigation || 0) > 0) {
+      actualDamage *= 1 - Math.min(0.45, p.calculatedStats.projectileDamageMitigation!);
+    } else if (damageSource === 'melee' && (p.calculatedStats.meleeDamageMitigation || 0) > 0) {
+      actualDamage *= 1 - Math.min(0.45, p.calculatedStats.meleeDamageMitigation!);
+    }
     if (p.defenseBonusTimer > 0) {
-      actualDamage = Math.round(amount * (1 - p.defenseBonusReduction));
+      actualDamage = Math.round(actualDamage * (1 - p.defenseBonusReduction));
     }
 
     // Flat armor reduction
@@ -5627,8 +6634,28 @@ export class Simulation {
       actualDamage = Math.max(1, actualDamage - p.calculatedStats.flatArmor);
     }
 
-    // Energy Shield absorbs damage first
-    if (p.energyShield > 0) {
+    // T13 Reactive Shield: Taking >15% max HP in a single hit grants 4% * n max HP shield for 3s (15s ICD)
+    const rsStacks = p.buffs.buff_reactive_shield || 0;
+    if (rsStacks > 0 && p.reactiveShieldCooldown <= 0 && actualDamage > p.maxHealth * 0.15) {
+      p.reactiveShieldCooldown = 15.0;
+      const barrierGain = Math.round(p.maxHealth * 0.04 * rsStacks);
+      p.tempShieldAmount = Math.max(p.tempShieldAmount || 0, barrierGain);
+      p.tempShieldTimer = Math.max(p.tempShieldTimer || 0, 3.0);
+    }
+
+    // Temporary Barrier Shield (Emergency Barrier / Reactive Shield / Kinetic Shell) absorbs damage first
+    if ((p.tempShieldAmount || 0) > 0) {
+      if (p.tempShieldAmount >= actualDamage) {
+        p.tempShieldAmount -= actualDamage;
+        actualDamage = 0;
+      } else {
+        actualDamage -= p.tempShieldAmount;
+        p.tempShieldAmount = 0;
+      }
+    }
+
+    // Energy Shield absorbs remaining damage
+    if (p.energyShield > 0 && actualDamage > 0) {
       if (p.energyShield >= actualDamage) {
         p.energyShield -= actualDamage;
         actualDamage = 0;
@@ -5639,16 +6666,77 @@ export class Simulation {
     }
 
     if (actualDamage > 0) {
-      p.health = Math.max(0, p.health - actualDamage);
+      p.health = Math.max(0, p.health - Math.round(actualDamage));
     }
     p.defenseBonusTimer = p.defenseBonusDuration;
     if (!bypassInvuln) {
       p.hurtInvulnTimer = 0.25;
     }
 
+    // U13 Thorns: Reflect 6% * n of incoming damage back to attacking enemy (non-recursive)
+    if (p.calculatedStats.thornsReflectFraction > 0 && amount > 0) {
+      let targetAttacker = attacker && attacker.health > 0 ? attacker : undefined;
+      if (!targetAttacker) {
+        targetAttacker = this.spatialGrid.findNearest(p.pos, 190) || undefined;
+      }
+      if (targetAttacker && targetAttacker.health > 0) {
+        const reflected = Math.max(1, Math.round(amount * p.calculatedStats.thornsReflectFraction));
+        this.damageEnemy(targetAttacker, reflected, targetAttacker.pos, 'physical', { isRecursiveTrigger: true });
+      }
+    }
+
+    let statsDirty = false;
+
+    // T09 Retaliation: Taking damage grants +2% * n all damage for 3s (non-stacking duration refresh)
+    if ((p.buffs.buff_retaliation || 0) > 0) {
+      p.retaliationTimer = 3.0;
+      statsDirty = true;
+    }
+
+    // U14 Emergency Barrier: Below 30% HP gain 4% * n max HP barrier for 3s (25s ICD)
+    if (
+      p.health > 0 &&
+      p.health / Math.max(1, p.maxHealth) < 0.30 &&
+      p.emergencyBarrierCooldown <= 0 &&
+      p.calculatedStats.emergencyBarrierFraction > 0
+    ) {
+      p.emergencyBarrierCooldown = 25.0;
+      const barrierAmt = Math.round(p.maxHealth * p.calculatedStats.emergencyBarrierFraction);
+      p.tempShieldAmount = Math.max(p.tempShieldAmount || 0, barrierAmt);
+      p.tempShieldTimer = Math.max(p.tempShieldTimer || 0, 3.0);
+    }
+
+    // T15 Survival Instinct: Dropping below 25% HP grants stun immunity (cap 1s) + move speed for 3s (30s ICD)
+    const siStacks = p.buffs.buff_survival_instinct || 0;
+    if (
+      siStacks > 0 &&
+      p.health > 0 &&
+      prevHealth / Math.max(1, p.maxHealth) >= 0.25 &&
+      p.health / Math.max(1, p.maxHealth) < 0.25 &&
+      p.survivalInstinctCooldown <= 0
+    ) {
+      p.survivalInstinctCooldown = 30.0;
+      p.stunImmunityTimer = Math.min(1.0, 0.25 * siStacks);
+      p.survivalInstinctTimer = 3.0;
+      statsDirty = true;
+    }
+
+    // T06 Final Stand: Recompute stats if crossing below 40% HP
+    if (
+      (p.buffs.buff_final_stand || 0) > 0 &&
+      prevHealth / Math.max(1, p.maxHealth) >= 0.40 &&
+      p.health / Math.max(1, p.maxHealth) < 0.40
+    ) {
+      statsDirty = true;
+    }
+
+    if (statsDirty) {
+      this.state.updateCalculatedStats();
+    }
+
     this.state.events.push({
       type: 'player_hit',
-      data: { damage: amount, remainingHealth: p.health, resolveActive: true }
+      data: { damage: Math.round(actualDamage), remainingHealth: p.health, resolveActive: true }
     });
 
     if (p.health <= 0) {
@@ -5657,7 +6745,7 @@ export class Simulation {
         p.health = Math.round(p.maxHealth * 0.6);
         this.state.events.push({
           type: 'orbital_impact',
-          data: { target: { ...p.pos }, radius: 120 }
+          data: { target: { ...p.pos }, z: p.z, radius: 120, variant: 'second_wind' }
         });
         return;
       }
@@ -5708,12 +6796,15 @@ export class Simulation {
       e.navTimer = 0.25;
       e.isTargetReachable = true;
       e.navStatus = 'direct';
-    } else if (!e.navWaypoint || distToWp < 28 || targetShifted || (e.navTimer <= 0 && this.navCalcsThisTick < 36)) {
+    } else if (
+      this.navCalcsThisTick < 36 &&
+      (!e.navWaypoint || distToWp < 28 || targetShifted || e.navTimer <= 0)
+    ) {
       const prevWp = e.navWaypoint;
       const wasPathfinding = e.navStatus === 'pathfinding';
       const midLegRefresh = !!prevWp && distToWp >= 28 && !targetShifted && (e.stuckTimer ?? 0) < 0.25;
 
-      const navRes = this.state.terrain.getNavWaypointInfo(e.pos, tPos, false);
+      const navRes = this.state.terrain.getNavWaypointInfo(e.pos, tPos, false, e.z, tZ);
       e.isTargetReachable = navRes.isReachable;
       e.navStatus = navRes.status;
       e.navGoalPos = { x: tPos.x, y: tPos.y, z: tZ };
@@ -5775,12 +6866,13 @@ export class Simulation {
     let baseVx = (ndx / nlen) * enemySpeed;
     let baseVy = (ndy / nlen) * enemySpeed;
 
-    // Controlled crowd separation steering across all nearby enemies (prevents pooling/jamming)
+    // Controlled crowd separation steering via SpatialGrid (eliminates O(N^2) scan)
     let avoidVx = 0;
     let avoidVy = 0;
     const crowdRadius = e.radius * 2.2;
-    for (let c = 0; c < this.state.enemies.length; c++) {
-      const other = this.state.enemies[c];
+    const nearbyCrowd = this.spatialGrid.getNearby(e.pos, crowdRadius + 24);
+    for (let c = 0; c < nearbyCrowd.length; c++) {
+      const other = nearbyCrowd[c];
       if (other.id === e.id || other.health <= 0) continue;
       const cdx = e.pos.x - other.pos.x;
       const cdy = e.pos.y - other.pos.y;
@@ -5864,6 +6956,10 @@ export class Simulation {
 
       // Status effects
       if (e.isStunned && e.stunTimer !== undefined) {
+        e.rangedWindupTimer = 0;
+        e.lockedAttackDir = undefined;
+        e.lockedAttackVariant = undefined;
+        e.lockedTargetPos = undefined;
         e.stunTimer -= dt;
         if (e.stunTimer <= 0) {
           e.isStunned = false;
@@ -5878,6 +6974,21 @@ export class Simulation {
         if (e.chillTimer <= 0) {
           e.isChilled = false;
           e.chillTimer = 0;
+          e.chillStrength = undefined;
+        }
+      }
+
+      if ((e.bleedTimer ?? 0) > 0) {
+        e.bleedTimer = Math.max(0, (e.bleedTimer ?? 0) - dt);
+        e.bleedTickTimer = (e.bleedTickTimer ?? 0.25) - dt;
+        if (e.bleedTickTimer <= 0) {
+          e.bleedTickTimer += 0.25;
+          const tickDmg = Math.max(1, Math.round((e.bleedDps ?? 0) * 0.25));
+          this.damageEnemy(e, tickDmg, e.pos, 'physical', { isRecursiveTrigger: true });
+          if (e.health <= 0) continue;
+        }
+        if (e.bleedTimer <= 0) {
+          e.bleedDps = 0;
         }
       }
 
@@ -5912,14 +7023,27 @@ export class Simulation {
         }
       }
 
+      const isAirborneUnit = Boolean(e.type === 'wasp' || (e.isBoss && !e.isStage1Titan));
+      const isBossInLeap = Boolean(e.isBossLeaping || e.titanState === 'leap');
+      // Height check: enemy adapts to terrain elevation (preserving under-bridge vs bridge top layers)
+      const preSample = this.state.terrain.getElevation(e.pos.x, e.pos.y, e.z, 26);
+      e.groundZ = preSample.height;
+      if (isAirborneUnit) {
+        e.z = Math.max(e.z, e.groundZ + 28);
+      } else if (!isBossInLeap && (!e.isStage1Titan || e.titanState !== 'emerging')) {
+        e.z = e.groundZ;
+      }
+      e.inWater = Boolean(!isAirborneUnit && preSample.isInWater && e.z <= preSample.height + 10);
+
       const isCorruption = this.isCorruptionActive();
       const corruptionFrenzy = isCorruption ? 1.35 : 1.0;
-      const slowFactor = e.isChilled ? 0.5 : (e.toxicSlowTimer ?? 0) > 0 ? 0.70 : 1.0;
-      const enemySpeed = e.speed * slowFactor * corruptionFrenzy;
-
-      // Height check: enemy adapts to terrain elevation
-      e.groundZ = this.state.terrain.getElevation(e.pos.x, e.pos.y).height;
-      e.z = e.groundZ;
+      const slowFactor = e.isChilled
+        ? Math.max(0.15, 1 - (e.chillStrength ?? 0.50))
+        : (e.toxicSlowTimer ?? 0) > 0
+          ? 0.70
+          : 1.0;
+      const waterPenalty = e.inWater ? 0.5 : 1.0;
+      const enemySpeed = e.speed * slowFactor * corruptionFrenzy * waterPenalty;
 
       // Holographic Decoy taunt: non-Stage1Titan enemies within decoy tauntRadius divert aggro to decoy
       let targetDecoy: HolographicDecoyState | null = null;
@@ -5945,9 +7069,9 @@ export class Simulation {
         if (targetDecoy) {
           targetDecoy.hitsRemaining = Math.max(0, targetDecoy.hitsRemaining - 1);
         } else {
-          this.damagePlayer(dmg);
+          this.damagePlayer(dmg, false, e, 'melee');
           if (p.calculatedStats.thornsDamage > 0) {
-            this.damageEnemy(e, p.calculatedStats.thornsDamage, e.pos);
+            this.damageEnemy(e, p.calculatedStats.thornsDamage, e.pos, undefined, { isRecursiveTrigger: true });
           }
         }
       };
@@ -5999,74 +7123,119 @@ export class Simulation {
           moveVy = (dx / dist) * (enemySpeed * 0.65);
         }
 
-        // Brood Queen Ranged Attacks: alternate between Triple Royal Stinger Fan and Volatile Spore Bomb
-        if (dist <= 520 && e.attackCooldownRemaining <= 0) {
-          e.attackCooldownRemaining = e.attackCooldown;
-          const originZ = e.z + 40;
-          const targetZ = targetPosZ + 26;
-          const dz = targetZ - originZ;
+        // Brood Queen Ranged Attacks: visible 0.8s windup -> locked aim -> 2 separated stingers or 1 spore bomb (-35% frequency)
+        const canBossShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS[e.type]);
+        if ((e.rangedWindupTimer ?? 0) > 0) {
+          moveVx *= 0.15;
+          moveVy *= 0.15;
+          e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
+          if (e.rangedWindupTimer <= 0 && canBossShoot) {
+            const originZ = e.z + 40;
+            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 26 - originZ };
+            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 26 };
+            const ldx = lockedDir.x;
+            const ldy = lockedDir.y;
+            const lDist = Math.hypot(ldx, ldy) || 1;
+            const ldz = lockedDir.z;
+            const attackInstanceId = this.nextEnemyAttackInstanceId++;
 
-          if (dist >= 110 && this.state.rng.next() < 0.35) {
-            // Brood Queen Attack 2: Volatile Spore Bomb (Lobbed on true 3D ballistic arc)
-            const bombSpeed = Math.max(160, dist * 0.85);
-            const timeToTarget = Math.max(0.6, dist / bombSpeed);
-            const gravity = 360;
-            const bombVz = (dz / timeToTarget) + 0.5 * gravity * timeToTarget;
+            if (e.lockedAttackVariant === 'spore_bomb') {
+              const bombSpeed = Math.max(150, lDist * 0.85);
+              const timeToTarget = Math.max(0.65, lDist / bombSpeed);
+              const gravity = 360;
+              const bombVz = (ldz / timeToTarget) + 0.5 * gravity * timeToTarget;
 
-            this.state.projectiles.push({
-              id: `proj_${this.nextProjId++}`,
-              type: 'spore_bomb',
-              pos: { x: e.pos.x, y: e.pos.y },
-              z: originZ,
-              velocity: { x: (dx / dist) * bombSpeed, y: (dy / dist) * bombSpeed },
-              vz: bombVz,
-              speed: bombSpeed,
-              damage: 20,
-              pierceCount: 1,
-              maxDistance: Math.max(120, dist),
-              distanceTraveled: 0,
-              owner: 'enemy',
-              radius: 16,
-              hitEnemyIds: new Set(),
-              originZ,
-              targetZ
-            });
-          } else {
-            // Brood Queen Attack 1: Triple Royal Stinger Fan in true 3D
-            const stingerSpeed = 340;
-            const baseAng = Math.atan2(dy, dx);
-            const dist3D = Math.hypot(dx, dy, dz) || 1;
-            const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
-            const horizSpeed = Math.cos(pitch) * stingerSpeed;
-            const vz = Math.sin(pitch) * stingerSpeed;
-
-            const fanAngles = [-0.28, 0, 0.28];
-            for (let f = 0; f < fanAngles.length; f++) {
-              const ang = baseAng + fanAngles[f];
               this.state.projectiles.push({
                 id: `proj_${this.nextProjId++}`,
-                type: 'queen_stinger',
+                type: 'spore_bomb',
                 pos: { x: e.pos.x, y: e.pos.y },
                 z: originZ,
-                velocity: { x: Math.cos(ang) * horizSpeed, y: Math.sin(ang) * horizSpeed },
-                vz,
-                speed: stingerSpeed,
-                damage: 12,
+                velocity: { x: (ldx / lDist) * bombSpeed, y: (ldy / lDist) * bombSpeed },
+                vz: bombVz,
+                speed: bombSpeed,
+                damage: ENEMY_COMBAT_BALANCE.broodQueenSporeBombDamage,
                 pierceCount: 1,
-                maxDistance: 540,
+                maxDistance: Math.max(120, lDist),
                 distanceTraveled: 0,
                 owner: 'enemy',
-                radius: 12,
+                radius: ENEMY_COMBAT_BALANCE.broodQueenSporeBombRadius,
                 hitEnemyIds: new Set(),
                 originZ,
-                targetZ
+                targetZ: lockedTgt.z,
+                attackInstanceId
               });
+            } else {
+              // Dual Separated Stinger Split (dodgeable open center lane, zero post-launch tracking)
+              const stingerSpeed = ENEMY_COMBAT_BALANCE.broodQueenStingerSpeed;
+              const baseAng = Math.atan2(ldy, ldx);
+              const dist3D = Math.hypot(ldx, ldy, ldz) || 1;
+              const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, ldz / dist3D)));
+              const horizSpeed = Math.cos(pitch) * stingerSpeed;
+              const vz = Math.sin(pitch) * stingerSpeed;
+              const fanAngles = ENEMY_COMBAT_BALANCE.broodQueenStingerAngles;
+
+              for (let f = 0; f < fanAngles.length; f++) {
+                const ang = baseAng + fanAngles[f];
+                this.state.projectiles.push({
+                  id: `proj_${this.nextProjId++}`,
+                  type: 'queen_stinger',
+                  pos: { x: e.pos.x, y: e.pos.y },
+                  z: originZ,
+                  velocity: { x: Math.cos(ang) * horizSpeed, y: Math.sin(ang) * horizSpeed },
+                  vz,
+                  speed: stingerSpeed,
+                  damage: ENEMY_COMBAT_BALANCE.broodQueenStingerDamage,
+                  pierceCount: 1,
+                  maxDistance: 540,
+                  distanceTraveled: 0,
+                  owner: 'enemy',
+                  radius: ENEMY_COMBAT_BALANCE.broodQueenStingerRadius,
+                  hitEnemyIds: new Set(),
+                  originZ,
+                  targetZ: lockedTgt.z,
+                  attackInstanceId
+                });
+              }
             }
+
+            e.lockedAttackDir = undefined;
+            e.lockedAttackVariant = undefined;
+            e.lockedTargetPos = undefined;
+            e.attackCooldownRemaining = Math.max(
+              0.45,
+              (e.attackCooldown || ENEMY_COMBAT_BALANCE.broodQueenCycleInterval) - ENEMY_COMBAT_BALANCE.broodQueenWindup
+            );
+            this.state.events.push({
+              type: 'enemy_projectile_fired',
+              data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
+            });
+          }
+        } else if (canBossShoot && dist <= 560 && e.attackCooldownRemaining <= 0) {
+          const originZ = e.z + 80;
+          const targetZ = targetPosZ + 52;
+          if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 420)) {
+            e.lockedAttackVariant = dist >= 130 && this.state.rng.next() < 0.35 ? 'spore_bomb' : 'stinger';
+            e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
+            e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
+            e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.broodQueenWindup;
+            e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.broodQueenWindup;
+            this.state.events.push({
+              type: 'enemy_attack_windup',
+              data: {
+                id: e.id,
+                type: e.type,
+                variant: e.lockedAttackVariant,
+                pos: { ...e.pos },
+                z: originZ,
+                aimDir: { ...e.lockedAttackDir },
+                duration: ENEMY_COMBAT_BALANCE.broodQueenWindup
+              }
+            });
           }
         }
 
         // Swoop contact damage
-        if (dist <= e.radius + 24 && Math.abs(targetPosZ - e.z) < 55) {
+        if (dist <= e.radius + 44 && Math.abs(targetPosZ - e.z) < 95) {
           if ((e.contactCooldownRemaining ?? 0) <= 0) {
             e.contactCooldownRemaining = e.attackCooldown;
             applyTargetDamage(e.touchDamage);
@@ -6074,60 +7243,101 @@ export class Simulation {
         }
       } else if (e.isElite || e.type === 'elite') {
         // --- 2. VOID GOLIATH (ELITE CHITIN TANK) ---
-        const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
-        moveVx = move.vx;
-        moveVy = move.vy;
+        const canEliteShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS.elite);
+        if ((e.rangedWindupTimer ?? 0) > 0) {
+          // Hold braced ground-slam stance during 0.6s windup with locked direction
+          moveVx = 0;
+          moveVy = 0;
+          e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
+          if (e.rangedWindupTimer <= 0 && canEliteShoot) {
+            const originZ = e.z + 44;
+            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 52 - originZ };
+            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 52 };
+            const shardSpeed = ENEMY_COMBAT_BALANCE.eliteProjectileSpeed;
+            const dist3D = Math.hypot(lockedDir.x, lockedDir.y, lockedDir.z) || 1;
+            const vx = (lockedDir.x / dist3D) * shardSpeed;
+            const vy = (lockedDir.y / dist3D) * shardSpeed;
+            const vz = (lockedDir.z / dist3D) * shardSpeed;
+            const attackInstanceId = this.nextEnemyAttackInstanceId++;
 
-        // Seismic Shard Ground Slam (Launched forward in 3D toward target)
-        if (dist >= 140 && dist <= 380 && e.attackCooldownRemaining <= 0) {
-          e.attackCooldownRemaining = e.attackCooldown * 1.5;
-          const shardSpeed = 260;
-          const baseAng = Math.atan2(dy, dx);
-          const originZ = e.z + 20;
-          const targetZ = targetPosZ + 26;
-          const dz = targetZ - originZ;
-          const dist3D = Math.hypot(dx, dy, dz) || 1;
-          const pitch = Math.asin(Math.max(-0.95, Math.min(0.95, dz / dist3D)));
-          const horizSpeed = Math.cos(pitch) * shardSpeed;
-          const vz = Math.sin(pitch) * shardSpeed;
-
-          const shardAngles = [-0.22, 0, 0.22];
-          for (let s = 0; s < shardAngles.length; s++) {
-            const ang = baseAng + shardAngles[s];
+            // Single fair Seismic Shard projectile (reduced from 3)
             this.state.projectiles.push({
               id: `proj_${this.nextProjId++}`,
               type: 'seismic_shard',
               pos: { x: e.pos.x, y: e.pos.y },
               z: originZ,
-              velocity: { x: Math.cos(ang) * horizSpeed, y: Math.sin(ang) * horizSpeed },
+              velocity: { x: vx, y: vy },
               vz,
               speed: shardSpeed,
-              damage: 17,
+              damage: ENEMY_COMBAT_BALANCE.eliteProjectileDamage,
               pierceCount: 1,
-              maxDistance: 400,
+              maxDistance: 440,
               distanceTraveled: 0,
               owner: 'enemy',
-              radius: 14,
+              radius: ENEMY_COMBAT_BALANCE.eliteProjectileRadius,
               hitEnemyIds: new Set(),
               originZ,
-              targetZ
+              targetZ: lockedTgt.z,
+              attackInstanceId
+            });
+
+            e.lockedAttackDir = undefined;
+            e.lockedAttackVariant = undefined;
+            e.lockedTargetPos = undefined;
+            const cycleScale = Math.max(0.8, e.attackCooldown / Math.max(0.01, ENEMY_CONFIGS.elite.attackCooldown));
+            e.attackCooldownRemaining = Math.max(
+              0.95,
+              ENEMY_COMBAT_BALANCE.eliteRangedCycleInterval * cycleScale - ENEMY_COMBAT_BALANCE.eliteRangedWindup
+            );
+            this.state.events.push({
+              type: 'enemy_projectile_fired',
+              data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
             });
           }
-        }
+        } else {
+          const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
+          moveVx = move.vx;
+          moveVy = move.vy;
 
-        // Heavy contact crush
-        if (dist <= e.radius + 20 && Math.abs(targetPosZ - e.z) < 32) {
-          if (e.attackCooldownRemaining <= 0) {
-            e.attackCooldownRemaining = e.attackCooldown;
-            applyTargetDamage(e.touchDamage);
+          // Initiate 0.6s Seismic Shard windup with locked target direction (requires 3D LOS & elevation match)
+          if (canEliteShoot && dist >= 140 && dist <= 420 && e.attackCooldownRemaining <= 0) {
+            const originZ = e.z + 44;
+            const targetZ = targetPosZ + 52;
+            if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 280)) {
+              e.lockedAttackVariant = 'seismic_shard';
+              e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
+              e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
+              e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.eliteRangedWindup;
+              e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.eliteRangedWindup;
+              this.state.events.push({
+                type: 'enemy_attack_windup',
+                data: {
+                  id: e.id,
+                  type: e.type,
+                  variant: 'seismic_shard',
+                  pos: { ...e.pos },
+                  z: originZ,
+                  aimDir: { ...e.lockedAttackDir },
+                  duration: ENEMY_COMBAT_BALANCE.eliteRangedWindup
+                }
+              });
+            }
+          }
+
+          // Heavy contact crush (reaches past 2x player body separation)
+          if ((e.rangedWindupTimer ?? 0) <= 0 && dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 76) {
+            if (e.attackCooldownRemaining <= 0) {
+              e.attackCooldownRemaining = e.attackCooldown;
+              applyTargetDamage(e.touchDamage);
+            }
           }
         }
       } else if (e.type === 'wasp') {
-        // --- 3. VOID WASP (AERIAL BIO-ELECTRIC STINGER) ---
-        if (dist > 180) {
+        // --- 3. VOID WASP (AERIAL BIO-ELECTRIC STINGER — AUTHORIZED FLYER) ---
+        if (dist > 200) {
           moveVx = (dx / dist) * enemySpeed;
           moveVy = (dy / dist) * enemySpeed;
-        } else if (dist < 110) {
+        } else if (dist < 120) {
           moveVx = -(dx / dist) * (enemySpeed * 0.6);
           moveVy = -(dy / dist) * (enemySpeed * 0.6);
         } else {
@@ -6135,93 +7345,105 @@ export class Simulation {
           moveVy = (dy / dist) * enemySpeed;
         }
 
-        // Bio-Electric Needle Stinger shot in true 3D
-        if (dist >= 90 && dist <= 280 && e.attackCooldownRemaining <= 0) {
-          e.attackCooldownRemaining = e.attackCooldown * 1.6;
-          const stingerSpeed = 360;
-          const originZ = e.z + 18;
-          const targetZ = targetPosZ + 26;
-          const dz = targetZ - originZ;
-          const dist3D = Math.hypot(dx, dy, dz) || 1;
-          const vx = (dx / dist3D) * stingerSpeed;
-          const vy = (dy / dist3D) * stingerSpeed;
-          const vz = (dz / dist3D) * stingerSpeed;
+        const canWaspShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS.wasp);
+        if ((e.rangedWindupTimer ?? 0) > 0) {
+          moveVx *= 0.25;
+          moveVy *= 0.25;
+          e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
+          if (e.rangedWindupTimer <= 0 && canWaspShoot) {
+            const originZ = e.z + 36;
+            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 52 - originZ };
+            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 52 };
+            const stingerSpeed = ENEMY_COMBAT_BALANCE.waspProjectileSpeed;
+            const dist3D = Math.hypot(lockedDir.x, lockedDir.y, lockedDir.z) || 1;
+            const vx = (lockedDir.x / dist3D) * stingerSpeed;
+            const vy = (lockedDir.y / dist3D) * stingerSpeed;
+            const vz = (lockedDir.z / dist3D) * stingerSpeed;
+            const attackInstanceId = this.nextEnemyAttackInstanceId++;
 
-          this.state.projectiles.push({
-            id: `proj_${this.nextProjId++}`,
-            type: 'wasp_sting',
-            pos: { x: e.pos.x, y: e.pos.y },
-            z: originZ,
-            velocity: { x: vx, y: vy },
-            vz,
-            speed: stingerSpeed,
-            damage: 11,
-            pierceCount: 1,
-            maxDistance: 320,
-            distanceTraveled: 0,
-            owner: 'enemy',
-            radius: 8,
-            hitEnemyIds: new Set(),
-            originZ,
-            targetZ
-          });
+            this.state.projectiles.push({
+              id: `proj_${this.nextProjId++}`,
+              type: 'wasp_sting',
+              pos: { x: e.pos.x, y: e.pos.y },
+              z: originZ,
+              velocity: { x: vx, y: vy },
+              vz,
+              speed: stingerSpeed,
+              damage: ENEMY_COMBAT_BALANCE.waspProjectileDamage,
+              pierceCount: 1,
+              maxDistance: 360,
+              distanceTraveled: 0,
+              owner: 'enemy',
+              radius: ENEMY_COMBAT_BALANCE.waspProjectileRadius,
+              hitEnemyIds: new Set(),
+              originZ,
+              targetZ: lockedTgt.z,
+              attackInstanceId
+            });
+
+            e.lockedAttackDir = undefined;
+            e.lockedAttackVariant = undefined;
+            e.lockedTargetPos = undefined;
+            const cycleScale = Math.max(0.8, e.attackCooldown / Math.max(0.01, ENEMY_CONFIGS.wasp.attackCooldown));
+            e.attackCooldownRemaining = Math.max(
+              1.1,
+              ENEMY_COMBAT_BALANCE.waspRangedCycleInterval * cycleScale - ENEMY_COMBAT_BALANCE.waspRangedWindup
+            );
+            this.state.events.push({
+              type: 'enemy_projectile_fired',
+              data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
+            });
+          }
+        } else if (canWaspShoot && dist >= 100 && dist <= 320 && e.attackCooldownRemaining <= 0) {
+          const originZ = e.z + 36;
+          const targetZ = targetPosZ + 52;
+          if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 300)) {
+            e.lockedAttackVariant = 'wasp_sting';
+            e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
+            e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
+            e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.waspRangedWindup;
+            e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.waspRangedWindup;
+            this.state.events.push({
+              type: 'enemy_attack_windup',
+              data: {
+                id: e.id,
+                type: e.type,
+                variant: 'wasp_sting',
+                pos: { ...e.pos },
+                z: originZ,
+                aimDir: { ...e.lockedAttackDir },
+                duration: ENEMY_COMBAT_BALANCE.waspRangedWindup
+              }
+            });
+          }
         }
 
         // Contact dive
-        if (dist <= e.radius + 18 && Math.abs(targetPosZ - e.z) < 40) {
+        if ((e.rangedWindupTimer ?? 0) <= 0 && dist <= e.radius + 44 && Math.abs(targetPosZ - e.z) < 82) {
           if (e.attackCooldownRemaining <= 0) {
             e.attackCooldownRemaining = e.attackCooldown;
             applyTargetDamage(e.touchDamage);
           }
         }
       } else if (e.type === 'spitter') {
-        // --- 4. TOXIC SPITTER (CORROSIVE ACID GLOBULE) ---
-        if (dist > 320) {
-          const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
-          moveVx = move.vx;
-          moveVy = move.vy;
-        } else if (dist < 220) {
-          moveVx = -(dx / dist) * (enemySpeed * 0.7);
-          moveVy = -(dy / dist) * (enemySpeed * 0.7);
-        }
-
-        if (dist <= e.attackRange && e.attackCooldownRemaining <= 0) {
-          e.attackCooldownRemaining = e.attackCooldown;
-          const acidSpeed = 300;
-          const originZ = e.z + 18;
-          const targetZ = targetPosZ + 26;
-          const dz = targetZ - originZ;
-          const dist3D = Math.hypot(dx, dy, dz) || 1;
-          const vx = (dx / dist3D) * acidSpeed;
-          const vy = (dy / dist3D) * acidSpeed;
-          const vz = (dz / dist3D) * acidSpeed;
-
-          this.state.projectiles.push({
-            id: `proj_${this.nextProjId++}`,
-            type: 'acid',
-            pos: { x: e.pos.x, y: e.pos.y },
-            z: originZ,
-            velocity: { x: vx, y: vy },
-            vz,
-            speed: acidSpeed,
-            damage: 16, // Balanced (-25% difficulty)
-            pierceCount: 1,
-            maxDistance: 440,
-            distanceTraveled: 0,
-            owner: 'enemy',
-            radius: 11,
-            hitEnemyIds: new Set(),
-            originZ,
-            targetZ
-          });
-        }
-      } else {
-        // --- 5. VOID CRAWLER (GROUND SWARM MELEE) ---
+        // --- 4. TOXIC SPITTER (CLOSE-RANGE CORROSIVE MELEE — NO PROJECTILES) ---
         const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
         moveVx = move.vx;
         moveVy = move.vy;
 
-        if (dist <= e.radius + 20 && Math.abs(targetPosZ - e.z) < 32) {
+        if (dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 72) {
+          if (e.attackCooldownRemaining <= 0) {
+            e.attackCooldownRemaining = e.attackCooldown;
+            applyTargetDamage(e.touchDamage);
+          }
+        }
+      } else {
+        // --- 5. VOID CRAWLER (GROUND SWARM MELEE — NO PROJECTILES) ---
+        const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
+        moveVx = move.vx;
+        moveVy = move.vy;
+
+        if (dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 72) {
           if (e.attackCooldownRemaining <= 0) {
             e.attackCooldownRemaining = e.attackCooldown;
             applyTargetDamage(e.touchDamage);
@@ -6230,9 +7452,8 @@ export class Simulation {
       }
 
       // Check terrain traversability: flyers clear low ground/gaps but avoid flying through taller cliffs; ground units slide along slopes
-      const isAirborneUnit = Boolean(e.type === 'wasp' || (e.isBoss && !e.isStage1Titan));
-      const colRadius = e.isStage1Titan ? 32 : Math.min(e.radius, 24);
-      if (moveVx !== 0 || moveVy !== 0) {
+      const colRadius = e.isStage1Titan ? 56 : Math.min(e.radius, 36);
+      if (!e.isBossLeaping && (moveVx !== 0 || moveVy !== 0)) {
         const prevX = e.pos.x;
         const prevY = e.pos.y;
         const nextX = e.pos.x + moveVx * dt;
@@ -6304,19 +7525,23 @@ export class Simulation {
       e.pos.x = clampedEnemy.pos.x;
       e.pos.y = clampedEnemy.pos.y;
 
-      this.resolveObstacleCollisions(e.pos, e.radius, e.isStage1Titan);
+      if (!e.isBossLeaping) {
+        this.resolveObstacleCollisions(e.pos, e.radius, e.isStage1Titan);
+      }
 
-      if (!isAirborneUnit && (!e.isStage1Titan || e.titanState !== 'emerging')) {
+      if (!e.isBossLeaping && !isAirborneUnit && (!e.isStage1Titan || e.titanState !== 'emerging')) {
         this.state.terrain.pushOutOfSteepTerrain(e.pos, e.z, colRadius);
       }
 
       // Keep entity elevations synchronized with terrain (airborne flyers stay above terrain peaks)
-      e.groundZ = this.state.terrain.getElevation(e.pos.x, e.pos.y).height;
+      const postSample = this.state.terrain.getElevation(e.pos.x, e.pos.y, e.z, 56);
+      e.groundZ = postSample.height;
       if (isAirborneUnit) {
-        e.z = Math.max(e.z, e.groundZ + 28);
-      } else if (!e.isStage1Titan || e.titanState !== 'emerging') {
+        e.z = Math.max(e.z, e.groundZ + 56);
+      } else if (!e.isBossLeaping && (!e.isStage1Titan || e.titanState !== 'emerging')) {
         e.z = e.groundZ;
       }
+      e.inWater = Boolean(!isAirborneUnit && postSample.isInWater && e.z <= postSample.height + 10);
 
       if (e.isStage1Titan && e.titanState === 'dying' && (e.titanTimer ?? 0) <= 0) {
         continue;
@@ -6330,9 +7555,28 @@ export class Simulation {
   }
 
   /**
-   * Circle-circle collision resolution between enemies and between player and enemies.
-   * Prevents enemies from collapsing into the same coordinates and stacking like flat paper sprites.
-   * Naturally forms flanking swarm behavior with mass-weighted push resistance for Elites & Bosses.
+   * Checks vertical proximity AND unobstructed 3D terrain Line-of-Sight before an enemy can
+   * initiate a ranged attack or telegraph — prevents enemies underneath the Tower or behind cliffs
+   * from locking on and projecting attack telegraphs through solid walls/floors.
+   */
+  private hasEnemyAttackLOS3D(
+    fromPos: Vector2,
+    fromZ: number,
+    toPos: Vector2,
+    toZ: number,
+    maxVertDelta: number
+  ): boolean {
+    if (Math.abs(toZ - fromZ) > maxVertDelta) return false;
+    return this.state.terrain.checkLineOfSight3D(
+      { x: fromPos.x, y: fromPos.y, z: fromZ },
+      { x: toPos.x, y: toPos.y, z: toZ }
+    );
+  }
+
+  /**
+   * 3D cylinder collision resolution between enemies and between player and enemies.
+   * Requires vertical elevation overlap so enemies below bridges or inside/under the Tower
+   * can NEVER push the player standing on top of the Tower Summit.
    */
   private resolveEnemyCollisions(): void {
     const enemies = this.state.enemies;
@@ -6340,23 +7584,36 @@ export class Simulation {
     if (len === 0) return;
 
     const p = this.state.player;
-    const playerRadius = 22;
+    const playerRadius = 40;
 
-    // 3 relaxation iterations for firm, non-overlapping circle-circle separation
+    // 3 relaxation iterations using SpatialGrid neighbor lookup (eliminates O(N^2) loops)
     for (let iter = 0; iter < 3; iter++) {
+      if (iter > 0) {
+        this.spatialGrid.clear();
+        for (let i = 0; i < len; i++) {
+          if (enemies[i].health > 0) this.spatialGrid.insert(enemies[i]);
+        }
+      }
+
       // 1. Enemy vs Enemy Collision
       for (let i = 0; i < len; i++) {
         const e1 = enemies[i];
-        if (e1.health <= 0 || e1.isSpawning || (e1.isStage1Titan && (e1.titanState === 'emerging' || e1.titanState === 'dying'))) continue;
+        if (e1.health <= 0 || e1.isSpawning || e1.isBossLeaping || (e1.isStage1Titan && (e1.titanState === 'emerging' || e1.titanState === 'dying' || e1.titanState === 'leap'))) continue;
 
-        for (let j = i + 1; j < len; j++) {
-          const e2 = enemies[j];
-          if (e2.health <= 0 || e2.isSpawning || (e2.isStage1Titan && (e2.titanState === 'emerging' || e2.titanState === 'dying'))) continue;
+        const searchR = e1.radius + 160;
+        const neighbors = this.spatialGrid.getNearby(e1.pos, searchR);
+        for (let ni = 0; ni < neighbors.length; ni++) {
+          const e2 = neighbors[ni];
+          if (e2.id <= e1.id) continue; // Deduplicate pair checks & self-check
+          if (e2.health <= 0 || e2.isSpawning || e2.isBossLeaping || (e2.isStage1Titan && (e2.titanState === 'emerging' || e2.titanState === 'dying' || e2.titanState === 'leap'))) continue;
 
-          let dx = e1.pos.x - e2.pos.x;
-          let dy = e1.pos.y - e2.pos.y;
+          const pairVertBand = (e1.isStage1Titan || e2.isStage1Titan) ? 320 : 120;
+          if (Math.abs(e1.z - e2.z) > pairVertBand) continue;
+
+          const dx = e1.pos.x - e2.pos.x;
+          const dy = e1.pos.y - e2.pos.y;
           const minDist = e1.radius + e2.radius;
-          let distSq = dx * dx + dy * dy;
+          const distSq = dx * dx + dy * dy;
 
           if (distSq < minDist * minDist) {
             let dist = Math.sqrt(distSq);
@@ -6366,17 +7623,14 @@ export class Simulation {
               nx = dx / dist;
               ny = dy / dist;
             } else {
-              // Exact center overlap: pick deterministic divergent angle based on index
-              const angle = (i * 2.39996 + j * 1.618);
+              // Exact center overlap: deterministic divergent angle
+              const angle = (i * 2.39996 + ni * 1.618);
               nx = Math.cos(angle);
               ny = Math.sin(angle);
               dist = 0.001;
             }
 
             const overlap = minDist - dist;
-
-            // Mass-weighted repulsion:
-            // Titan: mass 50, Boss: mass 15, Elite: mass 5, Swarm Crawler / Spitter / Wasp: mass 1
             const m1 = e1.isStage1Titan ? 50 : (e1.isBoss ? 15 : (e1.isElite ? 5 : 1));
             const m2 = e2.isStage1Titan ? 50 : (e2.isBoss ? 15 : (e2.isElite ? 5 : 1));
             const totalMass = m1 + m2;
@@ -6391,29 +7645,32 @@ export class Simulation {
           }
         }
 
-        // 2. Player vs Enemy Collision: keep physical personal space around player
-        let pdx = e1.pos.x - p.pos.x;
-        let pdy = e1.pos.y - p.pos.y;
-        const playerMinDist = e1.radius + playerRadius;
-        let pDistSq = pdx * pdx + pdy * pdy;
+        // 2. Player vs Enemy Collision: require 3D vertical overlap so enemies below the Tower NEVER shove the player!
+        const playerVertBand = e1.isStage1Titan ? 320 : (e1.isBoss ? 180 : 115);
+        if (Math.abs(e1.z - p.z) <= playerVertBand) {
+          const pdx = e1.pos.x - p.pos.x;
+          const pdy = e1.pos.y - p.pos.y;
+          const playerMinDist = e1.radius + playerRadius;
+          const pDistSq = pdx * pdx + pdy * pdy;
 
-        if (pDistSq < playerMinDist * playerMinDist) {
-          let pDist = Math.sqrt(pDistSq);
-          let pnx = 1;
-          let pny = 0;
-          if (pDist > 0.001) {
-            pnx = pdx / pDist;
-            pny = pdy / pDist;
-          }
-          const pOverlap = playerMinDist - pDist;
-          if (e1.isBoss || e1.isElite) {
-            p.pos.x -= pnx * pOverlap * 0.35;
-            p.pos.y -= pny * pOverlap * 0.35;
-            e1.pos.x += pnx * pOverlap * 0.65;
-            e1.pos.y += pny * pOverlap * 0.65;
-          } else {
-            e1.pos.x += pnx * pOverlap * 0.95;
-            e1.pos.y += pny * pOverlap * 0.95;
+          if (pDistSq < playerMinDist * playerMinDist) {
+            let pDist = Math.sqrt(pDistSq);
+            let pnx = 1;
+            let pny = 0;
+            if (pDist > 0.001) {
+              pnx = pdx / pDist;
+              pny = pdy / pDist;
+            }
+            const pOverlap = playerMinDist - pDist;
+            if (e1.isBoss || e1.isElite) {
+              p.pos.x -= pnx * pOverlap * 0.35;
+              p.pos.y -= pny * pOverlap * 0.35;
+              e1.pos.x += pnx * pOverlap * 0.65;
+              e1.pos.y += pny * pOverlap * 0.65;
+            } else {
+              e1.pos.x += pnx * pOverlap * 0.95;
+              e1.pos.y += pny * pOverlap * 0.95;
+            }
           }
         }
       }
@@ -6424,222 +7681,112 @@ export class Simulation {
       const e = enemies[i];
       if (e.health <= 0 || e.isSpawning) continue;
       const isAirborneUnit = Boolean(e.type === 'wasp' || (e.isBoss && !e.isStage1Titan));
-      if (!isAirborneUnit && (!e.isStage1Titan || (e.titanState !== 'emerging' && e.titanState !== 'dying'))) {
-        const colRadius = e.isStage1Titan ? 32 : Math.min(e.radius, 24);
+      const isBossInLeap = Boolean(e.isBossLeaping || e.titanState === 'leap');
+      if (!isBossInLeap && !isAirborneUnit && (!e.isStage1Titan || (e.titanState !== 'emerging' && e.titanState !== 'dying'))) {
+        const colRadius = e.isStage1Titan ? 56 : Math.min(e.radius, 36);
         this.state.terrain.pushOutOfSteepTerrain(e.pos, e.z, colRadius);
       }
       const clampedEnemy = this.state.terrain.clampToPlayableBounds(e.pos, 30);
       e.pos.x = clampedEnemy.pos.x;
       e.pos.y = clampedEnemy.pos.y;
-      e.groundZ = this.state.terrain.calculateHeight(e.pos.x, e.pos.y);
+      e.groundZ = this.state.terrain.getElevation(e.pos.x, e.pos.y, e.z, 56).height;
       if (isAirborneUnit) {
-        e.z = Math.max(e.z, e.groundZ + 28);
-      } else if (!e.isStage1Titan || (e.titanState !== 'emerging' && e.titanState !== 'dying')) {
+        e.z = Math.max(e.z, e.groundZ + 56);
+      } else if (!isBossInLeap && (!e.isStage1Titan || (e.titanState !== 'emerging' && e.titanState !== 'dying'))) {
         e.z = e.groundZ;
       }
     }
 
     if (p.isGrounded && !p.isJumping) {
-      this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 18);
+      this.state.terrain.pushOutOfSteepTerrain(p.pos, p.z, 30);
       const clampedPlayer = this.state.terrain.clampToPlayableBounds(p.pos, 45);
       p.pos.x = clampedPlayer.pos.x;
       p.pos.y = clampedPlayer.pos.y;
-      p.groundZ = this.state.terrain.calculateHeight(p.pos.x, p.pos.y);
-      if (p.groundZ <= p.z + this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y, p.groundZ)) {
+      const pStepLim = this.state.terrain.getStepUpLimitAt(p.pos.x, p.pos.y);
+      p.groundZ = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, pStepLim).height;
+      if (p.groundZ <= p.z + pStepLim && p.groundZ >= p.z - 95) {
         p.z = p.groundZ;
       }
     }
   }
 
-  private updateEnemySpawning(dt: number): void {
-    const p = this.state.player;
-    this.enemySpawnTimer -= dt;
-
+  private spawnDirectorEnemy(type: EnemyType, pos: Vector2, groundHeight: number): void {
     const { tierDef } = getDifficultyTier(this.state.gameTime);
+    const rng = this.state.directorRng;
+    const cfg = ENEMY_CONFIGS[type];
+    const scaledHealth = Math.round(cfg.maxHealth * tierDef.hpMultiplier);
+    const scaledDamage = Math.round(cfg.touchDamage * tierDef.damageMultiplier);
+    const scaledSpeed = cfg.speed * tierDef.speedMultiplier + rng.range(-6, 6);
+    const angle = rng.range(0, Math.PI * 2);
 
-    // Max enemy cap scales with difficulty (from 28 up to 60)
-    const maxEnemies = 28 + tierDef.tier * 4;
-    if (this.state.enemies.length >= maxEnemies) return;
+    const enemy: EnemyState = {
+      id: `enemy_${this.nextEnemyId++}`,
+      type,
+      pos: { x: pos.x, y: pos.y },
+      velocity: { x: 0, y: 0 },
+      z: type === 'wasp' ? groundHeight + 28 : groundHeight - 24,
+      groundZ: groundHeight,
+      health: scaledHealth,
+      maxHealth: scaledHealth,
+      speed: scaledSpeed,
+      touchDamage: scaledDamage,
+      attackCooldown: cfg.attackCooldown * Math.max(0.80, 1 - tierDef.tier * 0.03),
+      attackCooldownRemaining: 1.25,
+      attackRange: cfg.attackRange,
+      isElite: cfg.isElite || type === 'elite',
+      isBoss: cfg.isBoss,
+      isScriptedEventEnemy: false,
+      currencyReward: Math.round(cfg.currencyReward * (1 + tierDef.tier * 0.18)),
+      xpReward: Math.round(cfg.xpReward * (1 + tierDef.tier * 0.22)),
+      radius: cfg.radius,
+      isSpawning: true,
+      spawnProgress: 0,
+      spawnDuration: 1.25,
+      isAlerted: true,
+      wanderDir: { x: Math.cos(angle), y: Math.sin(angle) },
+      wanderTimer: rng.range(2.0, 4.0)
+    };
 
-    // Spawn interval accelerates as difficulty bar passes each tier
-    const baseSpawnInterval = Math.max(0.60, (2.6 - this.state.gameTime * 0.010) * tierDef.spawnIntervalMultiplier);
-
-    if (this.enemySpawnTimer <= 0) {
-      this.enemySpawnTimer = baseSpawnInterval;
-
-      // Enemy batch count increases with difficulty
-      const count = Math.min(5, Math.floor(1 + this.state.gameTime / 45) + tierDef.batchBonus);
-      const restrictedCells = this.state.terrain.testEnemySpawnCells;
-      const enabledRegions = (this.state.enemySpawnRegions || []).filter((r) => r.enabled && r.allowedTypes.length > 0);
-      for (let k = 0; k < count; k++) {
-        let sx = 0;
-        let sy = 0;
-        let angle = this.state.rng.range(0, Math.PI * 2);
-        let regionForcedType: EnemyType | null = null;
-        let usedCustomRegion = false;
-
-        if (enabledRegions.length > 0) {
-          // Pick weighted region respecting maxActiveEnemies
-          const eligible = enabledRegions.filter((reg) => {
-            const activeInReg = this.state.enemies.filter(
-              (en) => Math.abs(en.pos.x - reg.x) <= reg.width * 0.5 && Math.abs(en.pos.y - reg.y) <= reg.height * 0.5
-            ).length;
-            return activeInReg < reg.maxActiveEnemies;
-          });
-          if (eligible.length > 0) {
-            const totalWeight = eligible.reduce((sum, r) => sum + Math.max(0.05, r.spawnDensity), 0);
-            let pick = this.state.rng.next() * totalWeight;
-            let chosen = eligible[0];
-            for (const reg of eligible) {
-              pick -= Math.max(0.05, reg.spawnDensity);
-              if (pick <= 0) {
-                chosen = reg;
-                break;
-              }
-            }
-            for (let attempt = 0; attempt < 16; attempt++) {
-              const cx = Math.max(40, Math.min(this.state.worldWidth - 40, chosen.x + this.state.rng.range(-chosen.width * 0.5, chosen.width * 0.5)));
-              const cy = Math.max(40, Math.min(this.state.worldHeight - 40, chosen.y + this.state.rng.range(-chosen.height * 0.5, chosen.height * 0.5)));
-              if (Math.hypot(cx - p.pos.x, cy - p.pos.y) < chosen.minPlayerDistance) continue;
-              const elev = this.state.terrain.getElevation(cx, cy);
-              if (chosen.terrainRestriction === 'walkable' && (!elev.isWalkable || elev.surfaceType === 'chasm')) continue;
-              if (chosen.terrainRestriction === 'near_water' && !this.state.terrain.isPointNearWater(cx, cy)) continue;
-              if (chosen.minElevation !== undefined && elev.height < chosen.minElevation) continue;
-              if (chosen.maxElevation !== undefined && elev.height > chosen.maxElevation) continue;
-              if (restrictedCells.length > 0 && !this.state.terrain.isPointValidEnemySpawn(cx, cy)) continue;
-              let blocked = false;
-              for (let oi = 0; oi < this.state.obstacles.length; oi++) {
-                const obs = this.state.obstacles[oi];
-                if (Math.hypot(cx - obs.pos.x, cy - obs.pos.y) < obs.radius + 26) {
-                  blocked = true;
-                  break;
-                }
-              }
-              if (blocked) continue;
-              sx = cx;
-              sy = cy;
-              angle = Math.atan2(p.pos.y - sy, p.pos.x - sx);
-              regionForcedType = chosen.allowedTypes[Math.floor(this.state.rng.next() * chosen.allowedTypes.length)] as EnemyType;
-              usedCustomRegion = true;
-              break;
-            }
-          }
-        }
-
-        if (!usedCustomRegion && restrictedCells.length > 0) {
-          // Stage 1 custom map constraint: spawn normal enemies strictly on valid walkable LIGHT-BROWN terrain
-          // (excluding dark-brown southern terrain, water, tower cliffs, and obstacles). Prefer points reasonably near player when possible.
-          let foundCell = false;
-          let bestCell = -1;
-          let bestDistDiff = Infinity;
-          const targetRange = this.state.rng.range(480, 820);
-          for (let attempt = 0; attempt < 24; attempt++) {
-            const cellIdx = restrictedCells[Math.floor(this.state.rng.next() * restrictedCells.length)];
-            const cx = (cellIdx % 361) * 10;
-            const cy = Math.floor(cellIdx / 361) * 10;
-            const dPlayer = Math.hypot(cx - p.pos.x, cy - p.pos.y);
-            // Keep outside immediate 340u personal bubble around player
-            if (dPlayer < 340) continue;
-            const diff = Math.abs(dPlayer - targetRange);
-            if (diff < bestDistDiff) {
-              bestDistDiff = diff;
-              bestCell = cellIdx;
-            }
-            if (dPlayer >= 420 && dPlayer <= 1050) {
-              sx = cx + this.state.rng.range(-4, 4);
-              sy = cy + this.state.rng.range(-4, 4);
-              foundCell = true;
-              break;
-            }
-          }
-          if (!foundCell && bestCell >= 0) {
-            sx = (bestCell % 361) * 10;
-            sy = Math.floor(bestCell / 361) * 10;
-            foundCell = true;
-          }
-          if (!foundCell || !this.state.terrain.isPointValidEnemySpawn(sx, sy)) continue;
-          let blockedByObs = false;
-          for (let oi = 0; oi < this.state.obstacles.length; oi++) {
-            const obs = this.state.obstacles[oi];
-            if (Math.hypot(sx - obs.pos.x, sy - obs.pos.y) < obs.radius + 26) {
-              blockedByObs = true;
-              break;
-            }
-          }
-          if (blockedByObs) continue;
-          angle = Math.atan2(p.pos.y - sy, p.pos.x - sx);
-        } else if (!usedCustomRegion) {
-          const forwardBias = this.state.rng.next() < 0.68;
-          angle = forwardBias
-            ? this.state.rng.range(-Math.PI * 0.88, -Math.PI * 0.12)
-            : this.state.rng.range(0, Math.PI * 2);
-
-          const radius = this.state.rng.range(460, 740);
-          sx = Math.max(60, Math.min(this.state.worldWidth - 60, p.pos.x + Math.cos(angle) * radius));
-          sy = Math.max(60, Math.min(this.state.worldHeight - 60, p.pos.y + Math.sin(angle) * radius));
-        }
-
-        const spawnElevation = this.state.terrain.getElevation(sx, sy);
-        if (!spawnElevation.isWalkable) continue; // Don't spawn inside chasms
-
-        let type: EnemyType = 'crawler';
-        if (regionForcedType) {
-          type = regionForcedType;
-        } else {
-          const roll = this.state.rng.next();
-          if (roll < tierDef.eliteChance) {
-            type = 'elite'; // Void Goliath
-          } else if (roll < tierDef.eliteChance + 0.32) {
-            type = 'spitter'; // Toxic Spitter
-          } else if (roll < tierDef.eliteChance + 0.58) {
-            type = 'wasp'; // Void Wasp
-          }
-        }
-
-        const cfg = ENEMY_CONFIGS[type];
-        // Scale enemy stats dynamically with the active Risk of Rain difficulty tier!
-        const scaledHealth = Math.round(cfg.maxHealth * tierDef.hpMultiplier);
-        const scaledDamage = Math.round(cfg.touchDamage * tierDef.damageMultiplier);
-        const scaledSpeed = cfg.speed * tierDef.speedMultiplier + this.state.rng.range(-6, 6);
-
-        const enemy: EnemyState = {
-          id: `enemy_${this.nextEnemyId++}`,
-          type,
-          pos: { x: sx, y: sy },
-          velocity: { x: 0, y: 0 },
-          z: spawnElevation.height - 24, // Starts below ground for emerging crawl-up animation
-          groundZ: spawnElevation.height,
-          health: scaledHealth,
-          maxHealth: scaledHealth,
-          speed: scaledSpeed,
-          touchDamage: scaledDamage,
-          attackCooldown: cfg.attackCooldown * Math.max(0.65, 1 - tierDef.tier * 0.05),
-          attackCooldownRemaining: 1.25,
-          attackRange: cfg.attackRange,
-          isElite: cfg.isElite || type === 'elite',
-          isBoss: cfg.isBoss,
-          currencyReward: Math.round(cfg.currencyReward * (1 + tierDef.tier * 0.18)),
-          xpReward: Math.round(cfg.xpReward * (1 + tierDef.tier * 0.22)),
-          radius: cfg.radius,
-          isSpawning: true,
-          spawnProgress: 0,
-          spawnDuration: 1.25,
-          isAlerted: true,
-          wanderDir: { x: Math.cos(angle), y: Math.sin(angle) },
-          wanderTimer: this.state.rng.range(2.0, 4.0)
-        };
-
-        this.state.enemies.push(enemy);
-        this.state.events.push({
-          type: 'enemy_emerging',
-          data: { id: enemy.id, pos: enemy.pos, z: spawnElevation.height, type }
-        });
-      }
-    }
+    this.state.enemies.push(enemy);
+    this.state.events.push({
+      type: 'enemy_emerging',
+      data: { id: enemy.id, pos: { ...enemy.pos }, z: groundHeight, type }
+    });
   }
 
-  public spawnStage1Titan(teleporterPos: Vector2): void {
+  private updateEnemySpawning(dt: number): void {
     const p = this.state.player;
+    if (this.state.stageNumber !== 1) {
+      this.combatDirector.unlockExploration();
+    } else if (
+      (!this.state.terrain.isCustomTestMap || this.state.terrain.allowTestMapNarrative) &&
+      !this.stage1EnemySpawningUnlocked
+    ) {
+      if (this.state.worldEvents.some((ev) => ev.isActive || ev.isCompleted)) {
+        this.unlockStage1EnemySpawning('world_event_triggered');
+      } else {
+        const spawn =
+          this.state.terrain.isCustomTestMap && this.state.terrain.testSpawnPos
+            ? this.state.terrain.testSpawnPos
+            : this.state.playerSpawnPos;
+        if (Math.hypot(p.pos.x - spawn.x, p.pos.y - spawn.y) >= this.getStage1SpawnSafeRadius()) {
+          this.unlockStage1EnemySpawning('distance_from_spawn');
+        }
+      }
+      if (!this.stage1EnemySpawningUnlocked) {
+        this.enemySpawnTimer = 0.45;
+        return;
+      }
+    } else if (!this.stage1EnemySpawningUnlocked && this.state.terrain.isCustomTestMap && !this.state.terrain.allowTestMapNarrative) {
+      this.unlockStage1EnemySpawning('custom_map_immediate');
+    }
+
+    this.combatDirector.update(dt, this.state, this.lastCameraForward, (type, pos, z) => {
+      this.spawnDirectorEnemy(type, pos, z);
+    });
+  }
+
+  public spawnStage1Titan(_teleporterPos: Vector2): void {
     // Spawn directly in front of the crashed colony shipwreck landmark (1800, 2960) in open crater terrain,
     // or at the custom test map's designated Boss Spawn marker when testing
     const bossPos = (this.state.terrain.isCustomTestMap && this.state.terrain.testBossSpawnPos)
@@ -6647,10 +7794,29 @@ export class Simulation {
       : this.state.bossSpawnPos;
     const sx = bossPos.x;
     const sy = bossPos.y;
-    const spawnElev = this.state.terrain.getElevation(sx, sy);
+    const spawnElev = this.state.terrain.getElevation(sx, sy, 1e6, 22);
+    const redMouth = this.state.terrain.isCustomTestMap ? this.state.terrain.testRedCrystalMouthPos : null;
+    const emergeOrigin = redMouth
+      ? { x: redMouth.x, y: redMouth.y, z: redMouth.z }
+      : { x: sx, y: sy + 340, z: spawnElev.height + 195 };
+    const emergeTarget = { x: sx, y: sy, z: spawnElev.height };
+    this.bossEmergePhaseStage = 0;
+
+    // Gentle clearance nudge ONLY if player is standing right inside the crystal mouth at the same elevation
+    const p = this.state.player;
+    if (Math.hypot(p.pos.x - emergeOrigin.x, p.pos.y - emergeOrigin.y) < 185 && Math.abs(p.z - emergeOrigin.z) < 280) {
+      const pushDirX = emergeTarget.x - emergeOrigin.x;
+      const pushDirY = emergeTarget.y - emergeOrigin.y;
+      const plen = Math.hypot(pushDirX, pushDirY) || 1;
+      p.pos.x = emergeTarget.x + (pushDirX / plen) * 180;
+      p.pos.y = emergeTarget.y + (pushDirY / plen) * 180;
+      const pe = this.state.terrain.getElevation(p.pos.x, p.pos.y, p.z, 56).height;
+      p.z = pe;
+      p.groundZ = pe;
+    }
 
     const { tierDef } = getDifficultyTier(this.state.gameTime);
-    const scaledHealth = Math.round(STAGE1_BOSS_CONFIG.maxHealth * tierDef.hpMultiplier);
+    const scaledHealth = STAGE1_BOSS_CONFIG.maxHealth;
     const scaledDamage = Math.round(STAGE1_BOSS_CONFIG.touchDamage * tierDef.damageMultiplier);
 
     const titan: EnemyState = {
@@ -6659,15 +7825,17 @@ export class Simulation {
       isBoss: true,
       isStage1Titan: true,
       titanState: 'emerging',
-      titanTimer: 4.0, // 4-second heavy slow cinematic emergence
+      titanTimer: 3.6, // 4-phase ~30-deg diagonal emergence from Red Crystal mouth
       titanAnimFrame: 0,
       titanFacing: 'front',
       titanFootstepTimer: 0,
       titanRumbleTimer: 0,
-      pos: { x: sx, y: sy },
+      pos: { x: emergeOrigin.x, y: emergeOrigin.y },
       velocity: { x: 0, y: 0 },
-      z: spawnElev.height - 360, // Deep underground rising up in front of the shipwreck
+      z: emergeOrigin.z,
       groundZ: spawnElev.height,
+      bossEmergeOrigin: emergeOrigin,
+      bossEmergeTarget: emergeTarget,
       health: scaledHealth,
       maxHealth: scaledHealth,
       speed: STAGE1_BOSS_CONFIG.speed * tierDef.speedMultiplier,
@@ -6691,7 +7859,12 @@ export class Simulation {
 
     this.state.events.push({
       type: 'stage1_boss_emerge',
-      data: { id: titan.id, pos: { ...titan.pos }, groundZ: spawnElev.height }
+      data: {
+        id: titan.id,
+        pos: { ...emergeTarget },
+        crystalPos: { ...emergeOrigin },
+        groundZ: spawnElev.height
+      }
     });
   }
 
@@ -6724,6 +7897,7 @@ export class Simulation {
       isElite: true,
       isBoss: true,
       isStage1Titan: false, // Brood Queen
+      isScriptedEventEnemy: true,
       currencyReward: cfg.currencyReward,
       xpReward: cfg.xpReward,
       radius: cfg.radius,
@@ -6734,8 +7908,113 @@ export class Simulation {
     this.state.enemies.push(boss);
     this.state.events.push({
       type: 'boss_spawned',
-      data: { name: 'Brood Queen (Event Guardian)' }
+      data: { name: 'Brood Queen (Event Guardian)', isStage1Boss: false }
     });
+  }
+
+  private probeBossLeapSpot(
+    boss: EnemyState,
+    targetPos: Vector2,
+    targetZ: number
+  ): { x: number; y: number; z: number } | null {
+    const terrain = this.state.terrain;
+    const col = terrain.meshCollider;
+    const approachAng = Math.atan2(boss.pos.y - targetPos.y, boss.pos.x - targetPos.x);
+    const probeOffsets: Array<{ r: number; angOffset: number }> = [
+      { r: 0, angOffset: 0 },
+      { r: 36, angOffset: 0 },
+      { r: 58, angOffset: 0 },
+      { r: 58, angOffset: 0.7 },
+      { r: 58, angOffset: -0.7 },
+      { r: 95, angOffset: 0 },
+      { r: 95, angOffset: 1.1 },
+      { r: 95, angOffset: -1.1 },
+      { r: 140, angOffset: 0 },
+      { r: 140, angOffset: Math.PI * 0.5 },
+      { r: 140, angOffset: -Math.PI * 0.5 },
+      { r: 140, angOffset: Math.PI }
+    ];
+
+    for (let i = 0; i < probeOffsets.length; i++) {
+      const { r, angOffset } = probeOffsets[i];
+      const ang = approachAng + angOffset;
+      const clamped = terrain.clampToPlayableBounds(
+        { x: targetPos.x + Math.cos(ang) * r, y: targetPos.y + Math.sin(ang) * r },
+        40
+      ).pos;
+
+      if (col) {
+        const sup = col.querySupport(clamped.x, clamped.y, targetZ + 45, 45);
+        if (sup.hit && sup.isWalkable && col.isPositionOutsideHollowInterior(clamped.x, clamped.y, sup.height, 16)) {
+          return { x: clamped.x, y: clamped.y, z: sup.height };
+        }
+      } else {
+        const elev = terrain.getElevation(clamped.x, clamped.y, targetZ + 35, 35);
+        if (elev.isWalkable) {
+          return { x: clamped.x, y: clamped.y, z: elev.height };
+        }
+      }
+    }
+
+    return null;
+  }
+
+  private findBossLeapLandingSpot(boss: EnemyState, targetPos: Vector2, targetZ: number): { x: number; y: number; z: number } {
+    const validated = this.probeBossLeapSpot(boss, targetPos, targetZ);
+    if (validated) return validated;
+    const terrain = this.state.terrain;
+    const fallback = terrain.clampToPlayableBounds(targetPos, 40).pos;
+    const fbElev = terrain.getElevation(fallback.x, fallback.y, targetZ + 35, 35).height;
+    return { x: fallback.x, y: fallback.y, z: fbElev };
+  }
+
+  private launchBossLeapTo(boss: EnemyState, target: { x: number; y: number; z: number }, cooldownSec: number): void {
+    const leapDist = Math.hypot(target.x - boss.pos.x, target.y - boss.pos.y);
+
+    boss.isBossLeaping = true;
+    boss.titanState = 'leap';
+    boss.bossLeapElapsed = 0;
+    boss.bossLeapDuration = Math.max(0.75, Math.min(1.45, 0.55 + leapDist / 880));
+    boss.bossLeapStart = { x: boss.pos.x, y: boss.pos.y, z: boss.z };
+    boss.bossLeapTarget = target;
+    boss.bossJumpCooldown = cooldownSec;
+    boss.bossStuckTimer = 0;
+    boss.bossPursuitOutOfRangeTimer = 0;
+    boss.bossStuckAnchor = undefined;
+    boss.velocity.x = 0;
+    boss.velocity.y = 0;
+
+    this.state.events.push({
+      type: 'stage1_boss_rumble',
+      data: { pos: { ...boss.pos }, intensity: 0.42, isFootstep: true, z: boss.groundZ }
+    });
+  }
+
+  private triggerBossAntiStuckLeap(boss: EnemyState): void {
+    const p = this.state.player;
+    const target = this.findBossLeapLandingSpot(boss, p.pos, p.groundZ);
+    this.launchBossLeapTo(boss, target, 5.0);
+  }
+
+  private triggerBossPursuitLeap(boss: EnemyState): boolean {
+    const p = this.state.player;
+    const dx = p.pos.x - boss.pos.x;
+    const dy = p.pos.y - boss.pos.y;
+    const dist = Math.hypot(dx, dy) || 1;
+    const maxHopDist = 1650;
+    // Cap travel per hop and stop ~380u short of player so the boss chases cleanly without landing directly on top
+    const desiredTravel = dist <= maxHopDist + 380 ? Math.max(220, dist - 380) : maxHopDist;
+    const candX = boss.pos.x + (dx / dist) * desiredTravel;
+    const candY = boss.pos.y + (dy / dist) * desiredTravel;
+    const candElev = this.state.terrain.getElevation(candX, candY, p.z + 35, 35).height;
+    const spot = this.probeBossLeapSpot(boss, { x: candX, y: candY }, candElev);
+    if (!spot) {
+      boss.bossJumpCooldown = 1.5;
+      boss.bossPursuitOutOfRangeTimer = 0;
+      return false;
+    }
+    this.launchBossLeapTo(boss, spot, 6.5);
+    return true;
   }
 
   private updateStage1Titan(boss: EnemyState, dt: number): void {
@@ -6743,6 +8022,9 @@ export class Simulation {
     const dx = p.pos.x - boss.pos.x;
     const dy = p.pos.y - boss.pos.y;
     const dist = Math.hypot(dx, dy) || 1;
+    if ((boss.bossJumpCooldown ?? 0) > 0) {
+      boss.bossJumpCooldown = Math.max(0, (boss.bossJumpCooldown ?? 0) - dt);
+    }
 
     // Helper: calculate 2D distance from point to segment
     const distToSeg = (px: number, py: number, x1: number, y1: number, x2: number, y2: number): number => {
@@ -6767,34 +8049,90 @@ export class Simulation {
       return;
     }
 
-    // 2. EMERGENCE SEQUENCE (Phase 2)
+    // 2. EMERGENCE SEQUENCE (4-phase ~30-deg diagonal Red Crystal eruption)
     if (boss.titanState === 'emerging') {
       boss.velocity.x = 0;
       boss.velocity.y = 0;
-      boss.titanTimer = Math.max(0, (boss.titanTimer ?? 4.0) - dt);
-      const emergeProgress = 1.0 - (boss.titanTimer / 4.0);
-      boss.z = boss.groundZ - 360 * (1.0 - emergeProgress);
+      const totalDur = 3.6;
+      boss.titanTimer = Math.max(0, (boss.titanTimer ?? totalDur) - dt);
+      const emergeProgress = Math.min(1.0, Math.max(0.0, 1.0 - boss.titanTimer / totalDur));
+      const origin = boss.bossEmergeOrigin ?? { x: boss.pos.x, y: boss.pos.y + 340, z: boss.groundZ + 195 };
+      const target = boss.bossEmergeTarget ?? { x: boss.pos.x, y: boss.pos.y, z: boss.groundZ };
+
+      let moveT = 0;
+      if (emergeProgress < 0.22) {
+        // Phase 1: Crystal activation + fracture buildup inside crystal mouth
+        moveT = 0;
+        if (this.bossEmergePhaseStage < 1 && emergeProgress >= 0.04) {
+          this.bossEmergePhaseStage = 1;
+          this.state.events.push({
+            type: 'stage1_boss_rumble',
+            data: { pos: { x: origin.x, y: origin.y }, z: origin.z, intensity: 0.28, isCrystalActivation: true }
+          });
+        }
+      } else if (emergeProgress < 0.52) {
+        // Phase 2: Crystal break + shatter burst + front torso breach along diagonal path
+        const localT = (emergeProgress - 0.22) / 0.30;
+        const eased = 1.0 - Math.pow(1.0 - localT, 2);
+        moveT = eased * 0.36;
+        if (this.bossEmergePhaseStage < 2) {
+          this.bossEmergePhaseStage = 2;
+          this.state.events.push({
+            type: 'stage1_boss_rumble',
+            data: { pos: { x: origin.x, y: origin.y }, z: origin.z, intensity: 0.72, isCrystalShatter: true }
+          });
+        }
+      } else if (emergeProgress < 0.86) {
+        // Phase 3: Full body diagonal emergence out onto open clearing + debris trail
+        const localT = (emergeProgress - 0.52) / 0.34;
+        const smooth = localT * localT * (3.0 - 2.0 * localT);
+        moveT = 0.36 + smooth * 0.62;
+        if (this.bossEmergePhaseStage < 3) {
+          this.bossEmergePhaseStage = 3;
+        }
+      } else {
+        // Phase 4: Ground contact landing & settle before entering combat AI
+        const localT = (emergeProgress - 0.86) / 0.14;
+        const settle = 1.0 - Math.pow(1.0 - localT, 3);
+        moveT = 0.98 + settle * 0.02;
+        if (this.bossEmergePhaseStage < 4) {
+          this.bossEmergePhaseStage = 4;
+          this.state.events.push({
+            type: 'stage1_boss_rumble',
+            data: { pos: { x: target.x, y: target.y }, intensity: 0.75, z: target.z, isFinalBurst: true }
+          });
+        }
+      }
+
+      boss.pos.x = origin.x + (target.x - origin.x) * moveT;
+      boss.pos.y = origin.y + (target.y - origin.y) * moveT;
+      boss.z = origin.z + (target.z - origin.z) * moveT;
+      boss.groundZ = target.z;
 
       boss.titanRumbleTimer = (boss.titanRumbleTimer ?? 0) + dt;
-      if (boss.titanRumbleTimer >= 0.35) {
+      if (boss.titanRumbleTimer >= 0.26 && emergeProgress >= 0.22 && emergeProgress < 0.88) {
         boss.titanRumbleTimer = 0;
         this.state.events.push({
           type: 'stage1_boss_rumble',
-          data: { pos: { ...boss.pos }, intensity: 0.45, z: boss.groundZ }
+          data: {
+            pos: { ...boss.pos },
+            intensity: 0.26 + 0.3 * emergeProgress,
+            z: boss.z,
+            isEmergeTrail: true
+          }
         });
       }
 
       if (boss.titanTimer <= 0) {
-        boss.z = boss.groundZ;
+        boss.pos.x = target.x;
+        boss.pos.y = target.y;
+        boss.z = target.z;
+        boss.groundZ = target.z;
         boss.titanState = 'idle';
         boss.titanTimer = 0.45;
         this.state.events.push({
-          type: 'stage1_boss_rumble',
-          data: { pos: { ...boss.pos }, intensity: 0.75, z: boss.groundZ, isFinalBurst: true }
-        });
-        this.state.events.push({
           type: 'boss_spawned',
-          data: { name: 'COLOSSAL BIO-CULTIVATOR', pos: { ...boss.pos }, z: boss.groundZ }
+          data: { name: 'STAGE 1 BOSS', pos: { ...boss.pos }, z: boss.groundZ }
         });
       }
       return;
@@ -6819,8 +8157,93 @@ export class Simulation {
       return;
     }
 
+    // 3b. ANTI-STUCK TERRAIN LEAP SEQUENCE (Jumps onto / right next to player when blocked >= 2s)
+    if (boss.titanState === 'leap' && boss.bossLeapStart && boss.bossLeapTarget) {
+      boss.velocity.x = 0;
+      boss.velocity.y = 0;
+      const dur = Math.max(0.5, boss.bossLeapDuration ?? 1.0);
+      boss.bossLeapElapsed = (boss.bossLeapElapsed ?? 0) + dt;
+      const u = Math.min(1.0, boss.bossLeapElapsed / dur);
+
+      const s = boss.bossLeapStart;
+      const t = boss.bossLeapTarget;
+      const leapDist = Math.hypot(t.x - s.x, t.y - s.y);
+      const arcPeak = Math.min(540, Math.max(190, leapDist * 0.28 + Math.abs(t.z - s.z) * 0.35));
+
+      boss.pos.x = s.x + (t.x - s.x) * u;
+      boss.pos.y = s.y + (t.y - s.y) * u;
+      boss.z = s.z + (t.z - s.z) * u + 4 * arcPeak * u * (1 - u);
+
+      const ldx = t.x - s.x;
+      const ldy = t.y - s.y;
+      if (Math.abs(ldx) > Math.abs(ldy) * 1.1) {
+        boss.titanFacing = ldx > 0 ? 'right' : 'left';
+      } else {
+        boss.titanFacing = ldy > 0 ? 'front' : 'back';
+      }
+
+      // Active body hitbox while descending near player elevation
+      const curDist = Math.hypot(p.pos.x - boss.pos.x, p.pos.y - boss.pos.y);
+      if (curDist <= boss.radius + 20 && Math.abs(p.z - boss.z) < 75) {
+        this.damagePlayer(boss.touchDamage * 0.8 * dt, true, boss, 'melee');
+      }
+
+      if (u >= 1.0) {
+        boss.pos.x = t.x;
+        boss.pos.y = t.y;
+        const landElev = this.state.terrain.getElevation(boss.pos.x, boss.pos.y, t.z + 30, 30).height;
+        boss.z = landElev;
+        boss.groundZ = landElev;
+        boss.isBossLeaping = false;
+        boss.titanState = 'idle';
+        boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+        boss.bossStuckAnchor = { x: boss.pos.x, y: boss.pos.y };
+        boss.bossStuckTimer = 0;
+
+        this.state.terrain.pushOutOfSteepTerrain(boss.pos, boss.z, 32);
+
+        // Landing slam hitbox & shockwave
+        const landDist = Math.hypot(p.pos.x - boss.pos.x, p.pos.y - boss.pos.y);
+        const slamRadius = boss.radius + 78;
+        if (landDist <= slamRadius && Math.abs(p.z - boss.z) < 95) {
+          this.damagePlayer(boss.touchDamage, false, boss, 'melee');
+        }
+        this.state.events.push({
+          type: 'stage1_boss_rumble',
+          data: { pos: { ...boss.pos }, intensity: 0.75, z: boss.groundZ, isFinalBurst: true }
+        });
+      }
+      return;
+    }
+
     // 4. WALKING LOCOMOTION
     if (boss.titanState === 'walk') {
+      // Track net displacement over time: if chasing player and blocked in ~1 spot for >= 2.0s, leap over terrain!
+      if (!boss.bossStuckAnchor) {
+        boss.bossStuckAnchor = { x: boss.pos.x, y: boss.pos.y };
+      }
+      const movedFromAnchor = Math.hypot(boss.pos.x - boss.bossStuckAnchor.x, boss.pos.y - boss.bossStuckAnchor.y);
+      if (movedFromAnchor >= Math.max(60, boss.speed * 1.15)) {
+        boss.bossStuckAnchor = { x: boss.pos.x, y: boss.pos.y };
+        boss.bossStuckTimer = 0;
+      } else if (dist > 140 && (boss.bossJumpCooldown ?? 0) <= 0) {
+        boss.bossStuckTimer = (boss.bossStuckTimer ?? 0) + dt;
+        if (boss.bossStuckTimer >= 2.0) {
+          this.triggerBossAntiStuckLeap(boss);
+          return;
+        }
+      }
+      // Calibrated pursuit leap when player stays beyond max effective attack range (> 1500u or |dz| > 480u)
+      if ((boss.bossJumpCooldown ?? 0) <= 0 && (dist > 1500 || Math.abs(p.z - boss.z) > 480)) {
+        boss.bossPursuitOutOfRangeTimer = (boss.bossPursuitOutOfRangeTimer ?? 0) + dt;
+        if (boss.bossPursuitOutOfRangeTimer >= 1.6) {
+          if (this.triggerBossPursuitLeap(boss)) {
+            return;
+          }
+        }
+      } else {
+        boss.bossPursuitOutOfRangeTimer = Math.max(0, (boss.bossPursuitOutOfRangeTimer ?? 0) - dt * 2);
+      }
       const speed = boss.speed;
       const heightDiff = Math.abs(p.z - boss.z);
       const isDirectWalk = heightDiff < 32 && this.state.terrain.isDirectlyTraversable(boss.pos, p.pos, false);
@@ -6864,17 +8287,20 @@ export class Simulation {
         });
       }
 
-      // Check touch damage against player
-      if (dist <= boss.radius + 20 && Math.abs(p.z - boss.z) < 60) {
-        this.damagePlayer(boss.touchDamage * 0.8 * dt, true);
+      // Check touch damage against player (2x scale)
+      if (dist <= boss.radius + 36 && Math.abs(p.z - boss.z) < 140) {
+        this.damagePlayer(boss.touchDamage * 0.8 * dt, true, boss, 'melee');
       }
 
       boss.attackCooldownRemaining -= dt;
       boss.titanTimer = (boss.titanTimer ?? STAGE1_BOSS_CONFIG.laser.duration) - dt;
 
-      // Do NOT interrupt pursuit if player is far away! Only trigger attack when in effective combat range
-      const inAttackRange = dist <= 950;
-      const canAttack = (inAttackRange && boss.attackCooldownRemaining <= 0) || (dist <= 1350 && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 3 === 2));
+      // Do NOT interrupt pursuit or fire through the Tower if player is far away or on a blocked elevation layer
+      const verticalReachable = Math.abs(p.z - boss.z) <= 520;
+      const inAttackRange = dist <= 1050 && verticalReachable;
+      const canAttack =
+        (inAttackRange && boss.attackCooldownRemaining <= 0) ||
+        (dist <= 1350 && verticalReachable && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 3 === 2));
 
       if (canAttack || (boss.titanTimer <= 0 && inAttackRange)) {
         boss.velocity.x = 0;
@@ -6957,10 +8383,17 @@ export class Simulation {
       const beamEndY = boss.pos.y + sinA * beamRange;
       const distToBeam = distToSeg(p.pos.x, p.pos.y, boss.pos.x, boss.pos.y, beamEndX, beamEndY);
 
-      if (distToBeam <= 40 + 16 && Math.abs(p.z - boss.z) < 75) {
+      if (
+        distToBeam <= 56 + 24 &&
+        Math.abs(p.z - boss.z) < 160 &&
+        this.state.terrain.checkLineOfSight3D(
+          { x: boss.pos.x, y: boss.pos.y, z: boss.z + 180 },
+          { x: p.pos.x, y: p.pos.y, z: p.z + 52 }
+        )
+      ) {
         // Continuous tick damage
         if (!p.isDashing) {
-          this.damagePlayer(22 * dt, true);
+          this.damagePlayer(22 * dt, true, boss, 'beam');
         }
       }
 
@@ -7029,8 +8462,9 @@ export class Simulation {
         if (elapsed >= STAGE1_BOSS_CONFIG.tentacle.impactTime && !boss.titanTentacleHitApplied) {
           boss.titanTentacleHitApplied = true;
           const strikeDist = Math.hypot(p.pos.x - target.x, p.pos.y - target.y);
-          if (strikeDist <= STAGE1_BOSS_CONFIG.tentacle.strikeRadius && !p.isDashing) {
-            this.damagePlayer(STAGE1_BOSS_CONFIG.tentacle.damage);
+          const targetElev = this.state.terrain.getElevation(target.x, target.y, boss.z, 180).height;
+          if (strikeDist <= STAGE1_BOSS_CONFIG.tentacle.strikeRadius + 16 && Math.abs(p.z - targetElev) <= 160 && !p.isDashing) {
+            this.damagePlayer(STAGE1_BOSS_CONFIG.tentacle.damage, false, boss, 'melee');
           }
 
           this.state.events.push({
@@ -7062,7 +8496,7 @@ export class Simulation {
         boss.titanElementalCharged = true;
 
         // Launch all 10 elemental projectiles simultaneously targeting Commander's position with threatening spread
-        const originZ = boss.z + 240;
+        const originZ = boss.z + 440;
         const pDist = Math.hypot(p.pos.x - boss.pos.x, p.pos.y - boss.pos.y) || 1;
         const pAng = Math.atan2(p.pos.y - boss.pos.y, p.pos.x - boss.pos.x);
         const count = STAGE1_BOSS_CONFIG.elemental.projectileCount;
@@ -7073,7 +8507,7 @@ export class Simulation {
           const spreadFactor = ((k - (count - 1) * 0.5) / ((count - 1) * 0.5)); // -1.0 to 1.0
           const ang = pAng + spreadFactor * (totalArc * 0.5);
           const travelTime = pDist / speed;
-          const vz = (p.z + 24 - originZ) / Math.max(0.5, travelTime);
+          const vz = (p.z + 52 - originZ) / Math.max(0.5, travelTime);
 
           this.state.projectiles.push({
             id: `proj_${this.nextProjId++}`,
@@ -7091,7 +8525,7 @@ export class Simulation {
             radius: STAGE1_BOSS_CONFIG.elemental.radius,
             hitEnemyIds: new Set(),
             originZ,
-            targetZ: p.z + 24
+            targetZ: p.z + 52
           });
         }
 
@@ -7113,12 +8547,14 @@ export class Simulation {
   public getInteractablePod(): OrganicPodState | null {
     const p = this.state.player;
     let best: OrganicPodState | null = null;
-    let bestDist = 78;
+    let bestDist = 125;
     for (let i = 0; i < this.state.pods.length; i++) {
       const pod = this.state.pods[i];
       if (pod.isOpened) continue;
       const d = Math.hypot(p.pos.x - pod.pos.x, p.pos.y - pod.pos.y);
       if (d <= bestDist) {
+        const podZ = this.state.terrain.getElevation(pod.pos.x, pod.pos.y).height + (pod.zOffset ?? 0);
+        if (Math.abs(p.z - podZ) > 130) continue;
         bestDist = d;
         best = pod;
       }
@@ -7137,26 +8573,15 @@ export class Simulation {
         p.currency -= pod.cost;
         pod.isOpened = true;
         pod.dissolveTimer = 1.6;
-
-        const chosenItem: ItemId = rollWeightedPassiveItem(this.state.rng);
-        pod.itemRewarded = chosenItem;
+        this.triggerTimedEffect('pod_surge', 8.0, 0, 'buff_pod_surge');
 
         this.state.events.push({
           type: 'pod_opened',
-          data: { podId: pod.id, pos: { ...pod.pos }, cost: pod.cost, item: chosenItem }
+          data: { podId: pod.id, pos: { ...pod.pos }, cost: pod.cost }
         });
 
-        if (this.state.commandArtifactActive) {
-          // Trial / Command Mode: Open 3-choice Attribute Upgrade modal (single reward)
-          this.queueBuffDraft();
-        } else {
-          // Standard RoR2 Mode: Pop physical attribute item drop from the chest (single reward)
-          pod.itemDropped = chosenItem;
-          this.spawnPhysicalItemDrop(
-            { x: pod.pos.x, y: pod.pos.y + 14 },
-            chosenItem
-          );
-        }
+        // Buff Chest: ALWAYS present 3 eligible choices (single roll inside queueBuffDraft)
+        this.queueBuffDraft();
       }
     }
 
@@ -7192,52 +8617,211 @@ export class Simulation {
     }
   }
 
+  public tryActivateArtifact(): boolean {
+    const art = this.state.artifact;
+    if (!art) return false;
+    const policy = getStageArtifactPolicy(this.state.stageNumber);
+    if (policy.mode === 'four_enhancements') {
+      if (this.state.completedEnhancementCategories.size < policy.requiredEnhancementCategories.length) {
+        return false;
+      }
+    } else if (!art.isCharged) {
+      return false;
+    }
+    if (art.phase !== 'unlocked_ready' || !art.isTeleporterReady || art.isBossSpawned) {
+      return false;
+    }
+    if (this.state.enemies.some((e) => e.isStage1Titan && e.health > 0)) {
+      return false;
+    }
+
+    art.phase = 'boss_summoning';
+    art.isTeleporterReady = false;
+    art.isSummoning = true;
+    art.summonTimer = 4.0;
+    art.isBossSpawned = true;
+    art.isBossDefeated = false;
+    this.state.hasBossSpawned = true;
+    this.combatDirector.enterBossMode(this.state);
+    this.spawnStage1Titan(art.pos);
+    return true;
+  }
+
+  public forceUnlockArtifactForDev(): void {
+    const art = this.state.artifact;
+    if (!art) return;
+    const policy = getStageArtifactPolicy(this.state.stageNumber);
+    for (const cat of policy.requiredEnhancementCategories) {
+      this.state.markEnhancementCategoryCompleted(cat);
+    }
+    art.chargeProgress = 100;
+    art.isCharged = true;
+    if (!art.isBossSpawned) {
+      art.isTeleporterReady = true;
+      art.phase = 'unlocked_ready';
+      this.state.events.push({
+        type: 'tower_unlocked',
+        data: { recovered: this.state.completedEnhancementCategories.size, required: Math.max(1, policy.requiredEnhancementCategories.length) }
+      });
+    }
+  }
+
+  public completeWorldEventForDev(eventId: string): boolean {
+    const ev = this.state.worldEvents.find((e) => e.id === eventId);
+    if (!ev || ev.isCompleted) return false;
+    ev.chargeProgress = 100;
+    ev.isCompleted = true;
+    ev.isActive = false;
+    ev.dashPlatforms = [];
+    this.syncActiveDashPlatforms();
+    this.handleWorldEventCompleted(ev, ev.type !== 'void_corruption');
+    return true;
+  }
+
+  private handleWorldEventCompleted(ev: WorldEventState, isAugmentEvent: boolean): void {
+    this.state.events.push({
+      type: 'world_event_completed',
+      data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos }, isAugmentEvent }
+    });
+    if (!isAugmentEvent) return;
+
+    const newlyCompleted = this.state.markEnhancementCategoryCompleted(ev.type);
+    if (newlyCompleted) {
+      this.state.updateCalculatedStats();
+    }
+    const art = this.state.artifact;
+    const policy = getStageArtifactPolicy(this.state.stageNumber);
+    if (
+      newlyCompleted &&
+      art &&
+      policy.mode === 'four_enhancements' &&
+      this.state.completedEnhancementCategories.size >= policy.requiredEnhancementCategories.length &&
+      art.phase === 'locked_missing_modules'
+    ) {
+      art.phase = 'unlocked_ready';
+      art.isCharged = true;
+      art.isTeleporterReady = true;
+      art.chargeProgress = 100;
+      this.state.events.push({
+        type: 'tower_unlocked',
+        data: {
+          recovered: this.state.completedEnhancementCategories.size,
+          required: policy.requiredEnhancementCategories.length
+        }
+      });
+    }
+  }
+
   private updateArtifact(dt: number, input: InputSnapshot): void {
     const p = this.state.player;
     const art = this.state.artifact;
     if (!art) return;
 
+    const policy = getStageArtifactPolicy(this.state.stageNumber);
+    if (!art.phase) {
+      art.phase = policy.mode === 'four_enhancements' ? 'locked_missing_modules' : 'charging';
+    }
+    art.prematureInteractCooldown = Math.max(0, (art.prematureInteractCooldown ?? 0) - dt);
+
     const dist = Math.hypot(p.pos.x - art.pos.x, p.pos.y - art.pos.y);
     const artElev = this.state.terrain.calculateHeight(art.pos.x, art.pos.y);
     const vertOk = !this.state.terrain.isCustomTestMap || Math.abs(p.z - artElev) <= 180;
 
-    // Phase 1: Natural passive charging when standing in teleporter beacon aura + kills
-    if (!art.isCharged) {
+    if (art.phase === 'locked_missing_modules') {
+      if (dist <= art.radius + 60 && vertOk && input.wantInteract && (art.prematureInteractCooldown ?? 0) <= 0) {
+        art.prematureInteractCooldown = 1.5;
+        const isFirstAttempt = !art.prematureInteractWarned;
+        art.prematureInteractWarned = true;
+        this.state.events.push({
+          type: 'tower_locked_interact',
+          data: {
+            recovered: this.state.completedEnhancementCategories.size,
+            required: policy.requiredEnhancementCategories.length || 4,
+            isFirstAttempt
+          }
+        });
+      }
+      return;
+    }
+
+    // Optional charging path for future stages (disabled on Stage 1)
+    if (policy.usesCharging && art.phase === 'charging') {
       if (dist <= 260 && vertOk) {
         art.chargeProgress = Math.min(100, art.chargeProgress + 1.8 * dt);
         if (art.chargeProgress >= 100) {
           art.chargeProgress = 100;
           art.isCharged = true;
           art.isTeleporterReady = true;
+          art.phase = 'unlocked_ready';
           this.state.events.push({ type: 'artifact_charged', data: {} });
         }
       }
+      return;
     }
-    // Phase 2: Teleporter is 100% charged and ready for manual summon with [E]!
-    else if (art.isCharged && art.isTeleporterReady && !art.isBossSpawned) {
+
+    if (art.phase === 'unlocked_ready') {
       if (dist <= art.radius + 60 && vertOk && input.wantInteract) {
-        art.isTeleporterReady = false;
-        art.isSummoning = true;
-        art.summonTimer = 4.0;
-        art.isBossSpawned = true;
-        art.isBossDefeated = false;
-        this.state.hasBossSpawned = true;
-        this.spawnStage1Titan(art.pos);
+        this.tryActivateArtifact();
       }
+      return;
     }
-    // Phase 2/3: Summoning emergence countdown
-    else if (art.isSummoning) {
+
+    if (art.phase === 'boss_summoning' || art.isSummoning) {
       art.summonTimer = Math.max(0, (art.summonTimer || 4.0) - dt);
       if (art.summonTimer <= 0) {
         art.isSummoning = false;
+        art.phase = art.isBossDefeated ? 'exit_ready' : 'boss_active';
       }
+      return;
     }
-    // Phase 4: Stage boss defeated! Portal opens, player must press [E] to escape!
-    else if (art.isCharged && art.isBossDefeated && !art.isCompleted) {
+
+    if (art.phase === 'restoring') {
+      art.restorationTimer = Math.max(0, (art.restorationTimer ?? 0) - dt);
+      if (art.restorationTimer <= 0) {
+        art.phase = 'exit_ready';
+      }
+      return;
+    }
+
+    if (art.phase === 'teleport_preparing') {
+      // Ignore repeated [E] interactions so regional refreezing and dialogue playback cannot restart.
+      input.wantInteract = false;
+      art.teleportPrepTimer = 0;
+      art.restorationTimer = (art.restorationTimer || 0) + dt;
+
+      // Hard 120s safety bound accommodates full aftermath + refreeze + departure dialogue while preventing any permanent soft-lock.
+      const essentialBusy = this.isEssentialDepartureDialogueBusy() && (art.restorationTimer || 0) < 120.0;
+      if (essentialBusy) {
+        art.awaitingDialogueSync = true;
+        return;
+      }
+      art.awaitingDialogueSync = false;
+      art.phase = 'cleared';
+      art.isCompleted = true;
+      this.state.isStageCleared = true;
+      this.state.events.push({ type: 'stage_cleared', data: {} });
+      return;
+    }
+
+    if ((art.phase === 'exit_ready' || (art.isBossDefeated && !art.isCompleted)) && art.phase !== 'cleared') {
       if (dist <= art.radius + 60 && vertOk && input.wantInteract) {
-        art.isCompleted = true;
-        this.state.isStageCleared = true;
-        this.state.events.push({ type: 'stage_cleared', data: {} });
+        input.wantInteract = false;
+        art.phase = 'teleport_preparing';
+        art.teleportPrepDuration = 0;
+        art.teleportPrepTimer = 0;
+        art.restorationTimer = 0;
+        art.awaitingDialogueSync = true;
+        if (!art.refreezeTriggered) {
+          art.refreezeTriggered = true;
+          this.state.events.push({
+            type: 'stage1_refreeze_started',
+            data: {
+              origin: { x: art.pos.x, y: art.pos.y },
+              pos: { x: art.pos.x, y: art.pos.y },
+              durationSec: 20.0
+            }
+          });
+        }
       }
     }
   }
@@ -7279,19 +8863,20 @@ export class Simulation {
       const heightAboveGround = Math.abs(drop.z - groundZ);
 
       // Vacuum pickup within configurable pickupRadius
-      if (dist < pickupRadius && (drop.settled || heightAboveGround < 28)) {
-        const pullSpeed = 520 * (1.2 - dist / (pickupRadius + 20));
+      if (dist < pickupRadius && (drop.settled || heightAboveGround < 36)) {
+        const pullSpeed = 780 * (1.2 - dist / (pickupRadius + 20));
         const invDist = 1 / (dist || 1);
         drop.pos.x += (p.pos.x - drop.pos.x) * invDist * pullSpeed * dt;
         drop.pos.y += (p.pos.y - drop.pos.y) * invDist * pullSpeed * dt;
-        drop.z = this.state.terrain.getElevation(drop.pos.x, drop.pos.y).height + 4;
+        drop.z = this.state.terrain.getElevation(drop.pos.x, drop.pos.y).height + 8;
       }
 
-      if (dist <= 34 && (drop.settled || heightAboveGround < 32)) {
-        p.currency += drop.value;
+      if (dist <= 56 && (drop.settled || heightAboveGround < 48)) {
+        const gained = Math.max(1, Math.round(drop.value * (p.calculatedStats.currencyMultiplier || 1.0)));
+        p.currency += gained;
         this.state.events.push({
           type: 'currency_collected',
-          data: { value: drop.value, pos: { ...drop.pos }, z: drop.z }
+          data: { value: gained, pos: { ...drop.pos }, z: drop.z }
         });
         continue;
       }
@@ -7302,7 +8887,7 @@ export class Simulation {
     this.state.currencyDrops = alive;
   }
 
-  private updateItemDrops(dt: number, input?: InputSnapshot): void {
+  private updateItemDrops(dt: number, _input?: InputSnapshot): void {
     const p = this.state.player;
     const alive: typeof this.state.itemDrops = [];
 
@@ -7337,25 +8922,54 @@ export class Simulation {
       const dist = Math.hypot(p.pos.x - drop.pos.x, p.pos.y - drop.pos.y);
 
       if (drop.settled) {
-        if (drop.isBuffDrop) {
-          // Manual pickup choice with [E]
-          if (dist <= 55 && input && input.wantInteract) {
-            this.queueBuffDraft();
+        if (drop.isDoubleJumpTestPickup) {
+          if (dist <= 95 && Math.abs(p.z - drop.z) <= 120) {
+            this.applyBuffToPlayer('buff_aerial_boost', 'pickup');
+            p.airJumpsRemaining = p.maxAirJumps;
             this.state.events.push({
-              type: 'buff_capsule_collected',
-              data: { pos: { ...drop.pos } }
+              type: 'item_acquired',
+              data: {
+                item: 'double_jump_test',
+                name: 'Aerial Boost (Double Jump)',
+                stackCount: p.buffs.buff_aerial_boost || 1,
+                pos: { ...drop.pos }
+              }
             });
+            continue;
+          }
+        } else if (drop.isBuffDrop) {
+          // Enemy / random buff drops: no [E] key or modal — pass through to collect immediately
+          const attractRange = Math.max(180, (p.calculatedStats.pickupRadius || 250) * 0.85);
+          if (dist < attractRange) {
+            const invDist = 1 / (dist || 1);
+            drop.pos.x += (p.pos.x - drop.pos.x) * invDist * 420 * dt;
+            drop.pos.y += (p.pos.y - drop.pos.y) * invDist * 420 * dt;
+          }
+
+          if (dist <= 78 && Math.abs(p.z - drop.z) <= 105) {
+            const chosenBuff =
+              drop.buffId && isBuffEligibleForPlayer(drop.buffId, p)
+                ? drop.buffId
+                : rollWeightedRandomBuff(this.state.lootRng, p);
+            if (chosenBuff) {
+              const dropOrigin = drop.id.startsWith('buffdrop_elite_') ? 'elite' : 'level';
+              this.applyBuffToPlayer(chosenBuff, 'enemy_drop', dropOrigin);
+              this.state.events.push({
+                type: 'buff_capsule_collected',
+                data: { buffId: chosenBuff, pos: { ...drop.pos } }
+              });
+            }
             continue;
           }
         } else if (drop.itemId) {
           // Gentle magnetic pull when close for core passive items
-          if (dist < 95) {
+          if (dist < 190) {
             const invDist = 1 / (dist || 1);
-            drop.pos.x += (p.pos.x - drop.pos.x) * invDist * 260 * dt;
-            drop.pos.y += (p.pos.y - drop.pos.y) * invDist * 260 * dt;
+            drop.pos.x += (p.pos.x - drop.pos.x) * invDist * 420 * dt;
+            drop.pos.y += (p.pos.y - drop.pos.y) * invDist * 420 * dt;
           }
 
-          if (dist <= 42) {
+          if (dist <= 68) {
             const itemId = drop.itemId;
             p.items[itemId] = (p.items[itemId] || 0) + 1;
             this.state.updateCalculatedStats();
@@ -7380,11 +8994,161 @@ export class Simulation {
     this.state.itemDrops = alive;
   }
 
+  private spawnSequentialEventElite(ev: WorldEventState, waveIndex: number): string {
+    const baseAngle = (waveIndex - 1) * ((Math.PI * 2) / 3) + this.state.rng.range(-0.35, 0.35);
+    const bounds = this.state.terrain.getPlayableBounds(90);
+    let sx = ev.pos.x;
+    let sy = ev.pos.y;
+    let spawnElev = this.state.terrain.getElevation(sx, sy, 1e6, 22).height;
+
+    for (let attempt = 0; attempt < 12; attempt++) {
+      const ang = baseAngle + attempt * (Math.PI / 6);
+      const dist = attempt < 6 ? Math.max(70, ev.radius * 0.82) : 55;
+      const cx = Math.max(bounds.minX, Math.min(bounds.maxX, ev.pos.x + Math.cos(ang) * dist));
+      const cy = Math.max(bounds.minY, Math.min(bounds.maxY, ev.pos.y + Math.sin(ang) * dist));
+      const sample = this.state.terrain.getElevation(cx, cy, 1e6, 22);
+      if (sample.isWalkable) {
+        sx = cx;
+        sy = cy;
+        spawnElev = sample.height;
+        break;
+      }
+    }
+
+    const cfg = ENEMY_CONFIGS.elite;
+    const { tierDef } = getDifficultyTier(this.state.gameTime);
+    const waveMult = 0.9 + (waveIndex - 1) * 0.12;
+    const maxHp = Math.max(80, Math.round(cfg.maxHealth * tierDef.hpMultiplier * waveMult));
+    const eliteId = `event_elite_${ev.id}_w${waveIndex}_${this.nextEnemyId++}`;
+
+    const elite: EnemyState = {
+      id: eliteId,
+      type: 'elite',
+      pos: { x: sx, y: sy },
+      velocity: { x: 0, y: 0 },
+      z: spawnElev,
+      groundZ: spawnElev,
+      health: maxHp,
+      maxHealth: maxHp,
+      speed: cfg.speed * tierDef.speedMultiplier,
+      touchDamage: Math.round(cfg.touchDamage * tierDef.damageMultiplier),
+      attackCooldown: cfg.attackCooldown,
+      attackCooldownRemaining: 0.75,
+      attackRange: cfg.attackRange,
+      isElite: true,
+      isBoss: false,
+      isScriptedEventEnemy: true,
+      currencyReward: cfg.currencyReward,
+      xpReward: cfg.xpReward,
+      radius: cfg.radius,
+      isSpawning: true,
+      spawnProgress: 0,
+      spawnDuration: 0.65,
+      isAlerted: true
+    };
+
+    this.state.enemies.push(elite);
+    this.state.events.push({
+      type: 'enemy_emerging',
+      data: { id: elite.id, type: elite.type, pos: { x: sx, y: sy } }
+    });
+    return eliteId;
+  }
+
+  private buildDashEventPlatforms(ev: WorldEventState): DashEventPlatform[] {
+    const platforms: DashEventPlatform[] = [];
+    const baseElev = this.state.terrain.getElevation(ev.pos.x, ev.pos.y, 1e6, 22).height + (ev.zOffset ?? 0);
+    const spiralRadius = 115;
+    const baseAngle = ev.rotationY ?? 0;
+    // Standard single jump reaches ~115u apex (vz=470, g=960); 74u vertical step per platform is comfortably reachable in 1 jump
+    const stepHeight = 74;
+    let prevZ = baseElev;
+
+    for (let i = 1; i <= 5; i++) {
+      const angle = baseAngle + (i - 1) * 1.12;
+      const px = ev.pos.x + Math.cos(angle) * spiralRadius;
+      const py = ev.pos.y + Math.sin(angle) * spiralRadius;
+      const groundAtP = this.state.terrain.getElevation(px, py, 1e6, 22).height;
+      const pz = Math.max(prevZ + stepHeight, groundAtP + 40);
+      prevZ = pz;
+      platforms.push({
+        index: i,
+        x: px,
+        y: py,
+        z: pz,
+        radius: 60,
+        reached: false
+      });
+    }
+    return platforms;
+  }
+
+  private syncActiveDashPlatforms(): void {
+    const active: DashEventPlatform[] = [];
+    for (let i = 0; i < this.state.worldEvents.length; i++) {
+      const ev = this.state.worldEvents[i];
+      if (ev.type === 'dash_totem' && ev.isActive && !ev.isCompleted && ev.dashPlatforms) {
+        for (let j = 0; j < ev.dashPlatforms.length; j++) {
+          active.push(ev.dashPlatforms[j]);
+        }
+      }
+    }
+    this.state.terrain.activeDashPlatforms = active;
+  }
+
+  private findUltimatePayloadSpawnPos(shrinePos: Vector2): { x: number; y: number; z: number } {
+    const bounds = this.state.terrain.getPlayableBounds(110);
+    const distances = [620, 520, 720, 440, 360];
+    const startAngle = this.state.rng.range(0, Math.PI * 2);
+
+    let fallback: { x: number; y: number; z: number } | null = null;
+
+    for (let dIdx = 0; dIdx < distances.length; dIdx++) {
+      const dist = distances[dIdx];
+      for (let a = 0; a < 16; a++) {
+        const ang = startAngle + (a / 16) * Math.PI * 2;
+        const cx = shrinePos.x + Math.cos(ang) * dist;
+        const cy = shrinePos.y + Math.sin(ang) * dist;
+        if (cx < bounds.minX || cx > bounds.maxX || cy < bounds.minY || cy > bounds.maxY) continue;
+
+        const sample = this.state.terrain.getElevation(cx, cy, 1e6, 22);
+        if (!sample.isWalkable) continue;
+
+        let blockedByObstacle = false;
+        for (let o = 0; o < this.state.obstacles.length; o++) {
+          const obs = this.state.obstacles[o];
+          if (Math.hypot(cx - obs.pos.x, cy - obs.pos.y) < obs.radius + 36) {
+            blockedByObstacle = true;
+            break;
+          }
+        }
+        if (blockedByObstacle) continue;
+
+        if (!fallback) {
+          fallback = { x: cx, y: cy, z: sample.height };
+        }
+        if (!sample.isInWater && sample.surfaceType !== 'chasm') {
+          return { x: cx, y: cy, z: sample.height };
+        }
+      }
+    }
+
+    if (fallback) return fallback;
+    const safeX = Math.max(bounds.minX, Math.min(bounds.maxX, shrinePos.x + 320));
+    const safeY = Math.max(bounds.minY, Math.min(bounds.maxY, shrinePos.y));
+    return {
+      x: safeX,
+      y: safeY,
+      z: this.state.terrain.getElevation(safeX, safeY, 1e6, 22).height
+    };
+  }
+
   /**
    * World Events System:
-   * 1. Primal Totem (Basic Skill Altering / Leveling)
-   * 2. Orbital Uplink (Ultimate Skill Altering / Leveling)
-   * 3. Trial of Corruption (Enemy Buff/Debuff Risk & Reward)
+   * 1. Primal Totem (LMB Augment — Fight within range for duration)
+   * 2. Secondary Totem (RMB Augment — Fight within range; 3 sequential Elites)
+   * 3. Dash Totem (Dash Augment — 5 jump-high platforms appear on start; jump to reach top)
+   * 4. Orbital Uplink (Ultimate Augment — Collect core guided by huge vertical light & deliver; +25% move speed, attacks disabled while carrying)
    */
   private updateWorldEvents(dt: number, input: InputSnapshot): void {
     const p = this.state.player;
@@ -7395,10 +9159,24 @@ export class Simulation {
 
       const d = Math.hypot(p.pos.x - ev.pos.x, p.pos.y - ev.pos.y);
 
-      // Event 1: Primal Totem (Basic Skill Altering / Leveling)
+      // Event 1: LMB Augment Event (Fight within range for duration)
       if (ev.type === 'primal_totem') {
         if (d <= ev.radius) {
+          if (!ev.isActive && ev.chargeProgress <= 0) {
+            this.state.events.push({
+              type: 'world_event_activated',
+              data: { id: ev.id, type: ev.type, name: ev.name }
+            });
+            this.state.events.push({
+              type: 'overseer_comm',
+              data: {
+                text: 'Bio-resonance field engaged. Remain within the perimeter and repel hostile organisms until synchronization reaches 100%.',
+                durationSec: 6.5
+              }
+            });
+          }
           ev.isActive = true;
+          this.unlockStage1EnemySpawning('world_event_triggered');
           ev.chargeProgress = Math.min(100, ev.chargeProgress + (100 / 14) * dt);
           ev.pulseTimer += dt;
 
@@ -7422,6 +9200,11 @@ export class Simulation {
             }
           }
 
+          if (ev.chargeProgress >= 50 && !ev.hasSpawnedBoss50) {
+            ev.hasSpawnedBoss50 = true;
+            this.spawnEventBoss(ev.pos);
+          }
+
           if (ev.chargeProgress >= 100) {
             ev.isCompleted = true;
             ev.isActive = false;
@@ -7432,66 +9215,44 @@ export class Simulation {
               if (v.health > 0) this.damageEnemy(v, 160, v.pos);
             }
 
-            this.state.events.push({
-              type: 'world_event_completed',
-              data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos } }
-            });
+            this.handleWorldEventCompleted(ev, true);
 
             // Opens draft with ONLY Basic Skill Evolutions!
             this.queueBuffDraft('basic_skill_totem');
           }
         } else if (ev.chargeProgress > 0 && !ev.isCompleted) {
-          ev.isActive = false;
           ev.chargeProgress = Math.max(0, ev.chargeProgress - 3.5 * dt);
+          if (ev.chargeProgress <= 0) {
+            ev.isActive = false;
+          }
         }
       }
 
-      // Event 2: Kinetic Blade Conduit (Secondary Skill Altering)
+      // Event 2: RMB Augment Event (3 Elites come one after another)
       else if (ev.type === 'secondary_totem') {
-        if (d <= ev.radius) {
+        if (!ev.isActive && d <= ev.radius) {
           ev.isActive = true;
-          ev.chargeProgress = Math.min(100, ev.chargeProgress + (100 / 14) * dt);
-          ev.pulseTimer += dt;
+          this.unlockStage1EnemySpawning('world_event_triggered');
+          ev.killCount = 0;
+          ev.killTarget = 3;
+          ev.eliteWaveIndex = 1;
+          ev.chargeProgress = 0;
+          ev.activeEliteId = this.spawnSequentialEventElite(ev, 1);
 
-          if (ev.pulseTimer >= 2.2) {
-            ev.pulseTimer = 0;
-            this.state.events.push({
-              type: 'world_event_pulse',
-              data: { id: ev.id, pos: { ...ev.pos }, radius: ev.radius }
-            });
-          }
-
-          if (ev.chargeProgress >= 100) {
-            ev.isCompleted = true;
-            ev.isActive = false;
-
-            const victims = this.spatialGrid.getNearby(ev.pos, ev.radius + 40);
-            for (const v of victims) {
-              if (v.health > 0) this.damageEnemy(v, 160, v.pos);
+          this.state.events.push({
+            type: 'world_event_activated',
+            data: { id: ev.id, type: ev.type, name: ev.name }
+          });
+          this.state.events.push({
+            type: 'overseer_comm',
+            data: {
+              text: 'Kinetic conduit activated. Three elite organisms are converging one after another—eliminate all three to claim your secondary augmentation.',
+              durationSec: 7.0
             }
-
-            this.state.events.push({
-              type: 'world_event_completed',
-              data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos } }
-            });
-
-            // Opens draft with ONLY Secondary Skill Enhancements!
-            this.queueBuffDraft('secondary_skill_totem');
-          }
-        } else if (ev.chargeProgress > 0 && !ev.isCompleted) {
-          ev.isActive = false;
-          ev.chargeProgress = Math.max(0, ev.chargeProgress - 3.5 * dt);
-        }
-      }
-
-      // Event 3: Phase Thruster Pylon (Dash / Utility Skill Altering)
-      else if (ev.type === 'dash_totem') {
-        if (d <= ev.radius) {
-          ev.isActive = true;
-          ev.chargeProgress = Math.min(100, ev.chargeProgress + (100 / 14) * dt);
+          });
+        } else if (ev.isActive) {
           ev.pulseTimer += dt;
-
-          if (ev.pulseTimer >= 2.2) {
+          if (ev.pulseTimer >= 2.5) {
             ev.pulseTimer = 0;
             this.state.events.push({
               type: 'world_event_pulse',
@@ -7499,78 +9260,212 @@ export class Simulation {
             });
           }
 
-          if (ev.chargeProgress >= 100) {
-            ev.isCompleted = true;
-            ev.isActive = false;
+          const activeElite = ev.activeEliteId
+            ? this.state.enemies.find((e) => e.id === ev.activeEliteId && e.health > 0)
+            : undefined;
 
-            const victims = this.spatialGrid.getNearby(ev.pos, ev.radius + 40);
-            for (const v of victims) {
-              if (v.health > 0) this.damageEnemy(v, 160, v.pos);
-            }
+          if (activeElite) {
+            const kills = ev.killCount || 0;
+            const waveHpLoss = Math.max(0, Math.min(1, 1 - activeElite.health / Math.max(1, activeElite.maxHealth)));
+            ev.chargeProgress = Math.min(99, ((kills + waveHpLoss) / 3) * 100);
+          } else {
+            ev.killCount = (ev.killCount || 0) + 1;
+            if (ev.killCount < 3) {
+              ev.eliteWaveIndex = ev.killCount + 1;
+              ev.activeEliteId = this.spawnSequentialEventElite(ev, ev.eliteWaveIndex);
+              ev.chargeProgress = Math.round((ev.killCount / 3) * 100);
+              this.state.events.push({
+                type: 'world_event_pulse',
+                data: { id: ev.id, pos: { ...ev.pos }, radius: ev.radius }
+              });
+              this.state.events.push({
+                type: 'overseer_comm',
+                data: {
+                  text:
+                    ev.eliteWaveIndex === 2
+                      ? 'First elite neutralized. Second apex organism incoming—stay sharp.'
+                      : 'Two elites eliminated. Final apex organism approaching!',
+                  durationSec: 4.8
+                }
+              });
+            } else {
+              ev.chargeProgress = 100;
+              ev.isCompleted = true;
+              ev.isActive = false;
+              ev.activeEliteId = null;
 
-            this.state.events.push({
-              type: 'world_event_completed',
-              data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos } }
-            });
-
-            // Opens draft with ONLY Dash Skill Enhancements!
-            this.queueBuffDraft('dash_skill_totem');
-          }
-        } else if (ev.chargeProgress > 0 && !ev.isCompleted) {
-          ev.isActive = false;
-          ev.chargeProgress = Math.max(0, ev.chargeProgress - 3.5 * dt);
-        }
-      }
-
-      // Event 2: Orbital Uplink Conduit (Ultimate Skill Altering / Leveling)
-      else if (ev.type === 'orbital_uplink') {
-        if (d <= ev.radius) {
-          ev.isActive = true;
-          ev.chargeProgress = Math.min(100, ev.chargeProgress + (100 / 16) * dt);
-          ev.pulseTimer += dt;
-
-          if (ev.pulseTimer >= 3.0) {
-            ev.pulseTimer = 0;
-            this.state.events.push({
-              type: 'world_event_pulse',
-              data: { id: ev.id, pos: { ...ev.pos }, radius: ev.radius }
-            });
-          }
-
-          if (ev.chargeProgress >= 100) {
-            ev.isCompleted = true;
-            ev.isActive = false;
-
-            // Free cataclysmic orbital strike on uplink location!
-            this.state.events.push({
-              type: 'damage_dealt',
-              data: {
-                pos: { ...ev.pos },
-                radius: 180,
-                damage: 350,
-                isOrbitalBlast: true
+              const victims = this.spatialGrid.getNearby(ev.pos, ev.radius + 40);
+              for (const v of victims) {
+                if (v.health > 0) this.damageEnemy(v, 160, v.pos);
               }
-            });
 
-            this.state.events.push({
-              type: 'world_event_completed',
-              data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos } }
-            });
+              this.handleWorldEventCompleted(ev, true);
 
-            // Opens draft with ONLY Ultimate Skill Evolutions!
-            this.queueBuffDraft('ultimate_beacon');
+              // Opens draft with ONLY Secondary Skill Enhancements!
+              this.queueBuffDraft('secondary_skill_totem');
+            }
           }
-        } else if (ev.chargeProgress > 0 && !ev.isCompleted) {
-          ev.isActive = false;
-          ev.chargeProgress = Math.max(0, ev.chargeProgress - 3.5 * dt);
         }
       }
 
-      // Event 3: Trial of Corruption (Enemy Buff/Debuff Modifier Event)
+      // Event 3: Dash Augment Event (5 jump-high platforms appear when event starts; jump to reach top)
+      else if (ev.type === 'dash_totem') {
+        if (!ev.isActive && d <= ev.radius) {
+          ev.isActive = true;
+          this.unlockStage1EnemySpawning('world_event_triggered');
+          ev.highestPlatformReached = 0;
+          ev.chargeProgress = 0;
+          ev.dashPlatforms = this.buildDashEventPlatforms(ev);
+          this.syncActiveDashPlatforms();
+
+          this.state.events.push({
+            type: 'world_event_activated',
+            data: { id: ev.id, type: ev.type, name: ev.name }
+          });
+          this.state.events.push({
+            type: 'overseer_comm',
+            data: {
+              text: 'Phase propulsion trial initiated. Five aerial stepping platforms have materialized around the pylon—jump from platform to platform to reach the fifth summit pad at the top!',
+              durationSec: 8.0
+            }
+          });
+        } else if (ev.isActive && ev.dashPlatforms) {
+          if (this.state.terrain.activeDashPlatforms.length === 0) {
+            this.syncActiveDashPlatforms();
+          }
+
+          for (let pIdx = 0; pIdx < ev.dashPlatforms.length; pIdx++) {
+            const plat = ev.dashPlatforms[pIdx];
+            const pd = Math.hypot(p.pos.x - plat.x, p.pos.y - plat.y);
+            if (pd <= plat.radius + 14 && p.z >= plat.z - 20 && p.z <= plat.z + 65) {
+              plat.reached = true;
+              if (plat.index > (ev.highestPlatformReached || 0)) {
+                ev.highestPlatformReached = plat.index;
+                ev.chargeProgress = Math.min(100, plat.index * 20);
+                this.state.events.push({
+                  type: 'world_event_pulse',
+                  data: { id: ev.id, pos: { x: plat.x, y: plat.y }, radius: plat.radius }
+                });
+              }
+
+              if (plat.index === 5) {
+                ev.chargeProgress = 100;
+                ev.isCompleted = true;
+                ev.isActive = false;
+                ev.dashPlatforms = [];
+                this.syncActiveDashPlatforms();
+
+                const victims = this.spatialGrid.getNearby(ev.pos, ev.radius + 40);
+                for (const v of victims) {
+                  if (v.health > 0) this.damageEnemy(v, 160, v.pos);
+                }
+
+                this.handleWorldEventCompleted(ev, true);
+
+                // Opens draft with ONLY Dash Skill Enhancements!
+                this.queueBuffDraft('dash_skill_totem');
+                break;
+              }
+            }
+          }
+        }
+      }
+
+      // Event 4: Ultimate Augment Event (Collect core guided by huge vertical light & deliver; +25% move speed, no attacks while carrying)
+      else if (ev.type === 'orbital_uplink') {
+        if (!ev.isActive && d <= ev.radius) {
+          ev.isActive = true;
+          this.unlockStage1EnemySpawning('world_event_triggered');
+          ev.payloadCollected = false;
+          ev.chargeProgress = 10;
+          ev.payloadPos = this.findUltimatePayloadSpawnPos(ev.pos);
+
+          this.state.events.push({
+            type: 'world_event_activated',
+            data: { id: ev.id, type: ev.type, name: ev.name }
+          });
+          this.state.events.push({
+            type: 'overseer_comm',
+            data: {
+              text: 'Orbital uplink engaged. Follow the massive vertical light beam to retrieve the quantum core and return it here. Warning: carrying the core disables all attacks, but increases movement speed by 25%.',
+              durationSec: 8.0
+            }
+          });
+        } else if (ev.isActive) {
+          if (!ev.payloadCollected && ev.payloadPos) {
+            const distToItem = Math.hypot(p.pos.x - ev.payloadPos.x, p.pos.y - ev.payloadPos.y);
+            const totalDist = Math.max(100, Math.hypot(ev.payloadPos.x - ev.pos.x, ev.payloadPos.y - ev.pos.y));
+            ev.chargeProgress = Math.max(10, Math.min(48, Math.round((1 - Math.min(1, distToItem / totalDist)) * 38) + 10));
+
+            if (distToItem <= 85) {
+              ev.payloadCollected = true;
+              ev.chargeProgress = 50;
+              p.isCarryingEventPayload = true;
+              p.carryingEventId = ev.id;
+              this.state.updateCalculatedStats();
+
+              this.state.events.push({
+                type: 'world_event_pulse',
+                data: { id: ev.id, pos: { x: ev.payloadPos.x, y: ev.payloadPos.y }, radius: 110 }
+              });
+              this.state.events.push({
+                type: 'overseer_comm',
+                data: {
+                  text: 'Quantum core secured! Weapon systems offline; thruster speed increased by 25%. Follow the vertical light beacon back to the uplink shrine to deliver it!',
+                  durationSec: 7.0
+                }
+              });
+            }
+          } else if (ev.payloadCollected) {
+            if (!p.isCarryingEventPayload) {
+              p.isCarryingEventPayload = true;
+              p.carryingEventId = ev.id;
+              this.state.updateCalculatedStats();
+            }
+            const totalDist = ev.payloadPos
+              ? Math.max(100, Math.hypot(ev.payloadPos.x - ev.pos.x, ev.payloadPos.y - ev.pos.y))
+              : 600;
+            ev.chargeProgress = Math.max(50, Math.min(99, 50 + Math.round((1 - Math.min(1, d / totalDist)) * 49)));
+
+            if (d <= ev.radius) {
+              p.isCarryingEventPayload = false;
+              p.carryingEventId = null;
+              this.state.updateCalculatedStats();
+
+              ev.chargeProgress = 100;
+              ev.isCompleted = true;
+              ev.isActive = false;
+
+              // Free cataclysmic orbital strike on uplink location!
+              const victims = this.spatialGrid.getNearby(ev.pos, 180);
+              for (const v of victims) {
+                if (v.health > 0) this.damageEnemy(v, 350, v.pos);
+              }
+              this.state.events.push({
+                type: 'damage_dealt',
+                data: {
+                  pos: { ...ev.pos },
+                  radius: 180,
+                  damage: 350,
+                  isOrbitalBlast: true
+                }
+              });
+
+              this.handleWorldEventCompleted(ev, true);
+
+              // Opens draft with ONLY Ultimate Skill Evolutions!
+              this.queueBuffDraft('ultimate_beacon');
+            }
+          }
+        }
+      }
+
+      // Event 5: Trial of Corruption (Enemy Buff/Debuff Modifier Event)
       else if (ev.type === 'void_corruption') {
         if (!ev.isActive) {
           if (d <= 70 && input.wantInteract) {
             ev.isActive = true;
+            this.unlockStage1EnemySpawning('world_event_triggered');
             ev.durationTimer = 45;
             ev.killCount = 0;
             this.state.events.push({
@@ -7607,22 +9502,12 @@ export class Simulation {
             ev.isCompleted = true;
             ev.isActive = false;
 
-            this.state.events.push({
-              type: 'world_event_completed',
-              data: { id: ev.id, type: ev.type, name: ev.name, pos: { ...ev.pos } }
-            });
+            this.handleWorldEventCompleted(ev, false);
 
             // Opens draft with Legendary Corruption Mutations!
             this.queueBuffDraft('void_corruption');
           }
         }
-      }
-
-      // Restore Flying Boss (Brood Queen / Flying Sovereign) as Event Boss:
-      // Spawns exactly once when any charging event reaches 50% progress
-      if (ev.isActive && ev.chargeProgress >= 50 && !ev.hasSpawnedBoss50) {
-        ev.hasSpawnedBoss50 = true;
-        this.spawnEventBoss(ev.pos);
       }
     }
   }
@@ -7644,21 +9529,7 @@ export class Simulation {
       };
     }
 
-    // 2. Check ground Augment Capsules (deliberate manual pickup)
-    for (let i = 0; i < this.state.itemDrops.length; i++) {
-      const drop = this.state.itemDrops[i];
-      if (drop.isBuffDrop && drop.settled) {
-        const d = Math.hypot(p.pos.x - drop.pos.x, p.pos.y - drop.pos.y);
-        if (d <= 55) {
-          return {
-            key: 'E',
-            label: 'Absorb Augment Capsule'
-          };
-        }
-      }
-    }
-
-    // 3. Check World Events
+    // 2. World Events (Random buff drops on ground are pass-through collected without prompt)
     for (let i = 0; i < this.state.worldEvents.length; i++) {
       const ev = this.state.worldEvents[i];
       const d = Math.hypot(p.pos.x - ev.pos.x, p.pos.y - ev.pos.y);
@@ -7675,9 +9546,15 @@ export class Simulation {
           key: 'ZONE',
           label: ev.type === 'primal_totem'
             ? `Bio-Resonance Synchronizing [${Math.round(ev.chargeProgress)}%]`
-            : ev.type === 'orbital_uplink'
-            ? `Celestial Uplink Charging [${Math.round(ev.chargeProgress)}%]`
-            : `Trial of Corruption [${ev.killCount || 0}/${ev.killTarget || 12} Eliminated (${Math.ceil(ev.durationTimer || 0)}s)]`,
+            : ev.type === 'secondary_totem'
+              ? `Kinetic Conduit: Elite ${Math.min(3, (ev.killCount || 0) + 1)}/3 Active`
+              : ev.type === 'dash_totem'
+                ? `Ascend Phase Platforms [${ev.highestPlatformReached || 0}/5 Reached]`
+                : ev.type === 'orbital_uplink'
+                  ? ev.payloadCollected
+                    ? `Deliver Quantum Core to Conduit!`
+                    : `Follow Sky Beacon to Quantum Core`
+                  : `Trial of Corruption [${ev.killCount || 0}/${ev.killTarget || 12} Eliminated (${Math.ceil(ev.durationTimer || 0)}s)]`,
           activeEvent: ev
         };
       }
@@ -7690,30 +9567,49 @@ export class Simulation {
       const artElev = this.state.terrain.calculateHeight(art.pos.x, art.pos.y);
       const vertOk = !this.state.terrain.isCustomTestMap || Math.abs(p.z - artElev) <= 180;
       if (d <= art.radius + 60 && vertOk) {
-        if (!art.isCharged) {
+        const policy = getStageArtifactPolicy(this.state.stageNumber);
+        const phase = art.phase || (policy.mode === 'four_enhancements' ? 'locked_missing_modules' : 'charging');
+        if (phase === 'locked_missing_modules') {
+          const rec = this.state.completedEnhancementCategories.size;
+          const req = policy.requiredEnhancementCategories.length || 4;
+          return {
+            key: 'E',
+            label: `Inspect Artifact Tower (Safeguards Offline — ${rec}/${req})`
+          };
+        } else if (phase === 'charging' || !art.isCharged) {
           return {
             key: 'TELEPORTER',
             label: `Synchronizing... [${Math.floor(art.chargeProgress)}%]`
           };
-        } else if (art.isTeleporterReady && !art.isBossSpawned) {
+        } else if (phase === 'unlocked_ready' && art.isTeleporterReady && !art.isBossSpawned) {
           return {
             key: 'E',
-            label: 'TELEPORTER READY — PRESS E'
+            label: 'Activate Artifact Tower'
           };
-        } else if (art.isSummoning) {
+        } else if (phase === 'boss_summoning' || art.isSummoning) {
           return {
             key: 'WARNING',
-            label: 'SEISMIC ANOMALY DETECTED — BOSS EMERGING!'
+            label: 'SEISMIC ANOMALY DETECTED — STAGE 1 BOSS EMERGING!'
           };
-        } else if (!art.isBossDefeated) {
+        } else if (phase === 'boss_active' || !art.isBossDefeated) {
           return {
             key: 'LOCKED',
-            label: 'DEFEAT THE BOSS TO ACTIVATE TELEPORTER'
+            label: 'DEFEAT STAGE 1 BOSS TO RESTORE TOWER'
+          };
+        } else if (phase === 'restoring') {
+          return {
+            key: 'TOWER',
+            label: 'Restoring Tower Safeguards...'
+          };
+        } else if (phase === 'teleport_preparing') {
+          return {
+            key: 'TELEPORTER',
+            label: 'AWAITING TELEPORT SYNCHRONIZATION...'
           };
         } else {
           return {
             key: 'E',
-            label: 'TELEPORTER UNLOCKED — PRESS E'
+            label: 'Activate Portal — Initiate Departure'
           };
         }
       }

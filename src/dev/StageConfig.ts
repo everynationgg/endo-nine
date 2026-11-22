@@ -1,9 +1,9 @@
-import type { EnemyType, Vector2, WorldEventType } from '../sim/types';
+import type { EnemyType, TerrainSurfaceCategory, Vector2, WorldEventType } from '../sim/types';
 import type { TerrainSystem } from '../sim/TerrainSystem';
 
-export type { EnemyType, WorldEventType };
+export type { EnemyType, TerrainSurfaceCategory, WorldEventType };
 
-export type StageProfileKey = 'procedural' | 'untitled_crater';
+export type StageProfileKey = 'procedural' | 'custom_map';
 
 export type StageObstacleType = 'rock' | 'crystal' | 'flora' | 'mushroom' | 'tree';
 
@@ -86,6 +86,8 @@ export interface StageObstacleConfig {
 export interface StageEnemySpawnRegionConfig {
   id: string;
   name: string;
+  mode?: 'include' | 'exclude';
+  usage?: 'enemy' | 'pod' | 'both';
   shape: 'circle' | 'rect';
   x: number;
   y: number;
@@ -127,6 +129,7 @@ export interface StageLayoutProfile {
   pods: StagePodConfig[];
   obstacles: StageObstacleConfig[];
   enemySpawnRegions: StageEnemySpawnRegionConfig[];
+  terrainOverrides?: Record<string, TerrainSurfaceCategory>;
 }
 
 export interface StageDefinition {
@@ -147,7 +150,7 @@ export const STAGE_REGISTRY: Record<string, StageDefinition> = {
     stageNumber: 1,
     name: 'The Wreckage',
     configPath: '/stages/stage1.config.json',
-    supportedProfiles: ['procedural', 'untitled_crater']
+    supportedProfiles: ['procedural', 'custom_map']
   }
 };
 
@@ -441,8 +444,9 @@ export interface StageCatalogItem {
 export const STAGE_OBJECT_CATALOG: StageCatalogItem[] = [
   { key: 'singleton_player_spawn', label: 'Player Spawn (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'player_spawn', hint: 'Unique start spawn point for playable hero.' },
   { key: 'singleton_teleporter', label: 'Overseer Teleporter (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'teleporter', hint: 'Primary Stage 1 objective teleporter.' },
-  { key: 'singleton_boss_spawn', label: 'Stage Boss Spawn (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'boss_spawn', hint: 'Emergence location for Stage 1 Colossus / Titan.' },
-  { key: 'region_enemy_zone', label: 'Enemy Spawn Region', categoryLabel: 'Spawns & Regions', kind: 'enemy_region', hint: 'Configurable rectangular zone constraining enemy types, density, and elevation.' },
+  { key: 'singleton_boss_spawn', label: 'Stage Boss Spawn (Move/Select)', categoryLabel: 'Spawns & Regions', kind: 'singleton', singletonCategory: 'boss_spawn', hint: 'Emergence location for Stage 1 Boss.' },
+  { key: 'region_enemy_zone', label: 'Enemy Spawn Region (Include)', categoryLabel: 'Spawns & Regions', kind: 'enemy_region', hint: 'Approved light-brown spawn region constraining enemy types, density, and elevation.' },
+  { key: 'region_enemy_exclusion', label: 'Enemy/Pod Exclusion Region', categoryLabel: 'Spawns & Regions', kind: 'enemy_region', hint: 'Dark-brown or forbidden exclusion zone blocking enemy/pod spawning.' },
 
   { key: 'ev_primal', label: 'Primary Enhancement Totem', categoryLabel: 'Events', kind: 'world_event', eventType: 'primal_totem', hint: 'Primary attack (LMB) enhancement shrine event.' },
   { key: 'ev_secondary', label: 'Secondary Enhancement Totem', categoryLabel: 'Events', kind: 'world_event', eventType: 'secondary_totem', hint: 'Secondary skill (RMB) enhancement shrine event.' },

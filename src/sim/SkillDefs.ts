@@ -7,8 +7,8 @@ export const SKILL_ENERGY_PULSE: SkillDef = {
   id: 'energy_pulse',
   name: 'Service Pistol',
   cooldown: 0.65,
-  range: 460,
-  baseDamage: 26,
+  range: 900,
+  baseDamage: 15,
   description: 'Fires standard high-velocity military pistol rounds at the nearest valid target.',
   icon: '/assets/rally_command.png'
 };
@@ -18,7 +18,7 @@ export const SKILL_SCATTER_BLASTER: SkillDef = {
   id: 'scatter_blaster',
   name: 'Scatter Blaster',
   cooldown: 0.85,
-  range: 360,
+  range: 700,
   baseDamage: 18, // 3 pellets x 18 = 54 damage point blank!
   description: 'Fires a high-impact tri-slug spread of searing plasma pellets in a cone.',
   icon: '/assets/rally_command.png'
@@ -29,7 +29,7 @@ export const SKILL_ARC_CANNON: SkillDef = {
   id: 'arc_cannon',
   name: 'Arc Cannon',
   cooldown: 0.72,
-  range: 440,
+  range: 860,
   baseDamage: 24,
   description: 'Discharges an instant chain-lightning bolt that arcs through up to 3 nearby foes.',
   icon: '/assets/item_chain_spark.png'
@@ -40,7 +40,7 @@ export const SKILL_HYPER_BEAM: SkillDef = {
   id: 'hyper_beam',
   name: 'Hyper-Plasma Lance',
   cooldown: 0.55,
-  range: 560,
+  range: 1080,
   baseDamage: 38,
   description: 'Fires an instant, high-energy piercing laser beam that vaporizes all enemies along its line.',
   icon: '/assets/proj_wave.png'
@@ -51,7 +51,7 @@ export const SKILL_GATLING_MINIGUN: SkillDef = {
   id: 'gatling_minigun',
   name: 'Bio-Kinetic Minigun',
   cooldown: 0.20,
-  range: 480,
+  range: 920,
   baseDamage: 16,
   description: 'Unleashes a blistering dual-stream barrage of high-velocity golden tracer needles.',
   icon: '/assets/item_overdrive.png'
@@ -63,7 +63,7 @@ export const SKILL_EXPLOSIVE_BOMB: SkillDef = {
   id: 'explosive_bomb',
   name: 'Cross Slash',
   cooldown: 3.4,
-  range: 480,
+  range: 920,
   baseDamage: 72,
   description: 'Unleashes two golden scissor-like blades crossing in front in an X-shaped arc, dealing heavy area damage.',
   icon: '/assets/defensive_protocol.png'
@@ -76,7 +76,7 @@ export const SKILL_PIERCING_WAVE: SkillDef = {
   id: 'piercing_wave',
   name: 'Defensive Protocol',
   cooldown: 3.0,
-  range: 520,
+  range: 1000,
   baseDamage: 54,
   description: 'Unleashes a broad kinetic energy wave that pierces through lines of enemies.',
   icon: '/assets/defensive_protocol.png'
@@ -87,7 +87,7 @@ export const SKILL_CRYO_GRENADE: SkillDef = {
   id: 'cryo_grenade',
   name: 'Cryo Grenade',
   cooldown: 3.8,
-  range: 480,
+  range: 920,
   baseDamage: 68,
   description: 'Launches an explosive cryo canister that chills and freezes enemies in a frost blast.',
   icon: '/assets/defensive_protocol.png'
@@ -98,7 +98,7 @@ export const SKILL_GRAVITY_VORTEX: SkillDef = {
   id: 'gravity_vortex',
   name: 'Gravity Vortex',
   cooldown: 4.5,
-  range: 500,
+  range: 960,
   baseDamage: 75,
   description: 'Fires a miniature gravitational singularity that pulls all enemies inward before imploding.',
   icon: '/assets/defensive_protocol.png'
@@ -110,7 +110,7 @@ export const SKILL_TACTICAL_DASH: SkillDef = {
   id: 'tactical_dash',
   name: 'Impact Dash',
   cooldown: 3.5,
-  range: 115,
+  range: 220,
   baseDamage: 48,
   description: 'High-speed tactical dash. Colliding with an enemy triggers a concussive shockwave that damages nearby foes.',
   icon: '/assets/combat_dash.png'
@@ -121,7 +121,7 @@ export const SKILL_BLINK_WARP: SkillDef = {
   id: 'blink_warp',
   name: 'Phase Blink',
   cooldown: 4.2,
-  range: 260,
+  range: 500,
   baseDamage: 35,
   description: 'Instantly teleports in moving direction, triggering a shockwave upon arrival.',
   icon: '/assets/combat_dash.png'
@@ -133,7 +133,7 @@ export const SKILL_ORBITAL_JUDGMENT: SkillDef = {
   id: 'orbital_judgment',
   name: 'Orbital Strike',
   cooldown: 11.0,
-  range: 320,
+  range: 620,
   baseDamage: 240,
   description: 'Calls down an orbital satellite energy strike from high above, detonating in an expanding shockwave.',
   icon: '/assets/tactical_strike.png'
@@ -144,7 +144,7 @@ export const SKILL_CARPET_NUKE: SkillDef = {
   id: 'carpet_nuke',
   name: 'Carpet Nuke Barrage',
   cooldown: 14.0,
-  range: 750,
+  range: 1350,
   baseDamage: 260,
   description: 'Calls in a devastating 5-cluster nuclear airstrike that bombards the entire sector in flames.',
   icon: '/assets/tactical_strike.png'
@@ -155,7 +155,7 @@ export const SKILL_ORBITAL_LANCE: SkillDef = {
   id: 'orbital_lance',
   name: 'Cataclysmic Lance',
   cooldown: 9.0,
-  range: 520,
+  range: 1000,
   baseDamage: 480,
   description: 'Unleashes a colossal crimson-gold orbital laser column that incinerates a massive radius.',
   icon: '/assets/critical_damage.png'
@@ -166,7 +166,7 @@ export const SKILL_JUDGEMENT_SINGULARITY: SkillDef = {
   id: 'judgement_singularity',
   name: 'Judgement Singularity',
   cooldown: 11.0,
-  range: 460,
+  range: 900,
   baseDamage: 360,
   description: 'Collapses space into a gravitational black hole that pulls all nearby enemies inward before imploding.',
   icon: '/assets/overseer_artifact.png'
@@ -177,7 +177,7 @@ export const SKILL_CHRONO_STASIS: SkillDef = {
   id: 'chrono_stasis',
   name: 'Chrono-Stasis Strike',
   cooldown: 7.5,
-  range: 420,
+  range: 820,
   baseDamage: 280,
   description: 'Detonates a temporal stasis field that freezes and stuns all enemies in place for 5 seconds.',
   icon: '/assets/cooldown_reduction.png'
@@ -243,7 +243,7 @@ export const SKILL_SEDATIVE_DOSE: SkillDef = {
   id: 'sedative_dose',
   name: 'Sedative Dose',
   cooldown: 3.5,
-  range: 520,
+  range: 980,
   baseDamage: 45,
   description: 'Fires a concentrated neuro-sedative syringe that incapacitates and stuns an enemy for 2.5s.',
   icon: '/assets/doctor/skill_sedative_dose.png'
@@ -254,7 +254,7 @@ export const SKILL_RECOVERY_FIELD: SkillDef = {
   id: 'recovery_field',
   name: 'Recovery Field',
   cooldown: 6.0,
-  range: 140,
+  range: 270,
   baseDamage: 0,
   description: 'Deploys a localized bio-regenerative nanite field that continuously restores health over 5 seconds while repositioning.',
   icon: '/assets/doctor/skill_recovery_field.png'
@@ -265,7 +265,7 @@ export const SKILL_EMERGENCY_PROTOCOL: SkillDef = {
   id: 'emergency_protocol',
   name: 'Emergency Protocol',
   cooldown: 12.0,
-  range: 260,
+  range: 500,
   baseDamage: 180,
   description: 'Surges massive medical energy that rapidly heals Doctor and emits a disabling shockwave stunning nearby enemies for 3s.',
   icon: '/assets/doctor/skill_emergency_protocol.png'

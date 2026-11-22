@@ -100,8 +100,8 @@ export class CommanderSpriteAnimator {
   private isDead: boolean = false;
   private hasGlidedInAir: boolean = false;
 
-  public readonly baseWidth: number = 52;
-  public readonly baseHeight: number = 52;
+  public readonly baseWidth: number = 104;
+  public readonly baseHeight: number = 104;
 
   constructor(
     sprite: THREE.Sprite,

@@ -309,6 +309,49 @@ interface ActiveTentacleImpact {
   maxLifetime: number;
 }
 
+interface ActiveExplosionCloud {
+  mesh: THREE.Mesh;
+  mat: THREE.ShaderMaterial;
+  vx: number;
+  vy: number;
+  vz: number;
+  drag: number;
+  lift: number;
+  startScale: number;
+  endScale: number;
+  elapsed: number;
+  duration: number;
+}
+
+interface ActiveSplatterDroplet {
+  mesh: THREE.Mesh;
+  mat: THREE.ShaderMaterial;
+  vx: number;
+  vy: number;
+  vz: number;
+  groundY: number;
+  scale: number;
+  splatColor: number;
+  spawnedSplat: boolean;
+  elapsed: number;
+  duration: number;
+}
+
+interface ActiveLavaSwirlExplosion {
+  group: THREE.Group;
+  domeMesh: THREE.Mesh;
+  domeMat: THREE.ShaderMaterial;
+  poolMesh: THREE.Mesh;
+  poolMat: THREE.ShaderMaterial;
+  ringA: THREE.Mesh;
+  ringAMat: THREE.MeshBasicMaterial;
+  ringB: THREE.Mesh;
+  ringBMat: THREE.MeshBasicMaterial;
+  elapsed: number;
+  maxLifetime: number;
+  spinSign: number;
+}
+
 interface ActiveWhiteSilhouetteGhost {
   mesh: THREE.Mesh;
   mat: THREE.ShaderMaterial;
@@ -334,13 +377,14 @@ export class ThreeVFX {
   private ghosts: ActiveGhost[] = [];
   private whiteGhosts: ActiveWhiteSilhouetteGhost[] = [];
   private healMotes: ActiveHealMote[] = [];
+  private regionalFrostMotes: ActiveHealMote[] = [];
   private lightningLines: THREE.Line[] = [];
   private bloodDecals: ActiveBloodDecal[] = [];
   private bloodTexture: THREE.Texture | null = null;
   private bloodPlaneGeo = new THREE.PlaneGeometry(28, 28);
 
-  // Terrain elevation callback so decals, target locks, and shockwaves hug slopes
-  private heightSampler: (x: number, z: number) => number = () => 0;
+  // Terrain elevation callback (optional refY avoids snapping low-elevation VFX onto tower roofs/overhangs)
+  private heightSampler: (x: number, z: number, refY?: number) => number = () => 0;
 
   // Orbital Strike 4-Phase Active Containers & Shared Geometries
   private targetLocks: ActiveTargetLock[] = [];
@@ -358,8 +402,11 @@ export class ThreeVFX {
   public activeGroundSpikes: ActiveGroundIceSpire[] = [];
   public activeSlashArcs: ActiveCrescentSlashArc[] = [];
   private activeTentacleImpacts: ActiveTentacleImpact[] = [];
-  private sharedSparkGeo = new THREE.OctahedronGeometry(1.0, 0);
-  private sharedDebrisGeo = new THREE.DodecahedronGeometry(1.0, 0);
+  private activeLavaSwirls: ActiveLavaSwirlExplosion[] = [];
+  private explosionClouds: ActiveExplosionCloud[] = [];
+  private splatterDroplets: ActiveSplatterDroplet[] = [];
+  private sharedSparkGeo!: THREE.BufferGeometry;
+  private sharedDebrisGeo!: THREE.BufferGeometry;
   private sharedDustGeo = new THREE.PlaneGeometry(1.0, 1.0);
   private dustRadialTex: THREE.CanvasTexture | null = null;
 
@@ -370,9 +417,9 @@ export class ThreeVFX {
   private sharedOrbitalLightPeakIntensity: number = 0;
 
   // Pooled Blaster Bolt Resources (eliminates per-shot ShaderMaterial compilation freezes)
-  private sharedBoltCoreGeo?: THREE.CylinderGeometry;
-  private sharedBoltTipGeo?: THREE.ConeGeometry;
-  private sharedBoltGlowGeo?: THREE.CylinderGeometry;
+  private sharedBoltCoreGeo?: THREE.BufferGeometry;
+  private sharedBoltTipGeo?: THREE.BufferGeometry;
+  private sharedBoltGlowGeo?: THREE.BufferGeometry;
   private sharedBoltTrailGeoH?: THREE.PlaneGeometry;
   private sharedBoltTrailGeoV?: THREE.PlaneGeometry;
   private sharedBoltCoreMat?: THREE.MeshBasicMaterial;
@@ -386,7 +433,7 @@ export class ThreeVFX {
   private sharedSparkMatYellow?: THREE.MeshBasicMaterial;
   private sharedSparkMatOrange?: THREE.MeshBasicMaterial;
 
-  constructor(heightSampler?: (x: number, z: number) => number) {
+  constructor(heightSampler?: (x: number, z: number, refY?: number) => number) {
     this.group = new THREE.Group();
     if (heightSampler) {
       this.heightSampler = heightSampler;
@@ -402,7 +449,41 @@ export class ThreeVFX {
         this.bloodTexture = tex;
       });
     }
+    this.sharedSparkGeo = this.createOrganicSparkQuadGeo();
+    this.sharedDebrisGeo = this.createOrganicRockClusterGeo();
     this.dustRadialTex = this.createSoftSmokeTexture();
+  }
+
+  public getActiveParticleCount(): number {
+    return (
+      this.rings.length +
+      this.beams.length +
+      this.damageTexts.length +
+      this.ghosts.length +
+      this.whiteGhosts.length +
+      this.healMotes.length +
+      this.regionalFrostMotes.length +
+      this.lightningLines.length +
+      this.bloodDecals.length +
+      this.targetLocks.length +
+      this.orbitalSequences.length +
+      this.orbitalParticles.length +
+      this.slashConvergences.length +
+      this.dashTrails.length +
+      this.dashImpacts.length +
+      this.blasterFlashes.length +
+      this.activeSingularities.length +
+      this.activeConvergences.length +
+      this.activeCryoFields.length +
+      this.activeElectricBolts.length +
+      this.activeChillBeams.length +
+      this.activeGroundSpikes.length +
+      this.activeSlashArcs.length +
+      this.activeTentacleImpacts.length +
+      this.activeLavaSwirls.length +
+      this.explosionClouds.length +
+      this.splatterDroplets.length
+    );
   }
 
   public clear(): void {
@@ -417,7 +498,7 @@ export class ThreeVFX {
       child.traverse((c) => {
         if ((c as THREE.Mesh).isMesh || (c as THREE.Line).isLine) {
           const m = c as THREE.Mesh;
-          m.geometry?.dispose();
+          if (!m.userData?.isSharedGeo) m.geometry?.dispose();
           if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
           else m.material?.dispose();
         }
@@ -445,8 +526,625 @@ export class ThreeVFX {
     this.activeGroundSpikes = [];
     this.activeSlashArcs = [];
     this.activeTentacleImpacts = [];
+    this.activeLavaSwirls = [];
+    this.explosionClouds = [];
+    this.splatterDroplets = [];
     this.whiteGhosts = [];
     this.healMotes = [];
+    this.regionalFrostMotes = [];
+  }
+
+  /** Creates double-sided crossed tapered spark-streak quad blades (zero geometric octahedron). */
+  private createOrganicSparkQuadGeo(): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const verts = new Float32Array([
+      -0.45, -1.6, 0,  0.45, -0.2, 0,  0, 1.8, 0,
+       0, 1.8, 0,      0.45, -0.2, 0, -0.45, -1.6, 0,
+      -0.45, -1.6, 0,  0, 1.8, 0,     -0.25, 0.3, 0,
+      -0.25, 0.3, 0,   0, 1.8, 0,     -0.45, -1.6, 0,
+      0, -1.6, -0.45,  0, -0.2, 0.45,  0, 1.8, 0,
+      0, 1.8, 0,       0, -0.2, 0.45,  0, -1.6, -0.45,
+      0, -1.6, -0.45,  0, 1.8, 0,      0, 0.3, -0.25,
+      0, 0.3, -0.25,   0, 1.8, 0,      0, -1.6, -0.45
+    ]);
+    geo.setAttribute('position', new THREE.BufferAttribute(verts, 3));
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  /** Creates an asymmetric noise-sculpted rocky mineral chunk (zero dodecahedron/octahedron). */
+  private createOrganicRockClusterGeo(): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const positions: number[] = [];
+    const lat = 4;
+    const lon = 6;
+    const samplePt = (i: number, j: number): THREE.Vector3 => {
+      const phi = (i / lat) * Math.PI;
+      const theta = (j / lon) * Math.PI * 2;
+      const noise = 0.68 + 0.55 * Math.abs(Math.sin(i * 3.1 + j * 1.9 + 0.7));
+      const r = noise;
+      return new THREE.Vector3(
+        Math.sin(phi) * Math.cos(theta) * r * 1.15,
+        Math.cos(phi) * r * 0.85,
+        Math.sin(phi) * Math.sin(theta) * r
+      );
+    };
+    for (let i = 0; i < lat; i++) {
+      for (let j = 0; j < lon; j++) {
+        const p00 = samplePt(i, j);
+        const p10 = samplePt(i + 1, j);
+        const p01 = samplePt(i, (j + 1) % lon);
+        const p11 = samplePt(i + 1, (j + 1) % lon);
+        positions.push(p00.x, p00.y, p00.z, p10.x, p10.y, p10.z, p01.x, p01.y, p01.z);
+        positions.push(p01.x, p01.y, p01.z, p10.x, p10.y, p10.z, p11.x, p11.y, p11.z);
+      }
+    }
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  /**
+   * Builds an organic noise-perturbed energy plume / flame stream column (centered around Y in [-h/2, h/2]).
+   * Replaces all geometric CylinderGeometry / ConeGeometry tubes with turbulent undulating organic profiles.
+   */
+  public createOrganicPlumeColumnGeo(
+    rTop: number,
+    rBottom: number,
+    height: number,
+    radialSegs: number = 18,
+    heightSegs: number = 8,
+    warpAmp: number = 0.16,
+    twistTurns: number = 0.6
+  ): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const positions: number[] = [];
+    const uvs: number[] = [];
+    const indices: number[] = [];
+
+    for (let h = 0; h <= heightSegs; h++) {
+      const v = h / heightSegs;
+      const y = (v - 0.5) * height;
+      const baseR = rBottom + (rTop - rBottom) * v;
+      for (let s = 0; s <= radialSegs; s++) {
+        const u = s / radialSegs;
+        const ang = u * Math.PI * 2 + v * twistTurns * Math.PI * 2;
+        const wave = 1.0 + warpAmp * (Math.sin(ang * 3.0 + v * 5.2) * 0.65 + Math.cos(ang * 5.0 - v * 7.5) * 0.35);
+        const r = Math.max(0.05, baseR * wave);
+        positions.push(Math.cos(ang) * r, y, Math.sin(ang) * r);
+        uvs.push(u, v);
+      }
+    }
+
+    const stride = radialSegs + 1;
+    for (let h = 0; h < heightSegs; h++) {
+      for (let s = 0; s < radialSegs; s++) {
+        const i0 = h * stride + s;
+        const i1 = i0 + stride;
+        indices.push(i0, i1, i0 + 1);
+        indices.push(i0 + 1, i1, i1 + 1);
+      }
+    }
+
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  /**
+   * Builds an irregular noise-carved crystal or jagged ice splinter spire pivoted at y = 0.
+   * Zero OctahedronGeometry / ConeGeometry primitives.
+   */
+  public createJaggedShardGeo(
+    radius: number,
+    height: number,
+    sides: number = 5,
+    seed: number = 1
+  ): THREE.BufferGeometry {
+    const geo = new THREE.BufferGeometry();
+    const positions: number[] = [];
+    const indices: number[] = [];
+    const ringT = [0.0, 0.28, 0.72];
+    const ringR = [radius * 0.85, radius * 1.05, radius * 0.52];
+
+    for (let r = 0; r < ringT.length; r++) {
+      const y = ringT[r] * height;
+      for (let s = 0; s <= sides; s++) {
+        const a = (s / sides) * Math.PI * 2 + seed * 0.37;
+        const asym = 0.78 + 0.44 * Math.abs(Math.sin(a * 2.3 + r * 1.7 + seed));
+        positions.push(
+          Math.cos(a) * ringR[r] * asym + Math.sin(seed + r) * radius * 0.14,
+          y,
+          Math.sin(a) * ringR[r] * asym + Math.cos(seed + r) * radius * 0.14
+        );
+      }
+    }
+
+    const stride = sides + 1;
+    for (let r = 0; r < ringT.length - 1; r++) {
+      for (let s = 0; s < sides; s++) {
+        const a = r * stride + s;
+        const b = a + stride;
+        indices.push(a, b, a + 1);
+        indices.push(a + 1, b, b + 1);
+      }
+    }
+
+    const tipIdx = positions.length / 3;
+    positions.push(
+      Math.sin(seed * 1.9) * radius * 0.25,
+      height,
+      Math.cos(seed * 2.7) * radius * 0.25
+    );
+    const topBase = (ringT.length - 1) * stride;
+    for (let s = 0; s < sides; s++) {
+      indices.push(topBase + s, tipIdx, topBase + s + 1);
+    }
+
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+    geo.setIndex(indices);
+    geo.computeVertexNormals();
+    return geo;
+  }
+
+  /** Domain-warped volumetric FBM fireball & dense dark smoke billboard shader. */
+  private createExplosionPuffShader(
+    coreHex: number,
+    midHex: number,
+    smokeHex: number,
+    seed: number,
+    additive: boolean = false
+  ): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+      uniforms: {
+        uProgress: { value: 0.0 },
+        uSeed: { value: seed },
+        uCoreCol: { value: new THREE.Color(coreHex) },
+        uMidCol: { value: new THREE.Color(midHex) },
+        uSmokeCol: { value: new THREE.Color(smokeHex) }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - 1.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uProgress;
+        uniform float uSeed;
+        uniform vec3 uCoreCol;
+        uniform vec3 uMidCol;
+        uniform vec3 uSmokeCol;
+        varying vec2 vUv;
+
+        float eHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+        }
+        float eNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(eHash(i), eHash(i + vec2(1.0, 0.0)), f.x),
+            mix(eHash(i + vec2(0.0, 1.0)), eHash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+        float eFbm(vec2 p) {
+          float v = 0.0;
+          float a = 0.52;
+          for (int i = 0; i < 4; i++) {
+            v += a * eNoise(p);
+            p = p * 2.08 + vec2(7.3, 13.1);
+            a *= 0.5;
+          }
+          return v;
+        }
+
+        void main() {
+          float r = length(vUv);
+          vec2 q = vUv * 2.4 + vec2(uSeed * 3.1, -uProgress * 1.4);
+          float n1 = eFbm(q);
+          float n2 = eFbm(q * 1.85 + vec2(n1 * 1.4, -uProgress * 2.1));
+          // Domain-warped organic cloud silhouette (never a circular ball)
+          float distortedR = r - (n2 - 0.45) * 0.65;
+          if (distortedR > 0.96) discard;
+
+          float density = smoothstep(0.96, 0.14, distortedR) * (0.55 + 0.75 * n1);
+          float erosion = smoothstep(0.18, 0.65, n2 + (1.0 - r) * 0.42 - uProgress * 0.48);
+          float heat = clamp((1.0 - smoothstep(0.05, 0.62, uProgress)) * (0.45 + n2 * 0.85), 0.0, 1.0);
+
+          vec3 col = mix(uSmokeCol, uMidCol, smoothstep(0.18, 0.62, heat));
+          col = mix(col, uCoreCol, smoothstep(0.55, 0.92, heat * (1.0 - r * 0.45)));
+
+          float fade = pow(max(0.0, 1.0 - uProgress), 1.15);
+          float alpha = clamp(density * erosion * fade, 0.0, 0.94);
+          if (alpha < 0.015) discard;
+          gl_FragColor = vec4(col, alpha);
+        }
+      `
+    });
+  }
+
+  /** Ragged visceral alien ichor droplet billboard shader for internal-rupture bursts. */
+  private createSplatterDropletShader(
+    coreHex: number,
+    edgeHex: number,
+    seed: number
+  ): THREE.ShaderMaterial {
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uAlpha: { value: 0.95 },
+        uSeed: { value: seed },
+        uCoreCol: { value: new THREE.Color(coreHex) },
+        uEdgeCol: { value: new THREE.Color(edgeHex) }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - 1.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uAlpha;
+        uniform float uSeed;
+        uniform vec3 uCoreCol;
+        uniform vec3 uEdgeCol;
+        varying vec2 vUv;
+        float sHash(vec2 p) {
+          return fract(sin(dot(p, vec2(41.2, 289.1))) * 43758.5453);
+        }
+        float sNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(sHash(i), sHash(i + vec2(1.0, 0.0)), f.x),
+            mix(sHash(i + vec2(0.0, 1.0)), sHash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+        void main() {
+          vec2 p = vUv;
+          float n = sNoise(p * 3.8 + vec2(uSeed * 5.2, uSeed * 2.7));
+          float ang = atan(p.y, p.x);
+          float lobe = 0.56 + 0.34 * sin(ang * 3.0 + uSeed) + 0.28 * n;
+          // Elongated viscous droplet taper along Y
+          vec2 stretched = vec2(p.x * 1.15, p.y * (p.y > 0.0 ? 0.72 : 1.05));
+          float r = length(stretched);
+          if (r > lobe) discard;
+          float coreMask = smoothstep(lobe, 0.08, r);
+          vec3 col = mix(uEdgeCol, uCoreCol, pow(coreMask, 1.4));
+          gl_FragColor = vec4(col, clamp(coreMask * 1.35 * uAlpha, 0.0, 0.96));
+        }
+      `
+    });
+  }
+
+  /** Organic turbulent shockwave vapor & flame gust shader (zero crisp geometric rings). */
+  public createOrganicRippleShader(
+    primaryHex: number,
+    secondaryHex?: number,
+    seed: number = 0
+  ): THREE.ShaderMaterial {
+    const pCol = new THREE.Color(primaryHex);
+    const sCol = secondaryHex !== undefined ? new THREE.Color(secondaryHex) : pCol.clone().lerp(new THREE.Color(0xffffff), 0.38);
+    return new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      side: THREE.DoubleSide,
+      blending: THREE.AdditiveBlending,
+      uniforms: {
+        uProgress: { value: 0.08 },
+        uAlpha: { value: 1.0 },
+        uSeed: { value: seed },
+        uPrimary: { value: pCol },
+        uSecondary: { value: sCol }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - 1.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uProgress;
+        uniform float uAlpha;
+        uniform float uSeed;
+        uniform vec3 uPrimary;
+        uniform vec3 uSecondary;
+        varying vec2 vUv;
+
+        float gHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        float gNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(gHash(i), gHash(i + vec2(1.0, 0.0)), f.x),
+            mix(gHash(i + vec2(0.0, 1.0)), gHash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+
+        void main() {
+          float r = length(vUv);
+          vec2 dir = r > 0.001 ? vUv / r : vec2(1.0, 0.0);
+          float wispNoise = gNoise(dir * 4.5 + vUv * 3.8 + vec2(uSeed * 2.7, -uProgress * 4.0)) * 0.65
+                          + gNoise(vUv * 8.2 + vec2(uProgress * 3.0, uSeed)) * 0.35;
+          float wavePos = mix(0.18, 0.78, uProgress) + (wispNoise - 0.5) * 0.34;
+          float band = exp(-pow((r - wavePos) / 0.16, 2.0)) * smoothstep(0.15, 0.85, wispNoise);
+          float core = smoothstep(0.55, 0.0, r + (wispNoise - 0.5) * 0.35) * (1.0 - uProgress) * 0.55;
+          float outerMask = 1.0 - smoothstep(0.68, 1.0, r + (0.5 - wispNoise) * 0.25);
+          float alpha = clamp((band * 0.95 + core) * outerMask * uAlpha, 0.0, 0.92);
+          if (alpha < 0.012) discard;
+          vec3 col = mix(uPrimary, uSecondary, smoothstep(0.35, 0.9, band + core));
+          gl_FragColor = vec4(col, alpha);
+        }
+      `
+    });
+  }
+
+  /**
+   * Unified realistic multi-layered volumetric explosion (billowing FBM fireballs, turbulent smoke clouds,
+   * terrain shock-dust gusts, molten embers & ragged scorch decal). Zero geometric shapes.
+   */
+  public spawnRealisticExplosion(
+    pos: Vector2,
+    elevation: number = 0,
+    radius: number = 120,
+    theme: 'fire' | 'lava' | 'toxic' | 'cryo' | 'void' | 'emerald' = 'fire',
+    impactZ?: number
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const burstY = impactZ !== undefined ? Math.max(baseElev + 6, impactZ) : baseElev + 12;
+
+    const paletteMap = {
+      fire: { core: 0xfffbeb, mid: 0xf97316, smoke: 0x292524, dust: 0x57534e, light: 0xf97316 },
+      lava: { core: 0xfef08a, mid: 0xea580c, smoke: 0x1c1917, dust: 0x44403c, light: 0xf97316 },
+      toxic: { core: 0xecfccb, mid: 0x84cc16, smoke: 0x1a2e05, dust: 0x3f6212, light: 0x84cc16 },
+      cryo: { core: 0xf0fdfa, mid: 0x38bdf8, smoke: 0x1e3a5f, dust: 0x64748b, light: 0x38bdf8 },
+      void: { core: 0xfdf4ff, mid: 0xd946ef, smoke: 0x1e0b2e, dust: 0x4c1d95, light: 0xa855f7 },
+      emerald: { core: 0xecfdf5, mid: 0x10b981, smoke: 0x064e3b, dust: 0x334155, light: 0x34d399 }
+    };
+    const pal = paletteMap[theme];
+
+    this.triggerSharedOrbitalLight(pos, burstY, pal.light, Math.min(7.5, 3.0 + radius * 0.025), radius * 2.8, 0.55);
+
+    while (this.explosionClouds.length > 90) {
+      const oldest = this.explosionClouds.shift();
+      if (oldest) {
+        this.group.remove(oldest.mesh);
+        oldest.mesh.geometry.dispose();
+        oldest.mat.dispose();
+      }
+    }
+
+    // 1. Rising turbulent fireball & dense smoke puffs
+    const fireballCount = Math.min(10, Math.max(5, Math.round(radius / 26)));
+    for (let i = 0; i < fireballCount; i++) {
+      const ang = (i / fireballCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
+      const radialDist = (i === 0 ? 0.04 : 0.14 + Math.random() * 0.34) * radius;
+      const puffSize = radius * (i === 0 ? 0.85 : 0.45 + Math.random() * 0.40);
+      const geo = new THREE.PlaneGeometry(puffSize, puffSize);
+      const mat = this.createExplosionPuffShader(pal.core, pal.mid, pal.smoke, Math.random() * 100, false);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(
+        pos.x + Math.cos(ang) * radialDist,
+        burstY + puffSize * 0.18 + Math.random() * 16,
+        pos.y + Math.sin(ang) * radialDist
+      );
+      this.group.add(mesh);
+
+      const speedOut = (i === 0 ? 15 : 65 + Math.random() * 110) * Math.min(1.6, radius / 95);
+      const duration = 0.58 + Math.random() * 0.36;
+      this.explosionClouds.push({
+        mesh,
+        mat,
+        vx: Math.cos(ang) * speedOut,
+        vy: (i === 0 ? 75 : 42 + Math.random() * 88),
+        vz: Math.sin(ang) * speedOut,
+        drag: 3.4,
+        lift: 32,
+        startScale: 0.36,
+        endScale: 1.45 + Math.random() * 0.45,
+        elapsed: 0,
+        duration
+      });
+    }
+
+    // 2. Ground-hugging outward billowing shock-dust clouds
+    const dustRingCount = Math.min(7, Math.max(4, Math.round(radius / 38)));
+    for (let i = 0; i < dustRingCount; i++) {
+      const ang = (i / dustRingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const puffSize = radius * (0.42 + Math.random() * 0.28);
+      const geo = new THREE.PlaneGeometry(puffSize, puffSize);
+      const mat = this.createExplosionPuffShader(pal.mid, pal.dust, pal.smoke, Math.random() * 100, false);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(
+        pos.x + Math.cos(ang) * (radius * 0.18),
+        baseElev + puffSize * 0.12,
+        pos.y + Math.sin(ang) * (radius * 0.18)
+      );
+      this.group.add(mesh);
+      this.explosionClouds.push({
+        mesh,
+        mat,
+        vx: Math.cos(ang) * (radius * 1.15),
+        vy: 14 + Math.random() * 24,
+        vz: Math.sin(ang) * (radius * 1.15),
+        drag: 3.8,
+        lift: 10,
+        startScale: 0.45,
+        endScale: 1.65,
+        elapsed: 0,
+        duration: 0.65 + Math.random() * 0.30
+      });
+    }
+
+    // 3. Hot sparks & shrapnel streaks erupting outward
+    const sparkCount = Math.min(18, Math.max(8, Math.round(radius / 14)));
+    for (let s = 0; s < sparkCount; s++) {
+      const ang = Math.random() * Math.PI * 2;
+      const spd = 110 + Math.random() * 230;
+      const mat = new THREE.MeshBasicMaterial({
+        color: s % 3 === 0 ? pal.core : pal.mid,
+        transparent: true,
+        opacity: 0.95,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false
+      });
+      const spk = new THREE.Mesh(this.sharedSparkGeo, mat);
+      spk.userData.isSharedGeo = true;
+      spk.position.set(pos.x, burstY + 4, pos.y);
+      const sc = 2.0 + Math.random() * 2.2;
+      spk.scale.set(sc * 0.7, sc * 2.2, sc * 0.7);
+      this.group.add(spk);
+      this.orbitalParticles.push({
+        mesh: spk,
+        kind: 'spark',
+        vx: Math.cos(ang) * spd,
+        vy: 95 + Math.random() * 195,
+        vz: Math.sin(ang) * spd,
+        rotSpeedX: (Math.random() - 0.5) * 14,
+        rotSpeedY: (Math.random() - 0.5) * 14,
+        rotSpeedZ: (Math.random() - 0.5) * 14,
+        baseScale: sc,
+        endScale: 0.2,
+        lifetime: 0.36 + Math.random() * 0.32,
+        maxLifetime: 0.68,
+        groundY: baseElev + 2
+      });
+    }
+
+    // 4. Irregular turbulent pressure shock ripple across terrain
+    this.spawnShockwaveRing(pos, radius, pal.mid, baseElev + 1.2, 0.38);
+  }
+
+  /**
+   * Visceral internal-rupture explosion when an enemy or boss is killed:
+   * bursts outward from the enemy's center with pressurized internal mist, ballistic 3D ichor droplets
+   * obeying gravity and terrain collisions, and organic ground splatter stains.
+   */
+  public spawnEnemyInternalSplatterBurst(
+    pos: Vector2,
+    elevation: number = 0,
+    enemyType: string = 'crawler',
+    radius: number = 42,
+    isBig: boolean = false
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const torsoY = Math.max(baseElev + 18, elevation + radius * 0.62);
+
+    let coreHex = 0xffccd5;
+    let ichorHex = 0xe11d48;
+    let mistHex = 0x4c1d95;
+    if (enemyType === 'spitter') {
+      coreHex = 0xecfccb;
+      ichorHex = 0x84cc16;
+      mistHex = 0x365314;
+    } else if (enemyType === 'wasp') {
+      coreHex = 0xa5f3fc;
+      ichorHex = 0xc084fc;
+      mistHex = 0x3b0764;
+    } else if (enemyType === 'elite' || isBig) {
+      coreHex = 0xfda4af;
+      ichorHex = 0xd946ef;
+      mistHex = 0x3b0764;
+    }
+
+    // 1. Central internal rupture flash & organic bioluminescent vapor clouds
+    const mistCount = isBig ? 10 : 4;
+    for (let i = 0; i < mistCount; i++) {
+      const ang = (i / mistCount) * Math.PI * 2 + Math.random() * 0.6;
+      const size = Math.max(46, radius * (isBig ? 1.5 : 1.15)) * (0.65 + Math.random() * 0.5);
+      const geo = new THREE.PlaneGeometry(size, size);
+      const mat = this.createExplosionPuffShader(coreHex, ichorHex, mistHex, Math.random() * 100, i === 0);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(
+        pos.x + Math.cos(ang) * (i === 0 ? 0 : radius * 0.22),
+        torsoY + (Math.random() - 0.3) * 14,
+        pos.y + Math.sin(ang) * (i === 0 ? 0 : radius * 0.22)
+      );
+      this.group.add(mesh);
+
+      const spd = i === 0 ? 10 : 85 + Math.random() * 130;
+      this.explosionClouds.push({
+        mesh,
+        mat,
+        vx: Math.cos(ang) * spd,
+        vy: i === 0 ? 45 : 35 + Math.random() * 85,
+        vz: Math.sin(ang) * spd,
+        drag: 4.0,
+        lift: 18,
+        startScale: 0.32,
+        endScale: 1.55,
+        elapsed: 0,
+        duration: isBig ? 0.72 + Math.random() * 0.35 : 0.42 + Math.random() * 0.22
+      });
+    }
+
+    // 2. Ballistic 3D internal ichor droplets erupting outward under gravity
+    while (this.splatterDroplets.length > 130) {
+      const oldest = this.splatterDroplets.shift();
+      if (oldest) {
+        this.group.remove(oldest.mesh);
+        oldest.mesh.geometry.dispose();
+        oldest.mat.dispose();
+      }
+    }
+
+    const dropletCount = isBig ? 36 : 14;
+    const baseSpeed = isBig ? 260 : 165;
+    for (let d = 0; d < dropletCount; d++) {
+      const ang = (d / dropletCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.45;
+      const spd = baseSpeed * (0.45 + Math.random() * 0.95);
+      const dropSize = (isBig ? 18 : 11) + Math.random() * (isBig ? 18 : 11);
+      const geo = new THREE.PlaneGeometry(dropSize, dropSize);
+      const mat = this.createSplatterDropletShader(coreHex, ichorHex, Math.random() * 60);
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.position.set(
+        pos.x + Math.cos(ang) * (radius * 0.25),
+        torsoY + (Math.random() - 0.5) * 12,
+        pos.y + Math.sin(ang) * (radius * 0.25)
+      );
+      this.group.add(mesh);
+
+      this.splatterDroplets.push({
+        mesh,
+        mat,
+        vx: Math.cos(ang) * spd,
+        vy: (isBig ? 140 : 85) + Math.random() * (isBig ? 220 : 145),
+        vz: Math.sin(ang) * spd,
+        groundY: baseElev + 1.2,
+        scale: dropSize,
+        splatColor: ichorHex,
+        spawnedSplat: false,
+        elapsed: 0,
+        duration: 0.68 + Math.random() * 0.38
+      });
+    }
+
+    // 3. Initial center ichor splatter puddle under ruptured enemy (fades cleanly in ~5s)
+    this.spawnAlienBloodSplatter(pos, baseElev, ichorHex, isBig ? 1.85 : 1.0);
+    if (isBig) {
+      this.spawnShockwaveRing(pos, Math.max(220, radius * 3.2), ichorHex, baseElev + 1.5, 0.72);
+    }
   }
 
   private triggerSharedOrbitalLight(
@@ -466,14 +1164,20 @@ export class ThreeVFX {
     this.sharedOrbitalLightMaxDuration = Math.max(0.1, duration);
   }
 
-  public setHeightSampler(sampler: (x: number, z: number) => number): void {
+  public setHeightSampler(sampler: (x: number, z: number, refY?: number) => number): void {
     this.heightSampler = sampler;
   }
 
   private getTerrainHeight(x: number, z: number, fallback: number = 0): number {
     try {
-      const h = this.heightSampler(x, z);
-      return Number.isFinite(h) ? h : fallback;
+      const refY = fallback !== 0 ? fallback : undefined;
+      const h = this.heightSampler(x, z, refY);
+      if (!Number.isFinite(h)) return fallback;
+      // Never allow an elevation-anchored VFX to snap wildly upward onto an overhead tower roof or arch
+      if (refY !== undefined && h > refY + 120) {
+        return fallback;
+      }
+      return h;
     } catch {
       return fallback;
     }
@@ -600,74 +1304,46 @@ export class ThreeVFX {
         uniform vec3 uPrimaryColor;
         uniform vec3 uAccentColor;
 
-        #define PI 3.14159265359
+        float lHash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+        float lNoise(vec2 p) {
+          vec2 i = floor(p);
+          vec2 f = fract(p);
+          f = f * f * (3.0 - 2.0 * f);
+          return mix(
+            mix(lHash(i), lHash(i + vec2(1.0, 0.0)), f.x),
+            mix(lHash(i + vec2(0.0, 1.0)), lHash(i + vec2(1.0, 1.0)), f.x),
+            f.y
+          );
+        }
+        float lFbm(vec2 p) {
+          return 0.55 * lNoise(p) + 0.30 * lNoise(p * 2.1 + vec2(4.2, 9.1)) + 0.15 * lNoise(p * 4.3 + vec2(1.7, 5.4));
+        }
 
         void main() {
           vec2 p = (vUv - 0.5) * 2.0;
           float r = length(p);
-          if (r > 1.0) discard;
-
-          float angle = atan(p.y, p.x);
           float lockIntensity = clamp(uProgress, 0.0, 1.0);
-          float rotSpeed = 1.6 + lockIntensity * 2.8;
+          float angle = atan(p.y, p.x);
 
-          // 1. Thin concentric orbital rings
-          float outerRing = smoothstep(0.018, 0.003, abs(r - 0.88));
-          float midRing   = smoothstep(0.015, 0.003, abs(r - 0.72));
-          float innerRing = smoothstep(0.014, 0.003, abs(r - 0.38));
+          // Converging irregular plasma & ember wisps swirling inward (zero concentric circles/chevrons/crosshairs)
+          float swirlA = angle + log(max(0.08, r)) * 2.4 - uTime * (2.6 + lockIntensity * 3.5);
+          vec2 samplePos = vec2(cos(swirlA), sin(swirlA)) * r * 3.2;
+          float n1 = lFbm(samplePos + vec2(uTime * 1.1, -uTime * 0.8));
+          float n2 = lFbm(samplePos * 1.9 - vec2(uTime * 1.8, uTime * 1.2));
+          float warpedR = r + (n1 - 0.5) * 0.42;
+          if (warpedR > 1.0) discard;
 
-          // 2. Counter-rotating segmented orbital markings
-          float segAngle1 = angle + uTime * rotSpeed;
-          float segMask1 = step(0.15, sin(segAngle1 * 8.0)) * smoothstep(0.028, 0.006, abs(r - 0.80));
+          float wispTendrils = smoothstep(0.32, 0.88, n1 * 0.65 + n2 * 0.55) * smoothstep(1.0, 0.18, warpedR);
+          float inwardFocus = smoothstep(0.65 - lockIntensity * 0.28, 0.0, warpedR) * (0.45 + 0.85 * lockIntensity);
+          float edgeEmbers = smoothstep(0.08, 0.0, abs(warpedR - mix(0.76, 0.28, lockIntensity))) * n2;
+          float totalIntensity = wispTendrils * 0.85 + inwardFocus + edgeEmbers * 1.35;
 
-          float segAngle2 = angle - uTime * (rotSpeed * 1.25);
-          float segMask2 = step(0.25, cos(segAngle2 * 12.0)) * smoothstep(0.022, 0.005, abs(r - 0.56));
-
-          // Fine degree ticks around outer perimeter
-          float tickMask = step(0.75, cos(angle * 36.0)) * smoothstep(0.032, 0.006, abs(r - 0.93));
-
-          // 3. Four Cardinal Radial Triangle Lock Chevrons (matching reference image!)
-          vec2 ap = abs(p);
-          float axisCoord = max(ap.x, ap.y);
-          float perpCoord = min(ap.x, ap.y);
-          float chevCenter = mix(0.94, 0.82, lockIntensity);
-          float dR = axisCoord - chevCenter; // 0 at tip, positive outward
-          float chevMask = 0.0;
-          if (dR >= 0.0 && dR <= 0.14) {
-            float halfW = dR * 0.68 + 0.006;
-            chevMask = smoothstep(halfW, halfW * 0.35, perpCoord);
-          }
-
-          // 4. Radial axis hairlines + Central targeting symbol
-          float crossLines = smoothstep(0.012, 0.002, perpCoord) * step(0.18, axisCoord) * step(axisCoord, 0.70);
-          float centerDot = smoothstep(0.09, 0.02, r);
-          float centerRing = smoothstep(0.016, 0.003, abs(r - 0.16));
-
-          // 5. Converging lock-on pulse ring
-          float sweepR = fract(1.0 - uTime * 2.2) * 0.88;
-          float sweepRing = smoothstep(0.04, 0.005, abs(r - sweepR)) * (0.4 + 0.6 * lockIntensity);
-
-          // Combine geometric layers
-          float pattern = outerRing * 1.1
-                        + midRing * 0.95
-                        + innerRing * 0.85
-                        + segMask1 * 0.85
-                        + segMask2 * 0.70
-                        + tickMask * 0.65
-                        + chevMask * 1.65
-                        + crossLines * 0.55
-                        + centerDot * 1.35
-                        + centerRing * 1.0
-                        + sweepRing * 0.75;
-
-          // Subtle warm radial glow floor that intensifies as the strike approaches
-          float baseGlow = (1.0 - r * r) * (0.12 + 0.26 * lockIntensity);
-          float totalIntensity = pattern + baseGlow;
-
-          vec3 col = mix(uPrimaryColor, uAccentColor, clamp(pattern * 0.65 + lockIntensity * 0.35, 0.0, 1.0));
-          float alpha = clamp(totalIntensity * (0.65 + 0.55 * lockIntensity) * uAlpha, 0.0, 1.0);
-
-          gl_FragColor = vec4(col * (1.2 + lockIntensity * 0.9), alpha);
+          vec3 col = mix(uPrimaryColor, uAccentColor, clamp(n2 * 0.6 + inwardFocus * 0.5, 0.0, 1.0));
+          float alpha = clamp(totalIntensity * (0.55 + 0.65 * lockIntensity) * uAlpha, 0.0, 1.0);
+          if (alpha < 0.015) discard;
+          gl_FragColor = vec4(col * (1.2 + lockIntensity * 0.85), alpha);
         }
       `
     });
@@ -675,8 +1351,8 @@ export class ThreeVFX {
     const reticleMesh = new THREE.Mesh(reticleGeo, reticleMat);
     lockGroup.add(reticleMesh);
 
-    // Thin vertical sky-to-ground targeting pilot laser thread during lock-on
-    const pilotGeo = new THREE.CylinderGeometry(1.2, 2.2, 1400, 12, 1, true);
+    // Thin organic undulating sky-to-ground flame-thread beam during lock-on (zero cylinder)
+    const pilotGeo = this.createOrganicPlumeColumnGeo(1.0, 2.4, 1400, 10, 10, 0.35, 1.5);
     const pilotMat = new THREE.MeshBasicMaterial({
       color: primaryCol,
       transparent: true,
@@ -710,28 +1386,43 @@ export class ThreeVFX {
     pos: Vector2,
     radius: number,
     elevation: number = 0,
-    variant: string = 'judgment'
+    variant: string = 'judgment',
+    impactZ?: number
   ): void {
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
 
-    // Support special non-beam variants (Cryo / Vortex / Acid) cleanly while upgrading full Orbital Strikes
-    if (variant === 'cryo' || variant === 'vortex' || variant === 'acid') {
-      const domeColor = variant === 'cryo' ? 0x06b6d4 : variant === 'acid' ? 0x84cc16 : 0x7c3aed;
-      const domeGeo = new THREE.SphereGeometry(radius * 0.55, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-      const domeMat = new THREE.MeshBasicMaterial({
-        color: domeColor,
-        transparent: true,
-        opacity: 0.75,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide
-      });
-      const domeMesh = new THREE.Mesh(domeGeo, domeMat);
-      domeMesh.position.set(pos.x, baseElev + 0.5, pos.y);
-      this.group.add(domeMesh);
-      this.beams.push({ mesh: domeMesh, lifetime: 0.65, maxLifetime: 0.65 });
-      this.spawnShockwaveRing(pos, radius, domeColor, baseElev, 0.55);
+    // Stage 1 Titan Boss Elemental Ball: swirling molten bio-lava explosion (never a sky orbital beam)
+    if (variant === 'void') {
+      this.spawnLavaSwirlExplosion(pos, radius, baseElev, impactZ);
       return;
     }
+
+    // Only explicit orbital-strike ultimates/events summon a sky-to-ground orbital beam.
+    // Non-orbital impacts (Chain Reaction, Cryo/Acid/Vortex projectiles, Second Wind) render local volumetric bursts.
+    const isTrueOrbitalStrike =
+      variant === 'judgment' ||
+      variant === 'nuke' ||
+      variant === 'lance' ||
+      variant === 'singularity' ||
+      variant === 'chrono' ||
+      variant === 'convergence_sub';
+    if (!isTrueOrbitalStrike) {
+      const theme: 'fire' | 'lava' | 'toxic' | 'cryo' | 'void' | 'emerald' =
+        variant === 'cryo'
+          ? 'cryo'
+          : variant === 'acid'
+            ? 'toxic'
+            : variant === 'vortex'
+              ? 'void'
+              : variant === 'second_wind' || variant === 'emerald'
+                ? 'emerald'
+                : 'fire';
+      this.spawnRealisticExplosion(pos, baseElev, Math.max(85, radius), theme, impactZ);
+      return;
+    }
+
+    // Trigger volumetric billowing fireball + smoke cloud + embers on orbital impact
+    this.spawnRealisticExplosion(pos, baseElev, Math.max(105, radius * 0.95), 'fire', baseElev + 16);
 
     // Enforce max 4 simultaneous full orbital sequences for standard casts, or up to 8 when spawning 5-strike convergence sub-beams
     const maxSequences = variant === 'convergence_sub' ? 8 : 4;
@@ -791,15 +1482,16 @@ export class ThreeVFX {
     const beamRadiusBase = Math.max(28, radius * 0.14 * widthMult);
 
     // ------------------------------------------------------------------------
-    // 1. INNER CORE: Narrow, high-contrast, nearly opaque white-yellow center
+    // 1. INNER CORE: Undulating plasma flame core (zero cylinder)
     // ------------------------------------------------------------------------
-    const coreGeo = new THREE.CylinderGeometry(
+    const coreGeo = this.createOrganicPlumeColumnGeo(
       beamRadiusBase * 0.52,
       beamRadiusBase * 0.68,
       beamHeight,
-      24,
-      1,
-      true
+      18,
+      10,
+      0.14,
+      0.8
     );
     const coreMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -850,13 +1542,14 @@ export class ThreeVFX {
     // ------------------------------------------------------------------------
     // 2. MIDDLE ENERGY LAYER: Animated golden plasma striations & distortion
     // ------------------------------------------------------------------------
-    const midGeo = new THREE.CylinderGeometry(
+    const midGeo = this.createOrganicPlumeColumnGeo(
       beamRadiusBase * 0.95,
       beamRadiusBase * 1.32,
       beamHeight,
-      32,
-      8,
-      true
+      22,
+      12,
+      0.20,
+      1.1
     );
     const midMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -936,13 +1629,14 @@ export class ThreeVFX {
     // ------------------------------------------------------------------------
     // 3. OUTER GLOW: Softer orange-gold energy halo with controlled bloom
     // ------------------------------------------------------------------------
-    const outerGeo = new THREE.CylinderGeometry(
+    const outerGeo = this.createOrganicPlumeColumnGeo(
       beamRadiusBase * 1.65,
       beamRadiusBase * 2.35,
       beamHeight,
-      24,
-      1,
-      true
+      18,
+      8,
+      0.24,
+      -0.7
     );
     const outerMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -1019,18 +1713,24 @@ export class ThreeVFX {
         uniform float uIntensity;
         uniform vec3 uMidColor;
         uniform vec3 uCoreColor;
+        float apHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float apNoise(vec2 p) {
+          vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(apHash(i), apHash(i + vec2(1.0, 0.0)), f.x), mix(apHash(i + vec2(0.0, 1.0)), apHash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
         void main() {
           vec2 p = (vUv - 0.5) * 2.0;
           float r = length(p);
-          if (r > 1.0) discard;
           float a = atan(p.y, p.x);
-          float r1 = smoothstep(0.025, 0.004, abs(r - 0.92));
-          float r2 = smoothstep(0.035, 0.006, abs(r - 0.76)) * step(0.1, sin(a * 10.0 - uTime * 3.0));
-          float r3 = smoothstep(0.022, 0.004, abs(r - 0.54));
-          float core = smoothstep(0.32, 0.0, r) * 0.65;
-          float mask = r1 + r2 + r3 + core;
-          vec3 col = mix(uMidColor, uCoreColor, clamp(mask * 0.6, 0.0, 1.0)) * 1.4;
-          gl_FragColor = vec4(col, clamp(mask * uIntensity * 0.85, 0.0, 1.0));
+          float swirl = apNoise(vec2(cos(a - uTime * 1.8), sin(a - uTime * 1.8)) * r * 3.5 + vec2(uTime * 1.2))
+                      + 0.5 * apNoise(p * 6.0 - vec2(uTime * 2.4));
+          float distortedR = r - (swirl - 0.7) * 0.42;
+          if (distortedR > 1.0) discard;
+          float cloudMask = smoothstep(1.0, 0.12, distortedR) * smoothstep(0.35, 1.15, swirl);
+          float core = smoothstep(0.42, 0.0, distortedR) * 0.85;
+          float mask = cloudMask + core;
+          vec3 col = mix(uMidColor, uCoreColor, clamp(mask * 0.55, 0.0, 1.0)) * 1.35;
+          gl_FragColor = vec4(col, clamp(mask * uIntensity * 0.82, 0.0, 1.0));
         }
       `
     });
@@ -1038,19 +1738,20 @@ export class ThreeVFX {
     apertureMesh.position.y = apertureHeight;
     seqGroup.add(apertureMesh);
 
-    // 8 thin descending golden light needles around the upper aperture
+    // 8 turbulent descending golden flame wisps around the upper sky break
     const needlesGroup = new THREE.Group();
     const needleMats: THREE.MeshBasicMaterial[] = [];
     for (let i = 0; i < 8; i++) {
       const ang = (i / 8) * Math.PI * 2 + 0.2;
-      const dist = apertureRadius * (0.48 + (i % 2) * 0.26);
+      const dist = apertureRadius * (0.42 + (i % 2) * 0.26);
       const needleLen = 95 + (i % 3) * 32;
-      const nGeo = new THREE.CylinderGeometry(1.3, 0.25, needleLen, 6, 1, true);
+      const nGeo = this.createOrganicPlumeColumnGeo(1.8, 0.25, needleLen, 6, 4, 0.32, 1.2);
       const nMat = new THREE.MeshBasicMaterial({
         color: i % 2 === 0 ? coreCol : midCol,
         transparent: true,
         opacity: 0.72,
         blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
         depthWrite: false
       });
       const nMesh = new THREE.Mesh(nGeo, nMat);
@@ -1182,30 +1883,26 @@ export class ThreeVFX {
         uniform vec3 uMidColor;
         uniform vec3 uOuterColor;
 
+        float swHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float swNoise(vec2 p) {
+          vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+          return mix(mix(swHash(i), swHash(i + vec2(1.0, 0.0)), f.x), mix(swHash(i + vec2(0.0, 1.0)), swHash(i + vec2(1.0, 1.0)), f.x), f.y);
+        }
+
         void main() {
           vec2 p = (vUv - 0.5) * 2.0;
           float r = length(p);
           if (r > 1.0) discard;
-          float a = atan(p.y, p.x);
-
-          float waveR = clamp(uProgress, 0.08, 0.96);
-          // Crisp leading edge + warm trailing wake
-          float distToWave = r - waveR;
-          float leadingEdge = smoothstep(0.035, 0.0, abs(distToWave));
-          float trailingWake = smoothstep(waveR - 0.24, waveR, r) * step(r, waveR) * 0.45;
-
-          // Secondary inner pressure ripple
-          float innerR = waveR * 0.68;
-          float innerRipple = smoothstep(0.025, 0.0, abs(r - innerR)) * 0.45;
-
-          // Radial energy streaks along the expanding ring
-          float streaks = (0.65 + 0.35 * sin(a * 24.0)) * (leadingEdge + trailingWake);
-
-          float intensity = leadingEdge * 1.35 + trailingWake + innerRipple + streaks * 0.35;
-          vec3 col = mix(uOuterColor, uMidColor, clamp(leadingEdge + innerRipple, 0.0, 1.0));
-          col = mix(col, uCoreColor, pow(leadingEdge, 2.0) * 0.85) * 1.55;
-
-          gl_FragColor = vec4(col, clamp(intensity * uAlpha, 0.0, 1.0));
+          float n = swNoise(p * 4.5 + vec2(uProgress * 3.0)) * 0.6 + swNoise(p * 9.0) * 0.4;
+          float waveR = clamp(uProgress, 0.08, 0.88) + (n - 0.5) * 0.32;
+          float fireFront = exp(-pow((r - waveR) / 0.14, 2.0)) * smoothstep(0.15, 0.85, n);
+          float emberWake = smoothstep(waveR - 0.35, waveR, r) * step(r, waveR) * n * 0.45;
+          float outerMask = 1.0 - smoothstep(0.65, 1.0, r + (0.5 - n) * 0.3);
+          float intensity = (fireFront * 1.45 + emberWake) * outerMask;
+          if (intensity < 0.015) discard;
+          vec3 col = mix(uOuterColor, uMidColor, clamp(fireFront + emberWake, 0.0, 1.0));
+          col = mix(col, uCoreColor, pow(clamp(fireFront, 0.0, 1.0), 1.8) * 0.8);
+          gl_FragColor = vec4(col * 1.45, clamp(intensity * uAlpha, 0.0, 1.0));
         }
       `
     });
@@ -1624,60 +2321,47 @@ export class ThreeVFX {
     }
   }
 
-  // Spawn persistent bioluminescent alien blood / ichor puddle on the battlefield
-  public spawnAlienBloodSplatter(pos: Vector2, elevation: number = 0, colorHex: number = 0x22d3ee): void {
-    if (this.bloodDecals.length > 80) {
+  // Spawn transient bioluminescent alien ichor splatter puddle on the battlefield (organic noise-eroded edge)
+  public spawnAlienBloodSplatter(
+    pos: Vector2,
+    elevation: number = 0,
+    colorHex: number = 0xe11d48,
+    scaleMult: number = 1.0
+  ): void {
+    if (this.bloodDecals.length > 48) {
       const oldest = this.bloodDecals.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
+        oldest.mesh.geometry.dispose();
         (oldest.mesh.material as THREE.Material).dispose();
       }
     }
 
-    const scale = 0.8 + Math.random() * 0.9;
-    const mat = new THREE.MeshBasicMaterial({
-      map: this.bloodTexture,
-      color: colorHex,
-      transparent: true,
-      opacity: 0.88,
-      depthWrite: false
-    });
+    const scale = (0.85 + Math.random() * 0.75) * scaleMult;
+    const mat = this.createSplatterDropletShader(
+      new THREE.Color(colorHex).lerp(new THREE.Color(0xffffff), 0.25).getHex(),
+      colorHex,
+      Math.random() * 80
+    );
 
-    const mesh = new THREE.Mesh(this.bloodPlaneGeo, mat);
+    const geo = new THREE.PlaneGeometry(34, 34);
+    const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
     mesh.rotation.z = Math.random() * Math.PI * 2;
-    mesh.position.set(pos.x + (Math.random() - 0.5) * 12, elevation + 0.15, pos.y + (Math.random() - 0.5) * 12);
+    mesh.position.set(pos.x + (Math.random() - 0.5) * 14, elevation + 0.5, pos.y + (Math.random() - 0.5) * 14);
     mesh.scale.set(scale, scale, 1);
     this.group.add(mesh);
 
     this.bloodDecals.push({
       mesh,
-      lifetime: 22,
-      maxLifetime: 22
+      lifetime: 5.5,
+      maxLifetime: 5.5
     });
   }
 
-  // 1. Landing Frost Shockwave Ring on Ground
+  // 1. Landing Frost & Soil Vapor Gust on Ground (zero geometric RingGeometry)
   public spawnLandingRing(pos: Vector2, elevation: number = 0): void {
-    const geo = new THREE.RingGeometry(1, 3, 32);
-    const mat = new THREE.MeshBasicMaterial({
-      color: 0x67e8f9,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.85
-    });
-    const mesh = new THREE.Mesh(geo, mat);
-    mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(pos.x, elevation + 0.3, pos.y);
-    this.group.add(mesh);
-
-    this.rings.push({
-      mesh,
-      maxRadius: 38,
-      currentRadius: 2,
-      lifetime: 0.35,
-      maxLifetime: 0.35
-    });
+    this.spawnShockwaveRing(pos, 42, 0x67e8f9, elevation + 0.5, 0.35);
   }
 
   // Heavy thawed-earth dust & frost puff for Stage 1 Titan footsteps
@@ -1738,6 +2422,250 @@ export class ThreeVFX {
     }
   }
 
+  /** Red Crystal radial fracture glow & jagged splinter beams before boss eruption */
+  public spawnCrystalFractureFX(origin: { x: number; y: number; z: number }): void {
+    const baseElev = origin.z;
+    this.spawnShockwaveRing({ x: origin.x, y: origin.y }, 135, 0xf43f5e, baseElev, 0.75);
+
+    const crackGeo = this.createJaggedShardGeo(2.4, 48, 5, 11);
+    for (let i = 0; i < 10; i++) {
+      const yaw = (i / 10) * Math.PI * 2 + (Math.random() - 0.5) * 0.25;
+      const pitch = -0.45 + Math.random() * 0.9;
+      const mat = new THREE.MeshBasicMaterial({
+        color: i % 2 === 0 ? 0xfb7185 : 0xfef08a,
+        transparent: true,
+        opacity: 0.92,
+        blending: THREE.AdditiveBlending
+      });
+      const beam = new THREE.Mesh(crackGeo, mat);
+      beam.position.set(
+        origin.x + Math.cos(yaw) * (24 + Math.random() * 34),
+        baseElev + (Math.random() - 0.35) * 65,
+        origin.y + Math.sin(yaw) * (24 + Math.random() * 34)
+      );
+      beam.rotation.set(pitch, yaw, (Math.random() - 0.5) * 0.9);
+      this.group.add(beam);
+      this.beams.push({
+        mesh: beam,
+        lifetime: 0.85,
+        maxLifetime: 0.85
+      });
+    }
+  }
+
+  /** Shattering translucent ruby crystal shards + rock chunks + dust burst along emergence vector */
+  public spawnCrystalShatterBurst(
+    origin: { x: number; y: number; z: number },
+    forwardDir: { x: number; y: number }
+  ): void {
+    const fLen = Math.hypot(forwardDir.x, forwardDir.y) || 1;
+    const fx = forwardDir.x / fLen;
+    const fy = forwardDir.y / fLen;
+    const groundElev = this.getTerrainHeight(origin.x + fx * 180, origin.y + fy * 180, origin.z - 160);
+
+    this.spawnRealisticExplosion({ x: origin.x, y: origin.y }, origin.z, 190, 'void', origin.z);
+
+    while (this.orbitalParticles.length > 210) {
+      const oldest = this.orbitalParticles.shift();
+      if (oldest) {
+        this.group.remove(oldest.mesh);
+        if (!oldest.mesh.userData?.isSharedGeo) oldest.mesh.geometry.dispose();
+        (oldest.mesh.material as THREE.Material).dispose();
+      }
+    }
+
+    const shardGeo = this.createJaggedShardGeo(1.0, 2.2, 5, 7);
+    // 22 translucent ruby crystal shards + 12 dark slate rock chunks
+    for (let i = 0; i < 34; i++) {
+      const isShard = i < 22;
+      const spreadAngle = (Math.random() - 0.5) * 1.55;
+      const dirX = fx * Math.cos(spreadAngle) - fy * Math.sin(spreadAngle);
+      const dirY = fx * Math.sin(spreadAngle) + fy * Math.cos(spreadAngle);
+      const speed = isShard ? 180 + Math.random() * 240 : 120 + Math.random() * 170;
+
+      const mat = new THREE.MeshBasicMaterial({
+        color: isShard ? (i % 3 === 0 ? 0xfda4af : 0xe11d48) : 0x475569,
+        transparent: true,
+        opacity: isShard ? 0.88 : 0.95
+      });
+      const mesh = new THREE.Mesh(isShard ? shardGeo : this.sharedDebrisGeo, mat);
+      const s = isShard ? 6 + Math.random() * 11 : 7 + Math.random() * 10;
+      mesh.scale.set(s * 0.65, s * (isShard ? 1.4 : 1.0), s * 0.65);
+      mesh.position.set(
+        origin.x + (Math.random() - 0.5) * 75 + fx * 25,
+        origin.z + (Math.random() - 0.35) * 85,
+        origin.y + (Math.random() - 0.5) * 75 + fy * 25
+      );
+      this.group.add(mesh);
+
+      const life = 1.0 + Math.random() * 0.75;
+      this.orbitalParticles.push({
+        mesh,
+        kind: 'debris',
+        vx: dirX * speed,
+        vy: 110 + Math.random() * 210,
+        vz: dirY * speed,
+        rotSpeedX: (Math.random() - 0.5) * 9,
+        rotSpeedY: (Math.random() - 0.5) * 9,
+        rotSpeedZ: (Math.random() - 0.5) * 9,
+        baseScale: s,
+        endScale: s,
+        lifetime: life,
+        maxLifetime: life,
+        groundY: groundElev + 4
+      });
+    }
+
+    // Crimson & rock-dust shock cloud around shattered facade
+    for (let i = 0; i < 10; i++) {
+      const ang = (i / 10) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const matParams: THREE.MeshBasicMaterialParameters = {
+        color: i % 2 === 0 ? 0xfda4af : 0x94a3b8,
+        transparent: true,
+        opacity: 0.48,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      };
+      if (this.dustRadialTex) matParams.map = this.dustRadialTex;
+      const mesh = new THREE.Mesh(this.sharedDustGeo, new THREE.MeshBasicMaterial(matParams));
+      mesh.position.set(
+        origin.x + fx * 30 + Math.cos(ang) * 45,
+        origin.z - 20 + Math.random() * 45,
+        origin.y + fy * 30 + Math.sin(ang) * 45
+      );
+      const baseScale = 28 + Math.random() * 18;
+      mesh.scale.set(baseScale, baseScale * 0.75, 1);
+      this.group.add(mesh);
+      const life = 0.65 + Math.random() * 0.35;
+      this.orbitalParticles.push({
+        mesh,
+        kind: 'dust',
+        vx: fx * 90 + Math.cos(ang) * 65,
+        vy: 18 + Math.random() * 26,
+        vz: fy * 90 + Math.sin(ang) * 65,
+        rotSpeedX: 0,
+        rotSpeedY: 0,
+        rotSpeedZ: (Math.random() - 0.5) * 1.4,
+        baseScale,
+        endScale: baseScale * 2.2,
+        lifetime: life,
+        maxLifetime: life,
+        groundY: groundElev + 2
+      });
+    }
+  }
+
+  /** Trailing crystal splinters and dust during boss diagonal crystal emergence */
+  public spawnCrystalEmergeTrail(pos: Vector2, z: number): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, z - 40);
+    const shardGeo = this.createJaggedShardGeo(1.0, 2.0, 5, 19);
+    for (let i = 0; i < 5; i++) {
+      const isShard = i < 3;
+      const ang = Math.random() * Math.PI * 2;
+      const speed = 45 + Math.random() * 85;
+      const mat = new THREE.MeshBasicMaterial({
+        color: isShard ? 0xe11d48 : 0x64748b,
+        transparent: true,
+        opacity: isShard ? 0.85 : 0.9
+      });
+      const mesh = new THREE.Mesh(isShard ? shardGeo : this.sharedDebrisGeo, mat);
+      const s = isShard ? 4.5 + Math.random() * 6 : 5 + Math.random() * 6;
+      mesh.scale.set(s * 0.65, s * 1.4, s * 0.65);
+      mesh.position.set(
+        pos.x + (Math.random() - 0.5) * 65,
+        z + 18 + Math.random() * 45,
+        pos.y + (Math.random() - 0.5) * 65
+      );
+      this.group.add(mesh);
+      const life = 0.6 + Math.random() * 0.45;
+      this.orbitalParticles.push({
+        mesh,
+        kind: 'debris',
+        vx: Math.cos(ang) * speed,
+        vy: 60 + Math.random() * 90,
+        vz: Math.sin(ang) * speed,
+        rotSpeedX: (Math.random() - 0.5) * 8,
+        rotSpeedY: (Math.random() - 0.5) * 8,
+        rotSpeedZ: (Math.random() - 0.5) * 8,
+        baseScale: s,
+        endScale: s,
+        lifetime: life,
+        maxLifetime: life,
+        groundY: baseElev + 3
+      });
+    }
+  }
+
+  /** Clear locked-direction attack telegraph for Void Goliath (0.6s), Brood Queen (0.8s), and Void Wasp (0.3s) */
+  public spawnEnemyAttackTelegraph(
+    origin: Vector2,
+    originZ: number,
+    aimDir: { x: number; y: number; z?: number },
+    variant: string,
+    duration: number
+  ): void {
+    const colorHex =
+      variant === 'seismic_shard'
+        ? 0xf97316
+        : variant === 'spore_bomb'
+          ? 0xd946ef
+          : variant === 'stinger'
+            ? 0xf43f5e
+            : 0xc084fc;
+    const baseElev = this.getTerrainHeight(origin.x, origin.y, originZ - 36);
+    const ringRadius = variant === 'seismic_shard' ? 68 : variant === 'stinger' || variant === 'spore_bomb' ? 86 : 44;
+    this.spawnShockwaveRing(origin, ringRadius, colorHex, baseElev + 1.5, duration);
+
+    const len = Math.hypot(aimDir.x, aimDir.y);
+    if (len < 1) return;
+    const baseAng = Math.atan2(aimDir.y, aimDir.x);
+
+    if (variant === 'spore_bomb') {
+      const tx = origin.x + aimDir.x;
+      const ty = origin.y + aimDir.y;
+      const targetRefZ = originZ + (aimDir.z ?? 0);
+      const tElev = this.getTerrainHeight(tx, ty, targetRefZ);
+      this.spawnShockwaveRing({ x: tx, y: ty }, 86, 0xd946ef, tElev + 1.5, duration);
+      return;
+    }
+
+    const lineOffsets = variant === 'stinger' ? [-0.38, 0.38] : [0];
+    const lineLen = variant === 'stinger' ? 320 : variant === 'seismic_shard' ? 280 : 210;
+    const len3D = Math.hypot(aimDir.x, aimDir.y, aimDir.z ?? 0) || 1;
+    const dzPerUnit = (aimDir.z ?? 0) / len3D;
+    for (let i = 0; i < lineOffsets.length; i++) {
+      const ang = baseAng + lineOffsets[i];
+      const dx = Math.cos(ang);
+      const dy = Math.sin(ang);
+      const guideGeo = this.createOrganicPlumeColumnGeo(1.1, 1.8, lineLen, 6, 8, 0.35, 1.5);
+      guideGeo.rotateX(Math.PI / 2);
+      const guideMat = new THREE.MeshBasicMaterial({
+        color: colorHex,
+        transparent: true,
+        opacity: 0.42,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide
+      });
+      const guideMesh = new THREE.Mesh(guideGeo, guideMat);
+      const startY = Math.max(baseElev + 14, originZ);
+      const endX = origin.x + dx * lineLen;
+      const endY = startY + dzPerUnit * lineLen;
+      const endZ = origin.y + dy * lineLen;
+      guideMesh.position.set(
+        (origin.x + endX) * 0.5,
+        (startY + endY) * 0.5,
+        (origin.y + endZ) * 0.5
+      );
+      guideMesh.lookAt(endX, endY, endZ);
+      this.group.add(guideMesh);
+      this.beams.push({
+        mesh: guideMesh,
+        lifetime: duration,
+        maxLifetime: duration
+      });
+    }
+  }
+
   // 2c. Pre-fire Focusing Charge Telegraph (0.2s charge before Hyper-Laser blast)
   public spawnLaserCharge(from: Vector2, to: Vector2, elevation: number = 0, duration: number = 0.20): void {
     const dx = to.x - from.x;
@@ -1748,13 +2676,14 @@ export class ThreeVFX {
     const beamY = elevation + 18;
     const angle = Math.atan2(dx, dy);
 
-    const guideGeo = new THREE.CylinderGeometry(0.85, 0.85, length, 8);
+    const guideGeo = this.createOrganicPlumeColumnGeo(1.1, 1.1, length, 6, 6, 0.35, 1.2);
     guideGeo.rotateX(Math.PI / 2);
     const guideMat = new THREE.MeshBasicMaterial({
       color: 0xe879f9,
       transparent: true,
       opacity: 0.65,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
     });
     const guideMesh = new THREE.Mesh(guideGeo, guideMat);
     guideMesh.position.set(midX, beamY, midZ);
@@ -1770,7 +2699,7 @@ export class ThreeVFX {
     this.spawnShockwaveRing(from, 30, 0xd946ef, elevation + 12, duration);
   }
 
-  // 2c. Horizontal Piercing Hyper-Laser Beam with Lingering Residual Heat Channel (No Strobe)
+  // 2c. Horizontal Piercing Hyper-Laser Beam with Turbulent Plasma Filaments (zero cylinders)
   public spawnLaserBeam(from: Vector2, to: Vector2, elevation: number = 0): void {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
@@ -1780,56 +2709,62 @@ export class ThreeVFX {
     const beamY = elevation + 18;
     const angle = Math.atan2(dx, dy);
 
-    const outerGeo = new THREE.CylinderGeometry(9.5, 9.5, length, 16);
+    const outerGeo = this.createOrganicPlumeColumnGeo(10.5, 6.5, length, 10, 10, 0.28, 1.8);
     outerGeo.rotateX(Math.PI / 2);
     const outerMat = new THREE.MeshBasicMaterial({
       color: 0xd946ef,
       transparent: true,
-      opacity: 0.68,
-      blending: THREE.AdditiveBlending
+      opacity: 0.65,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
     });
     const outerMesh = new THREE.Mesh(outerGeo, outerMat);
     outerMesh.position.set(midX, beamY, midZ);
     outerMesh.rotation.y = angle;
     this.group.add(outerMesh);
 
-    const midSheathGeo = new THREE.CylinderGeometry(5.2, 5.2, length, 14);
+    const midSheathGeo = this.createOrganicPlumeColumnGeo(5.5, 4.0, length, 8, 10, 0.22, -1.6);
     midSheathGeo.rotateX(Math.PI / 2);
     const midSheathMat = new THREE.MeshBasicMaterial({
       color: 0xa855f7,
       transparent: true,
       opacity: 0.85,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
     });
     const midSheathMesh = new THREE.Mesh(midSheathGeo, midSheathMat);
     midSheathMesh.position.set(midX, beamY, midZ);
     midSheathMesh.rotation.y = angle;
     this.group.add(midSheathMesh);
 
-    const coreGeo = new THREE.CylinderGeometry(2.4, 2.4, length, 12);
-    coreGeo.rotateX(Math.PI / 2);
+    const corePts = this.generateLightningPoints(
+      new THREE.Vector3(from.x, beamY, from.y),
+      new THREE.Vector3(to.x, beamY, to.y),
+      18,
+      7.5
+    );
+    const coreRibbonGeo = this.createJaggedRibbonGeometry(corePts, 7.2);
     const coreMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
       transparent: true,
       opacity: 0.98,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false
     });
-    const coreMesh = new THREE.Mesh(coreGeo, coreMat);
-    coreMesh.position.set(midX, beamY, midZ);
-    coreMesh.rotation.y = angle;
+    const coreMesh = new THREE.Mesh(coreRibbonGeo, coreMat);
     this.group.add(coreMesh);
 
-    const trailGeo = new THREE.CylinderGeometry(1.6, 1.6, length, 10);
-    trailGeo.rotateX(Math.PI / 2);
+    const trailGeo = this.createJaggedRibbonGeometry(corePts, 14.0);
     const trailMat = new THREE.MeshBasicMaterial({
       color: 0xf0abfc,
       transparent: true,
       opacity: 0.55,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false
     });
     const trailMesh = new THREE.Mesh(trailGeo, trailMat);
-    trailMesh.position.set(midX, beamY, midZ);
-    trailMesh.rotation.y = angle;
     this.group.add(trailMesh);
 
     this.beams.push({ mesh: outerMesh, lifetime: 0.42, maxLifetime: 0.42 });
@@ -1838,41 +2773,36 @@ export class ThreeVFX {
     this.beams.push({ mesh: trailMesh, lifetime: 0.65, maxLifetime: 0.65 });
 
     this.spawnShockwaveRing(from, 38, 0xe879f9, elevation + 12, 0.26);
-    this.spawnShockwaveRing(to, 52, 0xc084fc, elevation + 12, 0.32);
+    this.spawnRealisticExplosion(to, elevation, 58, 'void', elevation + 14);
   }
 
-  // 2d. Wide Cone Scatter Blast Muzzle Flash
+  // 2d. Turbulent Scatter Blast Flame Muzzle Plume (zero cone)
   public spawnScatterBlast(from: Vector2, to: Vector2, elevation: number = 0): void {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const angle = Math.atan2(dx, dy);
 
-    const coneGeo = new THREE.ConeGeometry(42, 75, 16, 1, true);
-    coneGeo.rotateX(-Math.PI / 2);
-    const coneMat = new THREE.MeshBasicMaterial({
-      color: 0xfbbf24,
-      transparent: true,
-      opacity: 0.78,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending
-    });
-    const coneMesh = new THREE.Mesh(coneGeo, coneMat);
-    coneMesh.position.set(
-      from.x + Math.sin(angle) * 35,
+    const fanGeo = new THREE.PlaneGeometry(82, 86);
+    fanGeo.rotateX(-Math.PI / 2);
+    const fanMat = this.createExplosionPuffShader(0xfffbeb, 0xf97316, 0x9a3412, Math.random() * 50, true);
+    fanMat.uniforms.uProgress.value = 0.12;
+    const fanMesh = new THREE.Mesh(fanGeo, fanMat);
+    fanMesh.position.set(
+      from.x + Math.sin(angle) * 38,
       elevation + 18,
-      from.y + Math.cos(angle) * 35
+      from.y + Math.cos(angle) * 38
     );
-    coneMesh.rotation.y = angle;
-    this.group.add(coneMesh);
+    fanMesh.rotation.y = angle;
+    this.group.add(fanMesh);
 
     this.beams.push({
-      mesh: coneMesh,
-      lifetime: 0.16,
-      maxLifetime: 0.16
+      mesh: fanMesh,
+      lifetime: 0.20,
+      maxLifetime: 0.20
     });
   }
 
-  // 2e. Phase Blink Warp Portal & Arrival Nova
+  // 2e. Phase Blink Warp Portal & Arrival Rift Clouds (zero cylinder)
   public spawnBlinkVFX(
     from: Vector2,
     fromZ: number,
@@ -1880,24 +2810,24 @@ export class ThreeVFX {
     toZ: number,
     radius: number = 95
   ): void {
-    this.spawnShockwaveRing(from, 48, 0x38bdf8, fromZ, 0.32);
-    this.spawnShockwaveRing(to, radius, 0xa855f7, toZ, 0.42);
-    this.spawnShockwaveRing(to, radius * 0.65, 0x38bdf8, toZ + 4, 0.35);
+    this.spawnShockwaveRing(from, 52, 0x38bdf8, fromZ, 0.32);
+    this.spawnRealisticExplosion(to, toZ, Math.max(75, radius * 0.85), 'void', toZ + 12);
 
-    const pillarGeo = new THREE.CylinderGeometry(8, 22, 140, 16, 1, true);
-    const pillarMat = new THREE.MeshBasicMaterial({
+    const riftGeo = this.createOrganicPlumeColumnGeo(10, 26, 130, 12, 6, 0.34, 1.4);
+    const riftMat = new THREE.MeshBasicMaterial({
       color: 0xc084fc,
       transparent: true,
-      opacity: 0.8,
+      opacity: 0.72,
       side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
     });
-    const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-    pillar.position.set(to.x, toZ + 70, to.y);
-    this.group.add(pillar);
+    const riftMesh = new THREE.Mesh(riftGeo, riftMat);
+    riftMesh.position.set(to.x, toZ + 65, to.y);
+    this.group.add(riftMesh);
 
     this.beams.push({
-      mesh: pillar,
+      mesh: riftMesh,
       lifetime: 0.28,
       maxLifetime: 0.28
     });
@@ -2113,9 +3043,9 @@ export class ThreeVFX {
 
   // --- COMMANDER LMB UPGRADE 1: CHILL BEAM VFX (STREAM OF TRAVELING ICY BOLTS) ---
   public spawnChillBeam(from: Vector2, to: Vector2, elevation: number = 0, boltCount: number = 1): void {
-    const from3 = new THREE.Vector3(from.x, elevation + 18, from.y);
+    const from3 = new THREE.Vector3(from.x, elevation, from.y);
     const toElev = this.getTerrainHeight(to.x, to.y, elevation);
-    const to3 = new THREE.Vector3(to.x, toElev + 18, to.y);
+    const to3 = new THREE.Vector3(to.x, toElev + 46, to.y);
     const dx = to3.x - from3.x;
     const dy = to3.y - from3.y;
     const dz = to3.z - from3.z;
@@ -2125,9 +3055,9 @@ export class ThreeVFX {
     const group = new THREE.Group();
     this.group.add(group);
 
-    // Muzzle blast rings at firing position
-    this.spawnShockwaveRing(from, 28, 0x38bdf8, elevation + 16, 0.20);
-    this.spawnShockwaveRing(from, 42, 0x00e5ff, elevation + 16, 0.25);
+    // Muzzle blast rings at firing position (2x scale)
+    this.spawnShockwaveRing(from, 56, 0x38bdf8, elevation, 0.20);
+    this.spawnShockwaveRing(from, 84, 0x00e5ff, elevation, 0.25);
 
     // Rapid sequence of separate, distinct traveling icy projectiles with visible gaps (1 + extraProjectiles)
     const bolts: ChillProjectileBolt[] = [];
@@ -2135,12 +3065,14 @@ export class ThreeVFX {
 
     for (let i = 0; i < count; i++) {
       const bGrp = new THREE.Group();
+      bGrp.scale.setScalar(2.0);
       bGrp.visible = false;
       group.add(bGrp);
 
-      // Elongated crystalline diamond ice core
-      const coreGeo = new THREE.OctahedronGeometry(2.6, 0);
-      coreGeo.scale(1.0, 1.0, 3.8);
+      // Irregular carved icy shard core (zero octahedron/cone)
+      const coreGeo = this.createJaggedShardGeo(2.8, 18.0, 5, 3 + i * 7);
+      coreGeo.rotateX(Math.PI / 2);
+      coreGeo.translate(0, 0, -9);
       const coreMat = new THREE.MeshBasicMaterial({
         color: 0xf0fdfa,
         transparent: true,
@@ -2150,27 +3082,31 @@ export class ThreeVFX {
       const coreMesh = new THREE.Mesh(coreGeo, coreMat);
       bGrp.add(coreMesh);
 
-      // Cyan outer frost sheath
-      const sheathGeo = new THREE.OctahedronGeometry(4.2, 0);
-      sheathGeo.scale(1.1, 1.1, 4.4);
+      // Cyan outer frost aura flame sheath
+      const sheathGeo = this.createOrganicPlumeColumnGeo(3.6, 0.8, 22, 8, 5, 0.32, 1.4);
+      sheathGeo.rotateX(Math.PI / 2);
       const sheathMat = new THREE.MeshBasicMaterial({
         color: 0x00e5ff,
         transparent: true,
-        opacity: 0.75,
-        blending: THREE.AdditiveBlending
+        opacity: 0.72,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false
       });
       const sheathMesh = new THREE.Mesh(sheathGeo, sheathMat);
       bGrp.add(sheathMesh);
 
-      // Tapered icy-blue trailing streak pointing backwards along flight path
-      const trailGeo = new THREE.ConeGeometry(3.2, 22, 6);
-      trailGeo.rotateX(-Math.PI / 2);
-      trailGeo.translate(0, 0, -11);
+      // Tapered icy-blue turbulent trailing ribbon
+      const trailGeo = this.createOrganicPlumeColumnGeo(0.5, 3.8, 24, 6, 5, 0.35, -1.0);
+      trailGeo.rotateX(Math.PI / 2);
+      trailGeo.translate(0, 0, -14);
       const trailMat = new THREE.MeshBasicMaterial({
         color: 0x38bdf8,
         transparent: true,
         opacity: 0.65,
-        blending: THREE.AdditiveBlending
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        depthWrite: false
       });
       const trailMesh = new THREE.Mesh(trailGeo, trailMat);
       bGrp.add(trailMesh);
@@ -2215,8 +3151,8 @@ export class ThreeVFX {
     branches: Array<{ from: Vector2; fromZ: number; to: Vector2; toZ: number }> = [],
     toElevation?: number
   ): void {
-    const from3 = new THREE.Vector3(from.x, elevation + 18, from.y);
-    const to3 = new THREE.Vector3(to.x, toElevation !== undefined ? toElevation : (elevation + 18), to.y);
+    const from3 = new THREE.Vector3(from.x, elevation, from.y);
+    const to3 = new THREE.Vector3(to.x, toElevation !== undefined ? toElevation : elevation, to.y);
     const dir = new THREE.Vector3().subVectors(to3, from3).normalize();
     const length = from3.distanceTo(to3);
 
@@ -2224,7 +3160,7 @@ export class ThreeVFX {
     this.group.add(group);
 
     // 1. Blinding White Electric Core Line with High-Frequency Jagged Displacement
-    const corePts = this.generateLightningPoints(from3, to3, 26, 22);
+    const corePts = this.generateLightningPoints(from3, to3, 26, 36);
     const coreGeo = new THREE.BufferGeometry().setFromPoints(corePts);
     const coreMat = new THREE.LineBasicMaterial({
       color: 0xffffff,
@@ -2239,7 +3175,7 @@ export class ThreeVFX {
     const glowColors = [0xc084fc, 0xd946ef, 0xa855f7];
     const glowLines: THREE.Line[] = [];
     for (let g = 0; g < 3; g++) {
-      const glowPts = this.generateLightningPoints(from3, to3, 24, 25);
+      const glowPts = this.generateLightningPoints(from3, to3, 24, 42);
       const gGeo = new THREE.BufferGeometry().setFromPoints(glowPts);
       const gMat = new THREE.LineBasicMaterial({
         color: glowColors[g],
@@ -2252,8 +3188,8 @@ export class ThreeVFX {
       glowLines.push(gLine);
     }
 
-    // 3. Volumetric Jagged Electric Ribbon following the jagged lightning path (No straight cylinder!)
-    const ribbonGeo = this.createJaggedRibbonGeometry(corePts, 8.5);
+    // 3. Volumetric Jagged Electric Ribbon following the jagged lightning path (2x scale)
+    const ribbonGeo = this.createJaggedRibbonGeometry(corePts, 16.0);
     const ribbonMat = new THREE.MeshBasicMaterial({
       color: 0xa855f7,
       transparent: true,
@@ -2267,11 +3203,11 @@ export class ThreeVFX {
 
     // 4. Branching Electric Lightning Forks arcing laterally into the air
     const branchLines: THREE.Line[] = [];
-    const branchCount = Math.min(8, Math.max(4, Math.floor(length / 65)));
+    const branchCount = Math.min(8, Math.max(4, Math.floor(length / 95)));
     for (let b = 0; b < branchCount; b++) {
       const nodeIdx = Math.floor(3 + (b / branchCount) * (corePts.length - 6));
       const branchOrigin = corePts[Math.min(nodeIdx, corePts.length - 1)];
-      const bPts = this.generateBranchPoints(branchOrigin, dir, 45 + Math.random() * 40, 5);
+      const bPts = this.generateBranchPoints(branchOrigin, dir, 85 + Math.random() * 75, 5);
       const bGeo = new THREE.BufferGeometry().setFromPoints(bPts);
       const bMat = new THREE.LineBasicMaterial({
         color: b % 2 === 0 ? 0xd946ef : 0xc084fc,
@@ -2438,9 +3374,9 @@ export class ThreeVFX {
     group.rotation.y = Math.PI / 2 - angle;
     this.group.add(group);
 
-    // Razor-tapered curved crescent blade geometry (tapers to razor-sharp points at both tips)
+    // Razor-tapered curved crescent blade geometry (2x scale)
     const innerRadius = range * 0.70;
-    const bladeWidth = 65;
+    const bladeWidth = 125;
     const angleSpan = 2.4; // ~137 degrees
     const slashGeo = this.createCrescentBladeGeometry(innerRadius, bladeWidth, angleSpan, 32);
 
@@ -2456,7 +3392,7 @@ export class ThreeVFX {
     group.add(slashMesh);
 
     // Razor-sharp brilliant white-gold core streak
-    const coreGeo = this.createCrescentBladeGeometry(innerRadius + 14, 24, angleSpan * 0.85, 28);
+    const coreGeo = this.createCrescentBladeGeometry(innerRadius + 24, 46, angleSpan * 0.85, 28);
     const coreMat = new THREE.MeshBasicMaterial({
       color: 0xfffbeb,
       transparent: true,
@@ -2528,8 +3464,8 @@ export class ThreeVFX {
   ): void {
     const baseElev = this.getTerrainHeight(focusPos.x, focusPos.y, elevation);
     const group = new THREE.Group();
-    // Position at chest/waist height and tilt group towards isometric camera
-    group.position.set(pos.x, baseElev + 16.0, pos.y);
+    // Position at chest/waist height and tilt group towards isometric camera (2x scale)
+    group.position.set(pos.x, baseElev + 36.0, pos.y);
     group.rotation.order = 'YXZ';
     group.rotation.y = Math.PI / 2 - angle;
     group.rotation.x = -0.38; // 22-degree tilt directly towards gameplay camera
@@ -2541,12 +3477,12 @@ export class ThreeVFX {
     group.add(leftBladeGroup);
     group.add(rightBladeGroup);
 
-    // Large razor-sharp golden curved energy blade geometry
+    // Large razor-sharp golden curved energy blade geometry (2x scale)
     const innerR = radius * 0.48;
-    const bladeW = 46;
+    const bladeW = 90;
     const angleSpan = 2.4;
     const bladeGeo = this.createCrescentBladeGeometry(innerR, bladeW, angleSpan, 32);
-    const coreGeo = this.createCrescentBladeGeometry(innerR + 10, 20, angleSpan * 0.88, 28);
+    const coreGeo = this.createCrescentBladeGeometry(innerR + 20, 38, angleSpan * 0.88, 28);
 
     const leftSlashMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
@@ -2588,16 +3524,16 @@ export class ThreeVFX {
     rightBladeGroup.add(rightBladeMesh);
     rightBladeGroup.add(rightCoreMesh);
 
-    // Starting positions: wide open on left and right flanks
-    const forwardDist = 70;
-    leftBladeGroup.position.set(-60, 0, forwardDist * 0.35);
+    // Starting positions: wide open on left and right flanks (2x scale)
+    const forwardDist = 140;
+    leftBladeGroup.position.set(-115, 0, forwardDist * 0.35);
     leftBladeGroup.rotation.y = -0.95; // open outward
 
-    rightBladeGroup.position.set(60, 0, forwardDist * 0.35);
+    rightBladeGroup.position.set(115, 0, forwardDist * 0.35);
     rightBladeGroup.rotation.y = 0.95; // open outward
 
     // Central starburst flash plane (hidden initially until blades meet)
-    const burstSize = Math.min(130, radius * 1.05);
+    const burstSize = Math.min(250, radius * 1.05);
     const flashGeo = new THREE.PlaneGeometry(burstSize, burstSize);
     flashGeo.rotateX(-Math.PI * 0.35); // Tilted towards isometric camera
     const flashMat = new THREE.ShaderMaterial({
@@ -2625,9 +3561,10 @@ export class ThreeVFX {
           float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
           float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
           float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
-          float pinchRing = smoothstep(0.05, 0.0, abs(r - (0.55 - uProgress * 0.25))) * 0.75;
+          float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
+          float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
           float fade = pow(1.0 - uProgress, 1.35);
-          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + pinchRing) * fade, 0.0, 1.0);
+          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
           if (alpha < 0.01) discard;
           vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
           gl_FragColor = vec4(col, alpha);
@@ -2687,12 +3624,10 @@ export class ThreeVFX {
   ): void {
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
 
-    // 1. Instantaneous 360-Degree Radial Frost Shockwaves centered on Commander
-    this.spawnShockwaveRing(pos, radius * 1.05, 0x00e5ff, baseElev + 1.2, 0.35);
-    this.spawnShockwaveRing(pos, radius * 0.65, 0xf0fdfa, baseElev + 1.6, 0.25);
-    this.spawnShockwaveRing(pos, radius * 1.30, 0x38bdf8, baseElev + 2.0, 0.45);
+    // 1. Instantaneous Freezing Mist Gusts centered on Commander (zero geometric ring)
+    this.spawnRealisticExplosion(pos, baseElev, Math.max(95, radius * 0.85), 'cryo', baseElev + 12);
 
-    // 2. Ring of 16 Jagged Ice Spikes erupting outward radially in 360 degrees
+    // 2. Ring of 16 Asymmetric Carved Ice Shards erupting outward radially
     const spikeCount = 16;
     for (let c = 0; c < spikeCount; c++) {
       const cAngle = (c / spikeCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.2;
@@ -2701,8 +3636,7 @@ export class ThreeVFX {
       const cz = pos.y + Math.sin(cAngle) * cDist;
       const cHeight = this.getTerrainHeight(cx, cz, elevation);
 
-      const crystalGeo = new THREE.OctahedronGeometry(5.5 + Math.random() * 4.5, 0);
-      crystalGeo.scale(1.1, 3.2, 1.1);
+      const crystalGeo = this.createJaggedShardGeo(10.0 + Math.random() * 8.0, 56 + Math.random() * 24, 5, 100 + c);
       const crystalMat = new THREE.MeshBasicMaterial({
         color: c % 2 === 0 ? 0x38bdf8 : 0x00e5ff,
         transparent: true,
@@ -2710,7 +3644,7 @@ export class ThreeVFX {
         blending: THREE.AdditiveBlending
       });
       const crystalMesh = new THREE.Mesh(crystalGeo, crystalMat);
-      crystalMesh.position.set(cx, cHeight + 7, cz);
+      crystalMesh.position.set(cx, cHeight - 2, cz);
       // Tilt spike radially outward from center
       const tiltAngle = 0.35 + Math.random() * 0.25;
       crystalMesh.rotation.set(
@@ -2784,8 +3718,8 @@ export class ThreeVFX {
         rotSpeedX: 0,
         rotSpeedY: (Math.random() - 0.5) * 2,
         rotSpeedZ: 0,
-        baseScale: 18,
-        endScale: 38,
+        baseScale: 34,
+        endScale: 72,
         lifetime: 0.42,
         maxLifetime: 0.42,
         groundY: baseElev
@@ -2798,16 +3732,15 @@ export class ThreeVFX {
         const item = spikePositions[ep];
         setTimeout(() => {
           const subElev = this.getTerrainHeight(item.pos.x, item.pos.y, elevation);
-          this.spawnShockwaveRing(item.pos, 52, 0x00e5ff, subElev + 1.2, 0.26);
-          this.spawnShockwaveRing(item.pos, 32, 0xf0fdfa, subElev + 1.6, 0.20);
+          this.spawnShockwaveRing(item.pos, 104, 0x00e5ff, subElev + 1.2, 0.26);
+          this.spawnShockwaveRing(item.pos, 64, 0xf0fdfa, subElev + 1.6, 0.20);
           for (let sp = 0; sp < 6; sp++) {
             const spAng = (sp / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
-            const spDist = 12 + Math.random() * 16;
+            const spDist = 24 + Math.random() * 32;
             const spX = item.pos.x + Math.cos(spAng) * spDist;
             const spZ = item.pos.y + Math.sin(spAng) * spDist;
             const spH = this.getTerrainHeight(spX, spZ, elevation);
-            const spireGeo = new THREE.OctahedronGeometry(4.5, 0);
-            spireGeo.scale(0.9, 2.6, 0.9);
+            const spireGeo = this.createJaggedShardGeo(8.5, 42, 5, 200 + sp);
             const spireMat = new THREE.MeshBasicMaterial({
               color: sp % 2 === 0 ? 0x38bdf8 : 0x00e5ff,
               transparent: true,
@@ -2815,7 +3748,7 @@ export class ThreeVFX {
               blending: THREE.AdditiveBlending
             });
             const spireMesh = new THREE.Mesh(spireGeo, spireMat);
-            spireMesh.position.set(spX, spH + 6, spZ);
+            spireMesh.position.set(spX, spH - 2, spZ);
             this.group.add(spireMesh);
             this.activeGroundSpikes.push({
               mesh: spireMesh,
@@ -2831,57 +3764,58 @@ export class ThreeVFX {
     }
   }
 
-  // --- COMMANDER DASH UPGRADE 3: TELEPORT PORTALS VFX (DIGITAL RUNES & RADIAL SPIKES) ---
-  public spawnTeleportPortals(from: Vector2, fromZ: number, to: Vector2, toZ: number, radius: number = 85): void {
-    // 1. Origin Dematerialization Glyph Ring
-    this.spawnShockwaveRing(from, 55, 0xa855f7, fromZ + 0.5, 0.32);
-    this.spawnShockwaveRing(from, 32, 0xc084fc, fromZ + 1.0, 0.25);
+  // --- COMMANDER DASH UPGRADE 3: TELEPORT PORTALS VFX (ORGANIC VOID WISPS & RIFT SURGE) ---
+  public spawnTeleportPortals(from: Vector2, fromZ: number, to: Vector2, toZ: number, radius: number = 190): void {
+    // 1. Origin Dematerialization Rift Gust
+    this.spawnShockwaveRing(from, 95, 0xa855f7, fromZ + 0.5, 0.32);
 
-    // Origin Dissolving Digital Rune Cubes floating upward
+    // Origin Rising Arcane Flame Sparks (zero box geometry)
     for (let r = 0; r < 10; r++) {
       const rAngle = Math.random() * Math.PI * 2;
-      const rDist = Math.random() * 25;
-      const runeGeo = new THREE.BoxGeometry(2.8, 2.8, 2.8);
-      const runeMat = new THREE.MeshBasicMaterial({
+      const rDist = Math.random() * 48;
+      const wispMat = new THREE.MeshBasicMaterial({
         color: r % 2 === 0 ? 0xf3e8ff : 0xc084fc,
         transparent: true,
         opacity: 0.92,
-        blending: THREE.AdditiveBlending
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide
       });
-      const runeMesh = new THREE.Mesh(runeGeo, runeMat);
-      runeMesh.position.set(from.x + Math.cos(rAngle) * rDist, fromZ + 4, from.y + Math.sin(rAngle) * rDist);
-      this.group.add(runeMesh);
+      const wispMesh = new THREE.Mesh(this.sharedSparkGeo, wispMat);
+      wispMesh.userData.isSharedGeo = true;
+      wispMesh.scale.setScalar(4.0);
+      wispMesh.position.set(from.x + Math.cos(rAngle) * rDist, fromZ + 12, from.y + Math.sin(rAngle) * rDist);
+      this.group.add(wispMesh);
       this.orbitalParticles.push({
-        mesh: runeMesh,
-        kind: 'debris',
-        vx: (Math.random() - 0.5) * 30,
-        vy: 110 + Math.random() * 120,
-        vz: (Math.random() - 0.5) * 30,
+        mesh: wispMesh,
+        kind: 'spark',
+        vx: (Math.random() - 0.5) * 50,
+        vy: 160 + Math.random() * 160,
+        vz: (Math.random() - 0.5) * 50,
         rotSpeedX: Math.random() * 6,
         rotSpeedY: Math.random() * 6,
         rotSpeedZ: Math.random() * 6,
-        baseScale: 1.0,
-        endScale: 0.1,
+        baseScale: 4.0,
+        endScale: 0.4,
         lifetime: 0.32,
         maxLifetime: 0.32,
         groundY: fromZ
       });
     }
 
-    // 2. Destination Spatial Rematerialization Nova & Pillar
-    this.spawnShockwaveRing(to, radius, 0xa855f7, toZ + 0.5, 0.42);
-    this.spawnShockwaveRing(to, radius * 0.6, 0xf3e8ff, toZ + 1.2, 0.35);
+    // 2. Destination Spatial Rematerialization Explosion Cloud & Energy Rift Column (zero cylinder)
+    this.spawnRealisticExplosion(to, toZ, Math.max(95, radius * 0.72), 'void', toZ + 14);
 
-    const pillarGeo = new THREE.CylinderGeometry(6, 26, 150, 16, 1, true);
-    const pillarMat = new THREE.MeshBasicMaterial({
+    const riftGeo = this.createOrganicPlumeColumnGeo(12, 46, 260, 14, 8, 0.36, 1.5);
+    const riftMat = new THREE.MeshBasicMaterial({
       color: 0xc084fc,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.68,
       side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      depthWrite: false
     });
-    const pillar = new THREE.Mesh(pillarGeo, pillarMat);
-    pillar.position.set(to.x, toZ + 75, to.y);
+    const pillar = new THREE.Mesh(riftGeo, riftMat);
+    pillar.position.set(to.x, toZ + 130, to.y);
     this.group.add(pillar);
     this.beams.push({ mesh: pillar, lifetime: 0.30, maxLifetime: 0.30 });
 
@@ -2911,7 +3845,7 @@ export class ThreeVFX {
     }, 280);
   }
 
-  // 2b. Custom Colored Shockwave Ring (Artifact Pulses, Pod Unlocks, Level Up)
+  // 2b. Turbulent Shock-Gust Ripple Wave (zero geometric RingGeometry)
   public spawnShockwaveRing(
     pos: Vector2,
     maxRadius: number,
@@ -2920,16 +3854,11 @@ export class ThreeVFX {
     duration: number = 0.55
   ): void {
     if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return;
-    const geo = new THREE.RingGeometry(2, 6, 48);
-    const mat = new THREE.MeshBasicMaterial({
-      color: colorHex,
-      side: THREE.DoubleSide,
-      transparent: true,
-      opacity: 0.9
-    });
+    const geo = new THREE.PlaneGeometry(2.2, 2.2);
+    const mat = this.createOrganicRippleShader(colorHex, undefined, Math.random() * 40);
     const mesh = new THREE.Mesh(geo, mat);
     mesh.rotation.x = -Math.PI / 2;
-    mesh.position.set(pos.x, elevation + 0.6, pos.y);
+    mesh.position.set(pos.x, elevation + 0.9, pos.y);
     this.group.add(mesh);
 
     this.rings.push({
@@ -2972,23 +3901,23 @@ export class ThreeVFX {
       depthTest: false
     });
     const sprite = new THREE.Sprite(mat);
-    const scaleX = isCrit ? 34 : 22;
-    const scaleY = isCrit ? 17 : 11;
+    const scaleX = isCrit ? 52 : 34;
+    const scaleY = isCrit ? 26 : 17;
     sprite.scale.set(scaleX, scaleY, 1);
-    sprite.position.set(pos.x, elevation + 28, pos.y);
+    sprite.position.set(pos.x, elevation + 68, pos.y);
     this.group.add(sprite);
 
     this.damageTexts.push({
       sprite,
-      vy: isCrit ? 48 : 38,
+      vy: isCrit ? 64 : 52,
       lifetime: isCrit ? 0.95 : 0.7,
       maxLifetime: isCrit ? 0.95 : 0.7
     });
   }
 
-  // 4. Dash Afterimage Ghost
+  // 4. Dash Afterimage Ghost (2x hero sprite scale)
   public spawnDashGhost(pos: Vector2, mapTexture: THREE.Texture, elevation: number = 0): void {
-    const geo = new THREE.PlaneGeometry(36, 36);
+    const geo = new THREE.PlaneGeometry(104, 104);
     const mat = new THREE.MeshBasicMaterial({
       map: mapTexture,
       transparent: true,
@@ -2996,7 +3925,7 @@ export class ThreeVFX {
       depthWrite: false
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(pos.x, elevation + 18, pos.y);
+    mesh.position.set(pos.x, elevation + 52, pos.y);
     this.group.add(mesh);
 
     this.ghosts.push({
@@ -3024,7 +3953,7 @@ export class ThreeVFX {
       }
     }
 
-    const geo = new THREE.PlaneGeometry(52, 52);
+    const geo = new THREE.PlaneGeometry(104, 104);
     const mat = new THREE.ShaderMaterial({
       uniforms: {
         uMap: { value: mapTexture },
@@ -3057,7 +3986,7 @@ export class ThreeVFX {
       side: THREE.DoubleSide
     });
     const mesh = new THREE.Mesh(geo, mat);
-    mesh.position.set(pos.x, elevation + 26, pos.y);
+    mesh.position.set(pos.x, elevation + 52, pos.y);
     mesh.renderOrder = 4;
     this.group.add(mesh);
 
@@ -3069,23 +3998,23 @@ export class ThreeVFX {
     });
   }
 
-  // 4C. Doctor Toxic Chain Bounce Bio-Arc
+  // 4C. Doctor Toxic Chain Bounce Bio-Arc (2x scale)
   public spawnToxicChainArc(from: Vector2, fromZ: number, to: Vector2, toZ: number): void {
     const points: THREE.Vector3[] = [];
     const segments = 6;
     for (let i = 0; i <= segments; i++) {
       const t = i / segments;
-      const jitter = i > 0 && i < segments ? 12 : 0;
+      const jitter = i > 0 && i < segments ? 22 : 0;
       points.push(
         new THREE.Vector3(
           from.x + (to.x - from.x) * t + (Math.random() - 0.5) * jitter,
-          fromZ + (toZ - fromZ) * t + Math.sin(t * Math.PI) * 14 + (Math.random() - 0.5) * 6,
+          fromZ + (toZ - fromZ) * t + Math.sin(t * Math.PI) * 26 + (Math.random() - 0.5) * 10,
           from.y + (to.y - from.y) * t + (Math.random() - 0.5) * jitter
         )
       );
     }
     const curve = new THREE.CatmullRomCurve3(points);
-    const tubeGeo = new THREE.TubeGeometry(curve, 10, 2.2, 5, false);
+    const tubeGeo = new THREE.TubeGeometry(curve, 10, 4.2, 5, false);
     const tubeMat = new THREE.MeshBasicMaterial({
       color: 0x4ade80,
       transparent: true,
@@ -3098,50 +4027,37 @@ export class ThreeVFX {
     this.beams.push({ mesh, lifetime: 0.22, maxLifetime: 0.22 });
   }
 
-  // 4D. Doctor Toxic Burst Explosion (Toxic Chain 3-stack / Cluster / Decoy)
+  // 4D. Doctor Toxic Burst Explosion (Volumetric Chemical Fireball & Corrosive Cloud)
   public spawnToxicExplosion(pos: Vector2, elevation: number, radius: number): void {
-    this.spawnShockwaveRing(pos, radius, 0x84cc16, elevation + 1.5, 0.44);
-    this.spawnShockwaveRing(pos, radius * 0.62, 0x34d399, elevation + 2.5, 0.34);
-
-    const sphereGeo = new THREE.SphereGeometry(Math.max(18, radius * 0.42), 14, 12);
-    const sphereMat = new THREE.MeshBasicMaterial({
-      color: 0xa3e635,
-      transparent: true,
-      opacity: 0.65,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false
-    });
-    const sphere = new THREE.Mesh(sphereGeo, sphereMat);
-    sphere.position.set(pos.x, elevation + 14, pos.y);
-    this.group.add(sphere);
-    this.beams.push({ mesh: sphere, lifetime: 0.26, maxLifetime: 0.26 });
+    this.spawnRealisticExplosion(pos, elevation, Math.max(68, radius), 'toxic', elevation + 12);
   }
 
-  // 4E. Doctor Heavenly Light Pillar (Divine Intervention Angel Summoning)
+  // 4E. Doctor Heavenly Light Curtain (Divine Intervention Aurora Column — zero cylinder)
   public spawnHeavenlyLightBeam(pos: Vector2, elevation: number, duration: number = 0.85, colorHex: number = 0x6ee7b7): void {
-    const colGeo = new THREE.CylinderGeometry(8, 22, 260, 12, 1, true);
+    const colGeo = this.createOrganicPlumeColumnGeo(18, 44, 460, 12, 8, 0.34, 1.3);
     const colMat = new THREE.MeshBasicMaterial({
       color: colorHex,
       transparent: true,
-      opacity: 0.78,
+      opacity: 0.68,
       blending: THREE.AdditiveBlending,
       side: THREE.DoubleSide,
       depthWrite: false
     });
     const colMesh = new THREE.Mesh(colGeo, colMat);
-    colMesh.position.set(pos.x, elevation + 130, pos.y);
+    colMesh.position.set(pos.x, elevation + 230, pos.y);
     this.group.add(colMesh);
     this.beams.push({ mesh: colMesh, lifetime: duration, maxLifetime: duration });
-    this.spawnShockwaveRing(pos, 52, colorHex, elevation + 1.5, duration * 0.75);
+    this.spawnShockwaveRing(pos, 104, colorHex, elevation + 1.5, duration * 0.75);
   }
 
-  // 4F. Doctor Emerald Healing Mote Burst
+  // 4F. Doctor Emerald Healing Mote Burst (Organic Glow Wisps — zero CircleGeometry)
   public spawnHealMoteBurst(pos: Vector2, elevation: number, count: number = 4): void {
     const n = Math.min(count, 6);
     for (let i = 0; i < n; i++) {
       if (this.healMotes.length >= 28) break;
-      const geo = new THREE.CircleGeometry(2.8, 12);
+      const geo = new THREE.PlaneGeometry(12, 12);
       const mat = new THREE.MeshBasicMaterial({
+        map: this.dustRadialTex || null,
         color: i % 2 === 0 ? 0x34d399 : 0xecfdf5,
         transparent: true,
         opacity: 0.9,
@@ -3151,17 +4067,55 @@ export class ThreeVFX {
       });
       const mesh = new THREE.Mesh(geo, mat);
       const ang = Math.random() * Math.PI * 2;
-      const r = 8 + Math.random() * 14;
-      mesh.position.set(pos.x + Math.cos(ang) * r, elevation + 12 + Math.random() * 18, pos.y + Math.sin(ang) * r);
+      const r = 16 + Math.random() * 26;
+      mesh.position.set(pos.x + Math.cos(ang) * r, elevation + 24 + Math.random() * 36, pos.y + Math.sin(ang) * r);
       this.group.add(mesh);
       this.healMotes.push({
         mesh,
         mat,
-        vx: (Math.random() - 0.5) * 18,
-        vy: 34 + Math.random() * 24,
-        vz: (Math.random() - 0.5) * 18,
+        vx: (Math.random() - 0.5) * 32,
+        vy: 56 + Math.random() * 42,
+        vz: (Math.random() - 0.5) * 32,
         lifetime: 0.55,
         maxLifetime: 0.55
+      });
+    }
+  }
+
+  /** Restrained crystalline frost wisps along the advancing cosmetic refreezing wavefront. */
+  public spawnRegionalFrostMotes(origin: Vector2, radius: number, count: number = 3): void {
+    const n = Math.min(count, 5);
+    const radialDist = Math.max(80, radius);
+    for (let i = 0; i < n; i++) {
+      if (this.regionalFrostMotes.length >= 36) break;
+      const mat = new THREE.MeshBasicMaterial({
+        map: this.dustRadialTex || null,
+        color: i % 2 === 0 ? 0xbae6fd : 0xe0f2fe,
+        transparent: true,
+        opacity: 0.72,
+        blending: THREE.AdditiveBlending,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      });
+      const mesh = new THREE.Mesh(this.sharedDustGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.setScalar(18 + Math.random() * 14);
+      const ang = Math.random() * Math.PI * 2;
+      const r = radialDist * (0.85 + Math.random() * 0.25);
+      const wx = origin.x + Math.cos(ang) * r;
+      const wy = origin.y + Math.sin(ang) * r;
+      const groundY = this.heightSampler(wx, wy);
+      mesh.position.set(wx, groundY + 18 + Math.random() * 38, wy);
+      this.group.add(mesh);
+      const life = 0.85 + Math.random() * 0.35;
+      this.regionalFrostMotes.push({
+        mesh,
+        mat,
+        vx: Math.cos(ang) * (24 + Math.random() * 24),
+        vy: 28 + Math.random() * 24,
+        vz: Math.sin(ang) * (24 + Math.random() * 24),
+        lifetime: life,
+        maxLifetime: life
       });
     }
   }
@@ -3219,7 +4173,7 @@ export class ThreeVFX {
     }
 
     const curve = new THREE.CatmullRomCurve3(points);
-    const tubeGeo = new THREE.TubeGeometry(curve, 12, 2.6, 6, false);
+    const tubeGeo = new THREE.TubeGeometry(curve, 12, 4.8, 6, false);
     const tubeMat = new THREE.MeshBasicMaterial({
       color: 0xa855f7,
       transparent: true,
@@ -3245,7 +4199,7 @@ export class ThreeVFX {
     this.group.add(line);
     this.lightningLines.push(line);
 
-    this.spawnShockwaveRing(to, 28, 0xc084fc, elevation - 14, 0.22);
+    this.spawnShockwaveRing(to, 56, 0xc084fc, elevation - 14, 0.22);
 
     setTimeout(() => {
       this.group.remove(line);
@@ -3261,23 +4215,24 @@ export class ThreeVFX {
   private initSharedBlasterBoltResources(): void {
     if (this.sharedBoltCoreGeo) return;
 
-    this.sharedBoltCoreGeo = new THREE.CylinderGeometry(1.7, 0.7, 22, 8);
+    this.sharedBoltCoreGeo = this.createOrganicPlumeColumnGeo(0.8, 1.9, 22, 8, 4, 0.25, 0.9);
     this.sharedBoltCoreGeo.rotateX(Math.PI / 2);
-    this.sharedBoltCoreMat = new THREE.MeshBasicMaterial({ color: 0xffffff });
+    this.sharedBoltCoreMat = new THREE.MeshBasicMaterial({ color: 0xffffff, side: THREE.DoubleSide });
 
-    this.sharedBoltTipGeo = new THREE.ConeGeometry(2.1, 10, 8);
+    this.sharedBoltTipGeo = this.createJaggedShardGeo(2.0, 10, 5, 5);
     this.sharedBoltTipGeo.rotateX(Math.PI / 2);
-    this.sharedBoltTipGeo.translate(0, 0, 14);
+    this.sharedBoltTipGeo.translate(0, 0, 9);
     this.sharedBoltTipMat = new THREE.MeshBasicMaterial({ color: 0xfef08a });
 
-    this.sharedBoltGlowGeo = new THREE.CylinderGeometry(3.4, 1.1, 28, 8);
+    this.sharedBoltGlowGeo = this.createOrganicPlumeColumnGeo(1.1, 3.6, 28, 8, 4, 0.30, -1.1);
     this.sharedBoltGlowGeo.rotateX(Math.PI / 2);
     this.sharedBoltGlowGeo.translate(0, 0, -1);
     this.sharedBoltGlowMat = new THREE.MeshBasicMaterial({
       color: 0xf59e0b,
       transparent: true,
-      opacity: 0.75,
+      opacity: 0.72,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
 
@@ -3324,7 +4279,7 @@ export class ThreeVFX {
     this.sharedBoltTrailGeoV.rotateZ(Math.PI / 2);
     this.sharedBoltTrailGeoV.translate(0, 0, -16);
 
-    this.sharedMuzzleFlashGeo = new THREE.PlaneGeometry(24, 24);
+    this.sharedMuzzleFlashGeo = new THREE.PlaneGeometry(48, 48);
     this.sharedMuzzleFlashGeo.rotateX(-Math.PI / 2);
     this.sharedMuzzleFlashMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -3349,16 +4304,16 @@ export class ThreeVFX {
           if (r > 1.0) discard;
           float a = atan(vUv.y, vUv.x) - uAngle;
           float spikes = pow(abs(cos(a * 3.0)), 6.0) * smoothstep(1.0, 0.08, r);
-          float core = smoothstep(0.42, 0.0, r);
-          float ring = smoothstep(0.06, 0.0, abs(r - 0.68)) * 0.65;
-          float alpha = clamp(core + spikes * 0.9 + ring, 0.0, 1.0);
+          float core = smoothstep(0.45, 0.0, r);
+          float wisp = 0.5 + 0.5 * sin(a * 5.0 + r * 7.0);
+          float alpha = clamp(core + spikes * 0.9 + wisp * smoothstep(0.85, 0.15, r) * 0.35, 0.0, 1.0);
           vec3 col = mix(vec3(0.98, 0.55, 0.08), vec3(1.0, 0.98, 0.82), core + spikes * 0.5);
           gl_FragColor = vec4(col, alpha);
         }
       `
     });
 
-    this.sharedImpactSparkGeo = new THREE.PlaneGeometry(26, 26);
+    this.sharedImpactSparkGeo = new THREE.PlaneGeometry(52, 52);
     this.sharedImpactSparkGeo.rotateX(-Math.PI / 2);
     this.sharedImpactSparkMat = new THREE.ShaderMaterial({
       transparent: true,
@@ -3539,12 +4494,11 @@ export class ThreeVFX {
             edgeFactor = smoothstep(innerWakeWidth * 0.18, 0.0, dIn);
           }
 
-          // Subtle segmented tech markings & hex-grid energy pattern in wake
-          float segPattern = step(0.35, fract(p.y * 5.0 - uTime * 3.0)) * smoothstep(0.32, 0.08, abs(distFromSpine + 0.12));
-          float hexGrid = abs(sin(p.x * 24.0) * sin(p.y * 24.0));
-          float gridMask = smoothstep(0.65, 0.85, hexGrid) * smoothstep(innerWakeWidth, 0.05, -distFromSpine) * 0.35;
+          // Flowing organic solar-flame plasma ripples in wake (zero geometric grid/hex pattern)
+          float flameFlow = 0.5 + 0.5 * sin(p.y * 8.5 - uTime * 7.0 + sin(p.x * 11.0 + uTime * 4.5) * 1.4);
+          float wispMask = flameFlow * smoothstep(innerWakeWidth, 0.04, -distFromSpine) * 0.42;
 
-          alpha = clamp((alpha + segPattern * 0.22 + gridMask) * tipFade * uAlpha, 0.0, 1.0);
+          alpha = clamp((alpha + wispMask) * tipFade * uAlpha, 0.0, 1.0);
           if (alpha < 0.02) discard;
 
           vec3 amberWake = vec3(0.96, 0.48, 0.08);
@@ -3614,7 +4568,7 @@ export class ThreeVFX {
       layers.push({ leftMesh: downLeft, rightMesh: downRight, yOffset: -12 });
     }
 
-    // Inward-pointing Golden Chevron Indicators (>>> and <<<)
+    // Swirling Golden Ember Wisps (zero geometric chevrons)
     const chevGeo = new THREE.PlaneGeometry(24, 14);
     chevGeo.rotateX(-Math.PI / 2);
     const createChevronMat = (dirSign: number) =>
@@ -3637,10 +4591,10 @@ export class ThreeVFX {
           varying vec2 vUv;
           void main() {
             float x = vUv.x * uDir;
-            float chevron = abs(fract((x - abs(vUv.y) * 0.65) * 1.5 - uTime * 4.0) - 0.5);
-            float line = smoothstep(0.18, 0.04, chevron) * smoothstep(1.0, 0.65, abs(vUv.y)) * smoothstep(1.0, 0.7, abs(vUv.x));
-            if (line < 0.02) discard;
-            gl_FragColor = vec4(1.0, 0.88, 0.35, line * 0.85);
+            float stream = sin(x * 7.0 - uTime * 11.0 + vUv.y * 4.0) * 0.5 + 0.5;
+            float fade = exp(-dot(vUv, vUv) * 2.2) * smoothstep(0.25, 0.9, stream);
+            if (fade < 0.02) discard;
+            gl_FragColor = vec4(1.0, 0.86, 0.34, fade * 0.78);
           }
         `
       });
@@ -3751,85 +4705,64 @@ export class ThreeVFX {
   public createElectricSwordModel(): THREE.Group {
     const sword = new THREE.Group();
 
-    // Central blade core (bright violet-white energy)
-    const bladeGeo = new THREE.BoxGeometry(3.4, 28, 1.2);
+    // Sculpted Organic Living-Plasma Energy Blade (tapered ribbon silhouette — zero Box/Cone/Cylinder/Octahedron)
+    const bladePts: THREE.Vector3[] = [];
+    for (let i = 0; i <= 14; i++) {
+      const t = i / 14;
+      const sway = Math.sin(t * Math.PI * 1.6) * 1.4;
+      bladePts.push(new THREE.Vector3(sway, -4 + t * 36, 0));
+    }
+    const coreGeo = this.createJaggedRibbonGeometry(bladePts, 4.8);
     const bladeMat = new THREE.MeshBasicMaterial({
       color: 0xf5d0fe,
       transparent: true,
       opacity: 0.95,
-      blending: THREE.AdditiveBlending
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
     });
-    const bladeMesh = new THREE.Mesh(bladeGeo, bladeMat);
-    bladeMesh.position.set(0, 10, 0);
-    sword.add(bladeMesh);
+    sword.add(new THREE.Mesh(coreGeo, bladeMat));
 
-    // Glowing outer edge aura
-    const edgeGeo = new THREE.BoxGeometry(4.8, 30, 0.8);
+    const edgeGeo = this.createJaggedRibbonGeometry(bladePts, 7.6);
     const edgeMat = new THREE.MeshBasicMaterial({
       color: 0xc084fc,
       transparent: true,
-      opacity: 0.65,
-      blending: THREE.AdditiveBlending
+      opacity: 0.62,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false
     });
-    const edgeMesh = new THREE.Mesh(edgeGeo, edgeMat);
-    edgeMesh.position.set(0, 10, 0);
-    sword.add(edgeMesh);
+    sword.add(new THREE.Mesh(edgeGeo, edgeMat));
 
-    // Sharp tip cone
-    const tipGeo = new THREE.ConeGeometry(2.4, 8, 4);
-    const tipMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.98,
-      blending: THREE.AdditiveBlending
-    });
-    const tipMesh = new THREE.Mesh(tipGeo, tipMat);
-    tipMesh.position.set(0, 28, 0);
-    tipMesh.rotation.y = Math.PI / 4;
-    sword.add(tipMesh);
-
-    // Crossguard (heavy alloy with purple inlay)
-    const guardGeo = new THREE.BoxGeometry(14, 2.8, 3.2);
-    const guardMat = new THREE.MeshBasicMaterial({
-      color: 0x1e1b4b
-    });
-    const guardMesh = new THREE.Mesh(guardGeo, guardMat);
-    guardMesh.position.set(0, -4, 0);
-    sword.add(guardMesh);
-
-    const guardGlowGeo = new THREE.BoxGeometry(15.2, 1.2, 3.4);
-    const guardGlowMat = new THREE.MeshBasicMaterial({
+    // Curved organic plasma guard ribbon
+    const guardPts = [
+      new THREE.Vector3(-7.5, -2.5, 0),
+      new THREE.Vector3(-3.5, -4.2, 0.8),
+      new THREE.Vector3(0, -4.8, 0),
+      new THREE.Vector3(3.5, -4.2, -0.8),
+      new THREE.Vector3(7.5, -2.5, 0)
+    ];
+    const guardGeo = this.createJaggedRibbonGeometry(guardPts, 3.0);
+    sword.add(new THREE.Mesh(guardGeo, new THREE.MeshBasicMaterial({
       color: 0x9333ea,
       transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending
-    });
-    const guardGlow = new THREE.Mesh(guardGlowGeo, guardGlowMat);
-    guardGlow.position.set(0, -4, 0);
-    sword.add(guardGlow);
+      opacity: 0.88,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide
+    })));
 
-    // Wrapped grip / hilt
-    const hiltGeo = new THREE.CylinderGeometry(1.4, 1.4, 8, 6);
-    const hiltMat = new THREE.MeshBasicMaterial({
-      color: 0x312e81
-    });
-    const hiltMesh = new THREE.Mesh(hiltGeo, hiltMat);
-    hiltMesh.position.set(0, -9.5, 0);
-    sword.add(hiltMesh);
-
-    // Gemstone Pommel
-    const pommelGeo = new THREE.OctahedronGeometry(2.6, 0);
-    const pommelMat = new THREE.MeshBasicMaterial({
+    // Organic pommel flame-shard
+    const pommelGeo = this.createJaggedShardGeo(2.4, 8, 5, 33);
+    pommelGeo.rotateX(Math.PI);
+    const pommelMesh = new THREE.Mesh(pommelGeo, new THREE.MeshBasicMaterial({
       color: 0xa855f7,
       transparent: true,
       opacity: 0.95,
       blending: THREE.AdditiveBlending
-    });
-    const pommelMesh = new THREE.Mesh(pommelGeo, pommelMat);
-    pommelMesh.position.set(0, -14.5, 0);
+    }));
+    pommelMesh.position.set(0, -8, 0);
     sword.add(pommelMesh);
 
-    // Blade sparks / arcs hugging the edge
+    // Crackling arcs hugging the edge
     const sparkGeo = new THREE.BufferGeometry();
     const sparkPos = new Float32Array(16 * 3);
     for (let i = 0; i < 8; i++) {
@@ -3848,8 +4781,7 @@ export class ThreeVFX {
       opacity: 0.85,
       blending: THREE.AdditiveBlending
     });
-    const sparks = new THREE.LineSegments(sparkGeo, sparkMat);
-    sword.add(sparks);
+    sword.add(new THREE.LineSegments(sparkGeo, sparkMat));
 
     return sword;
   }
@@ -3897,9 +4829,10 @@ export class ThreeVFX {
           float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
           float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
           float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
-          float pinchRing = smoothstep(0.05, 0.0, abs(r - (0.55 - uProgress * 0.25))) * 0.75;
+          float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
+          float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
           float fade = pow(1.0 - uProgress, 1.35);
-          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + pinchRing) * fade, 0.0, 1.0);
+          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
           if (alpha < 0.01) discard;
           vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
           gl_FragColor = vec4(col, alpha);
@@ -4006,10 +4939,10 @@ export class ThreeVFX {
     group.rotation.y = angle;
     this.group.add(group);
 
-    // 1. Forward Kinetic Air-Split Wedge / Nose-Cone around Commander
-    const noseGeo = new THREE.ConeGeometry(20, 34, 16, 1, true);
+    // 1. Forward Curved Turbulent Slipstream Flame Trail around Commander (zero ConeGeometry)
+    const noseGeo = this.createOrganicPlumeColumnGeo(2, 22, 38, 12, 6, 0.28, 1.2);
     noseGeo.rotateX(Math.PI / 2);
-    noseGeo.translate(0, 18, 12);
+    noseGeo.translate(0, 18, 10);
     const noseConeMat = new THREE.ShaderMaterial({
       transparent: true,
       depthWrite: false,
@@ -4179,15 +5112,15 @@ export class ThreeVFX {
           float a = atan(vUv.y, vUv.x);
           float rays = pow(abs(cos(a * 6.0)), 8.0) * smoothstep(1.0, 0.12, r);
           float subRays = pow(abs(sin(a * 10.0)), 12.0) * smoothstep(0.85, 0.15, r);
-          float innerTechRing = smoothstep(0.035, 0.0, abs(r - 0.28)) * 0.9;
-          float core = smoothstep(0.32, 0.0, r);
+          float wisp = 0.5 + 0.5 * sin(a * 5.0 + r * 9.0);
+          float core = smoothstep(0.36, 0.0, r);
           float fade = pow(1.0 - uProgress, 1.3);
-          float alpha = clamp((core + rays * 0.95 + subRays * 0.65 + innerTechRing) * fade, 0.0, 1.0);
+          float alpha = clamp((core + rays * 0.95 + subRays * 0.65 + wisp * smoothstep(0.75, 0.15, r) * 0.35) * fade, 0.0, 1.0);
           if (alpha < 0.01) discard;
           vec3 gold = vec3(1.0, 0.78, 0.18);
           vec3 violetAccent = vec3(0.78, 0.45, 0.98);
           vec3 col = mix(gold, violetAccent, subRays * 0.45);
-          col = mix(col, vec3(1.0, 0.99, 0.90), core + innerTechRing * 0.5);
+          col = mix(col, vec3(1.0, 0.99, 0.90), core);
           gl_FragColor = vec4(col, alpha);
         }
       `
@@ -4195,40 +5128,11 @@ export class ThreeVFX {
     const flashMesh = new THREE.Mesh(flashGeo, flashMat);
     group.add(flashMesh);
 
-    // 2. Brief, Crisp Expanding Kinetic Pressure Ring (Fast, Low-Profile)
+    // 2. Turbulent Kinetic Shockwave Dust & Ember Gust (zero crisp circle)
     const ringSize = radius * 1.9;
     const ringGeo = new THREE.PlaneGeometry(ringSize, ringSize);
     ringGeo.rotateX(-Math.PI / 2);
-    const ringMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uProgress: { value: 0.1 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uProgress;
-        uniform float uAlpha;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          if (r > 1.0) discard;
-          float ring = smoothstep(0.055, 0.0, abs(r - uProgress));
-          if (ring < 0.01) discard;
-          vec3 col = mix(vec3(0.98, 0.68, 0.15), vec3(1.0, 0.96, 0.80), ring);
-          gl_FragColor = vec4(col, ring * uAlpha * 0.85);
-        }
-      `
-    });
+    const ringMat = this.createOrganicRippleShader(0xf59e0b, 0xfef08a, Math.random() * 20);
     const ringMesh = new THREE.Mesh(ringGeo, ringMat);
     group.add(ringMesh);
 
@@ -4433,45 +5337,30 @@ export class ThreeVFX {
           float spiral1 = pow(0.5 + 0.5 * sin(swirlAngle * 3.0), 2.2);
           float spiral2 = pow(0.5 + 0.5 * cos(swirlAngle * 5.0 - uTime * 2.5), 3.0);
 
-          // Inward-moving gravitational wave rings
-          float inwardWave = pow(0.5 + 0.5 * sin(r * 28.0 + uTime * 10.0), 3.0) * smoothstep(0.12, 0.85, r);
+          // Domain-warped organic void nebula & spiraling rift wisps (zero chevrons or geometric tech rings)
+          float n1 = 0.5 + 0.5 * sin(p.x * 7.5 + sin(p.y * 6.0 + uTime * 3.0) * 1.4);
+          float n2 = 0.5 + 0.5 * cos(p.y * 9.0 - cos(p.x * 8.0 - uTime * 2.4) * 1.3);
+          float wisp = n1 * 0.6 + n2 * 0.4;
+          float warpedR = r + (wisp - 0.5) * 0.36;
+          if (warpedR > 1.0) discard;
 
-          // 6 radial lanes of inward-pointing chevrons (>>>)
-          float laneAngle = mod(a + 3.14159265, 1.04719755) - 0.52359877;
-          float laneMask = smoothstep(0.16, 0.06, abs(laneAngle)) * smoothstep(0.24, 0.35, r) * smoothstep(0.88, 0.75, r);
-          float chevCoord = fract(r * 5.5 + uTime * 1.8 - abs(laneAngle) * 2.2);
-          float chev = smoothstep(0.30, 0.50, chevCoord) * smoothstep(0.75, 0.50, chevCoord) * laneMask;
+          float innerHorizon = exp(-pow((warpedR - 0.22) / 0.08, 2.0)) * (1.2 + 0.7 * sin(a * 4.0 - uTime * 7.0));
+          float vortexSmoke = smoothstep(0.95, 0.14, warpedR) * smoothstep(0.25, 0.88, wisp);
 
-          // Blazing, rotating purple-gold photon ring at event horizon boundary
-          float photonRing = exp(-pow((r - 0.18) / 0.022, 2.0)) * (2.2 + 0.8 * sin(a * 4.0 - uTime * 8.0));
-          vec3 photonCol = mix(vec3(0.68, 0.22, 0.98), vec3(1.0, 0.84, 0.3), 0.5 + 0.5 * sin(a * 2.0 + uTime * 6.0));
-
-          // Golden-amber inner crater rim (preserving Orbital Strike's signature at the center)
-          float goldCraterRing = exp(-pow((r - 0.20) / 0.035, 2.0)) * 1.35;
-          float outerBoundary = exp(-pow((r - 0.92) / 0.018, 2.0)) * 1.25;
-          float outerTicks = step(0.65, sin(a * 36.0)) * exp(-pow((r - 0.88) / 0.012, 2.0)) * 0.85;
-
-          // Deep purple-magenta-gold color palette matching Reference Image 1
           vec3 deepVoid = vec3(0.18, 0.03, 0.38);
           vec3 electricPurple = vec3(0.68, 0.22, 0.98);
           vec3 magentaGlow = vec3(0.95, 0.45, 1.0);
           vec3 orbitalGold = vec3(1.0, 0.82, 0.28);
 
-          // Inner platform: golden cracked radial stepping stones matching Reference Image 1
-          float innerPlatform = smoothstep(0.24, 0.16, r);
-          float cracks = (0.5 + 0.5 * sin(a * 16.0)) * (0.5 + 0.5 * cos(r * 38.0));
-          float goldPlatform = innerPlatform * (0.85 + 0.65 * cracks);
-
-          float energy = spiral1 * 0.75 + spiral2 * 0.55 + inwardWave * 0.45 + chev * 1.35 + outerBoundary + outerTicks;
+          float energy = spiral1 * 0.78 + spiral2 * 0.60 + vortexSmoke * 0.85 + innerHorizon;
           vec3 col = mix(deepVoid, electricPurple, clamp(energy, 0.0, 1.0));
-          col = mix(col, magentaGlow, clamp(spiral2 * 0.7 + chev * 0.9 + outerBoundary * 0.6, 0.0, 1.0));
-          col += orbitalGold * (goldCraterRing + goldPlatform * 1.2);
-          col += photonCol * photonRing;
+          col = mix(col, magentaGlow, clamp(spiral2 * 0.7 + vortexSmoke * 0.45, 0.0, 1.0));
+          col += orbitalGold * (innerHorizon * 0.95 + smoothstep(0.26, 0.04, warpedR) * 0.55);
 
-          float radialEnvelope = smoothstep(1.0, 0.86, r) * (0.28 + 0.72 * (1.0 - r * 0.55));
+          float radialEnvelope = smoothstep(1.0, 0.70, warpedR) * (0.28 + 0.72 * (1.0 - warpedR * 0.55));
           float collapseBoost = 1.0 + smoothstep(0.70, 1.0, uProgress) * 0.85;
 
-          float alpha = clamp((energy * 0.82 + 0.24 + (goldCraterRing + goldPlatform) * 0.7) * radialEnvelope * uAlpha, 0.0, 1.0);
+          float alpha = clamp((energy * 0.82 + 0.18) * radialEnvelope * uAlpha, 0.0, 1.0);
           gl_FragColor = vec4(col * collapseBoost, alpha);
         }
       `
@@ -4481,30 +5370,31 @@ export class ThreeVFX {
     vortexDiscMesh.position.set(pos.x, baseElev, pos.y);
     group.add(vortexDiscMesh);
 
-    // Dark event-horizon ring at Commander's feet (leaves character clearly visible as in Reference Image 1)
-    const coreGeo = new THREE.TorusGeometry(radius * 0.15, 2.2, 8, 36);
-    coreGeo.rotateX(Math.PI * 0.5);
+    // Dark swirling void event-horizon funnel (zero TorusGeometry)
+    const coreGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.04, 14, 14, 5, 0.36, 1.8);
     const coreSphereMat = new THREE.MeshBasicMaterial({
       color: 0x090214,
       transparent: true,
-      opacity: 0.95
+      opacity: 0.92,
+      side: THREE.DoubleSide
     });
     const coreSphereMesh = new THREE.Mesh(coreGeo, coreSphereMat);
-    coreSphereMesh.position.set(pos.x, baseElev + 2, pos.y);
+    coreSphereMesh.position.set(pos.x, baseElev + 4, pos.y);
     group.add(coreSphereMesh);
 
-    // Bright violet-gold accretion halo around the black hole event horizon
-    const accGeo = new THREE.TorusGeometry(radius * 0.22, 2.6, 12, 36);
+    // Swirling violet-magenta plasma tendril ribbons (zero TorusGeometry)
+    const accGeo = this.createOrganicPlumeColumnGeo(radius * 0.24, radius * 0.16, 10, 14, 5, 0.42, 2.2);
     accGeo.rotateX(Math.PI * 0.38);
     const accretionRingMat = new THREE.MeshBasicMaterial({
       color: 0xd946ef,
       transparent: true,
-      opacity: 0.88,
+      opacity: 0.78,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
     const accretionRingMesh = new THREE.Mesh(accGeo, accretionRingMat);
-    accretionRingMesh.position.set(pos.x, baseElev + 5, pos.y);
+    accretionRingMesh.position.set(pos.x, baseElev + 6, pos.y);
     group.add(accretionRingMesh);
 
     // 16 3D rock/debris chunks pulled inward in a spiral orbit
@@ -4558,23 +5448,7 @@ export class ThreeVFX {
     elevation: number = 0
   ): void {
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
-    this.spawnShockwaveRing(pos, radius * 1.05, 0xa855f7, baseElev, 0.55);
-    this.spawnShockwaveRing(pos, radius * 0.82, 0xfacc15, baseElev + 2, 0.42);
-
-    // Intense purple-gold collapse dome flash
-    const domeGeo = new THREE.SphereGeometry(radius * 0.55, 24, 16, 0, Math.PI * 2, 0, Math.PI / 2);
-    const domeMat = new THREE.MeshBasicMaterial({
-      color: 0xe879f9,
-      transparent: true,
-      opacity: 0.88,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide
-    });
-    const domeMesh = new THREE.Mesh(domeGeo, domeMat);
-    domeMesh.position.set(pos.x, baseElev + 1.0, pos.y);
-    this.group.add(domeMesh);
-    this.beams.push({ mesh: domeMesh, lifetime: 0.48, maxLifetime: 0.48 });
+    this.spawnRealisticExplosion(pos, baseElev, Math.max(95, radius), 'void', baseElev + 16);
   }
 
   // ============================================================================
@@ -4641,32 +5515,24 @@ export class ThreeVFX {
 
           // 4 prominent golden energy streams spiraling inward from the 4 outer strike sites
           float streamPhase = a - log(max(r, 0.05)) * 2.6 + uTime * 4.5;
-          float fourStreams = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 3.2);
-          float streamCore = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 8.0);
+          float fourStreams = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 2.8);
+          float streamCore = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 7.0);
 
-          // Contracting radial envelope as energy collapses from outer ring toward center
+          float flameWisp = 0.5 + 0.5 * sin(p.x * 8.5 + cos(p.y * 7.5 - uTime * 4.5) * 1.6);
+          float warpedR = r + (flameWisp - 0.5) * 0.34;
+          if (warpedR > 1.0) discard;
+
           float maxReach = mix(0.95, 0.32, pow(uProgress, 1.35));
-          float reachMask = smoothstep(maxReach + 0.14, maxReach - 0.18, r) * smoothstep(0.04, 0.16, r);
-
-          // Inward-flowing chevrons (>>>) along the 4 golden streams
-          float chevWave = fract(r * 6.0 + uTime * 2.6);
-          float chev = smoothstep(0.35, 0.55, chevWave) * smoothstep(0.80, 0.55, chevWave) * fourStreams;
-
-          // Sacred-geometry golden tech rings & segmented arcs
-          float outerTechRing = exp(-pow((r - 0.82) / 0.016, 2.0)) * (1.0 - uProgress * 0.6);
-          float midTechRing = exp(-pow((r - 0.48) / 0.018, 2.0)) * (0.7 + 0.3 * sin(a * 12.0));
-          float innerCoreRing = exp(-pow((r - 0.22) / 0.025, 2.0)) * (1.1 + uProgress * 1.2);
+          float reachMask = smoothstep(maxReach + 0.16, maxReach - 0.20, warpedR) * smoothstep(0.03, 0.18, warpedR);
+          float fireCore = smoothstep(0.45, 0.0, warpedR) * (0.65 + uProgress * 0.9) * (0.65 + 0.35 * flameWisp);
 
           vec3 amberEdge = vec3(0.98, 0.48, 0.08);
           vec3 goldMid = vec3(1.0, 0.82, 0.18);
           vec3 whiteCore = vec3(1.0, 0.98, 0.88);
 
-          float intensity = (fourStreams * 0.95 + chev * 1.15) * reachMask
-                          + outerTechRing * 0.85
-                          + midTechRing * 0.75
-                          + innerCoreRing;
+          float intensity = (fourStreams * (0.75 + 0.65 * flameWisp)) * reachMask + fireCore;
           vec3 col = mix(amberEdge, goldMid, clamp(intensity * 0.85, 0.0, 1.0));
-          col = mix(col, whiteCore, clamp(streamCore * reachMask + innerCoreRing * 0.75, 0.0, 1.0));
+          col = mix(col, whiteCore, clamp(streamCore * reachMask + fireCore * 0.75, 0.0, 1.0));
 
           float alpha = clamp(intensity * uAlpha, 0.0, 1.0);
           gl_FragColor = vec4(col * (1.25 + uProgress * 0.75), alpha);
@@ -4678,13 +5544,14 @@ export class ThreeVFX {
     spiralMesh.position.set(pos.x, baseElev, pos.y);
     group.add(spiralMesh);
 
-    // Central Concentrated Golden Core (swells during Phase 2 -> Phase 3 Imminent Explosion)
-    const coreSphereGeo = new THREE.SphereGeometry(radius * 0.24, 24, 18);
+    // Central Swirling Solar Flame Vortex Core (zero Sphere / Icosahedron / Torus geometry)
+    const coreSphereGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.26, radius * 0.36, 14, 6, 0.36, 1.8);
     const coreSphereMat = new THREE.MeshBasicMaterial({
       color: 0xfef08a,
       transparent: true,
       opacity: 0.85,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
     const coreSphereMesh = new THREE.Mesh(coreSphereGeo, coreSphereMat);
@@ -4692,14 +5559,13 @@ export class ThreeVFX {
     coreSphereMesh.scale.setScalar(0.25);
     group.add(coreSphereMesh);
 
-    // Sacred-geometry wireframe icosahedron cage inside the golden core (matches Reference Image 2 Frame 3)
-    const coreCageGeo = new THREE.IcosahedronGeometry(radius * 0.28, 1);
+    const coreCageGeo = this.createOrganicPlumeColumnGeo(radius * 0.24, radius * 0.10, radius * 0.42, 10, 6, 0.44, -2.0);
     const coreCageMat = new THREE.MeshBasicMaterial({
       color: 0xffffff,
-      wireframe: true,
       transparent: true,
-      opacity: 0.9,
+      opacity: 0.65,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
     const coreCageMesh = new THREE.Mesh(coreCageGeo, coreCageMat);
@@ -4707,13 +5573,13 @@ export class ThreeVFX {
     coreCageMesh.scale.setScalar(0.25);
     group.add(coreCageMesh);
 
-    // Outer golden energy halo around the core
-    const coreHaloGeo = new THREE.TorusGeometry(radius * 0.32, 3.0, 12, 36);
+    const coreHaloGeo = this.createOrganicPlumeColumnGeo(radius * 0.32, radius * 0.22, 12, 14, 4, 0.40, 2.2);
     const coreHaloMat = new THREE.MeshBasicMaterial({
       color: 0xfbbf24,
       transparent: true,
-      opacity: 0.85,
+      opacity: 0.78,
       blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
       depthWrite: false
     });
     const coreHaloMesh = new THREE.Mesh(coreHaloGeo, coreHaloMat);
@@ -4863,10 +5729,9 @@ export class ThreeVFX {
           float fineCracks = exp(-pow((voronoiCracks(p * 13.0) - 0.46) / 0.05, 2.0)) * 0.65;
           float radialVeins = pow(0.5 + 0.5 * cos(a * 16.0 + sin(r * 10.0) * 1.5), 6.0) * smoothstep(0.15, 0.85, r);
 
-          // Preserve warm golden Orbital Strike ring at the center (r ~ 0.18)
-          float centerGoldRing = exp(-pow((r - 0.17) / 0.032, 2.0)) * 1.4;
-          float outerCryoRing = exp(-pow((r - 0.92) / 0.018, 2.0)) * 1.35;
-          float outerTicks = step(0.6, cos(a * 40.0)) * exp(-pow((r - 0.88) / 0.012, 2.0)) * 0.85;
+          // Organic fractured ice glaze (zero crisp concentric circles or tick marks)
+          float innerMix = smoothstep(0.32, 0.0, r + (cell - 0.5) * 0.3) * 0.7;
+          float outerRime = exp(-pow((r - 0.84 - (cell - 0.5) * 0.16) / 0.08, 2.0)) * 0.85;
 
           // Shimmering cold mist wave
           float mistPulse = 0.5 + 0.5 * sin(r * 14.0 - uTime * 2.4 + a * 2.0);
@@ -4876,14 +5741,14 @@ export class ThreeVFX {
           vec3 frostWhite = vec3(0.88, 0.97, 1.0);
           vec3 orbitalGold = vec3(1.0, 0.84, 0.32);
 
-          float frostPattern = iceCracks + fineCracks + radialVeins * 0.65 + outerCryoRing + outerTicks;
+          float frostPattern = iceCracks + fineCracks + radialVeins * 0.65 + outerRime;
           vec3 col = mix(deepGlacier, brightCyan, clamp(frostPattern * 0.65 + mistPulse * 0.35, 0.0, 1.0));
-          col = mix(col, frostWhite, clamp(iceCracks * 0.75 + outerCryoRing * 0.7, 0.0, 1.0));
-          col = mix(col, orbitalGold, clamp(centerGoldRing, 0.0, 1.0));
+          col = mix(col, frostWhite, clamp(iceCracks * 0.75 + outerRime * 0.6, 0.0, 1.0));
+          col = mix(col, orbitalGold, clamp(innerMix * 0.45, 0.0, 1.0));
 
-          float baseSheet = 0.32 * (1.0 - r * 0.35);
-          float edgeSoft = smoothstep(1.0, 0.88, r);
-          float alpha = clamp((baseSheet + frostPattern * 0.68 + centerGoldRing * 0.55) * edgeSoft * uAlpha, 0.0, 1.0);
+          float baseSheet = 0.28 * (1.0 - r * 0.42);
+          float edgeSoft = smoothstep(1.0, 0.72, r + (cell - 0.5) * 0.25);
+          float alpha = clamp((baseSheet + frostPattern * 0.68) * edgeSoft * uAlpha, 0.0, 1.0);
 
           gl_FragColor = vec4(col * 1.18, alpha);
         }
@@ -4894,10 +5759,9 @@ export class ThreeVFX {
     frostDiscMesh.position.set(pos.x, baseElev, pos.y);
     group.add(frostDiscMesh);
 
-    // 18 3D jagged crystalline ice spikes (inner ring around golden impact core + outer glacier ring)
+    // 18 3D asymmetric carved crystalline ice shards (zero ConeGeometry)
     const crystalMeshes: ActiveCryogenicFieldVFX['crystalMeshes'] = [];
-    const crystalGeo = new THREE.ConeGeometry(11.5, 58, 6);
-    crystalGeo.translate(0, 29, 0); // Pivot at base
+    const crystalGeo = this.createJaggedShardGeo(11.5, 58, 5, 77);
 
     for (let i = 0; i < 18; i++) {
       const isInner = i < 8;
@@ -4991,8 +5855,9 @@ export class ThreeVFX {
     elevation: number = 0
   ): void {
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    this.spawnRealisticExplosion(pos, baseElev, Math.max(60, radius * 0.72), 'void', baseElev + 10);
 
-    // 1. Terrain-Conforming Crisp Radial Bio-Shockwave & Fissure Ripple
+    // 1. Terrain-Conforming Turbulent Crimson Bio-Tremor Mist & Fissure Rays (zero circular rings)
     const waveGeo = this.createTerrainConformingGrid(
       pos.x,
       pos.y,
@@ -5023,25 +5888,25 @@ export class ThreeVFX {
         varying vec2 vUv;
         void main() {
           float r = length(vUv);
-          if (r > 1.0) discard;
           float a = atan(vUv.y, vUv.x);
+          float wisp = 0.5 + 0.5 * sin(vUv.x * 8.0 + cos(vUv.y * 7.0 + uProgress * 5.0) * 1.4);
+          float warpedR = r - (wisp - 0.5) * 0.36;
+          if (warpedR > 1.0) discard;
 
-          // Thin sharp outward-expanding bio-shockwave ring
-          float ring = exp(-pow((r - uProgress) / 0.038, 2.0));
-          // Secondary inner crimson tremor wave
-          float inner = exp(-pow((r - uProgress * 0.62) / 0.045, 2.0)) * 0.65;
-          // Subtle jagged radial fissure rays near core
-          float rays = pow(abs(cos(a * 6.0 + r * 3.0)), 10.0) * smoothstep(0.85, 0.08, r) * (1.0 - uProgress);
+          float wavePos = mix(0.15, 0.78, uProgress) + (wisp - 0.5) * 0.25;
+          float bioGust = exp(-pow((warpedR - wavePos) / 0.14, 2.0)) * smoothstep(0.2, 0.85, wisp);
+          float rays = pow(abs(cos(a * 6.0 + r * 4.5 + wisp * 2.0)), 8.0) * smoothstep(0.90, 0.08, warpedR) * (1.0 - uProgress);
+          float outerMask = 1.0 - smoothstep(0.72, 1.0, warpedR);
 
-          float intensity = ring + inner + rays * 0.7;
+          float intensity = (bioGust * 1.15 + rays * 0.85) * outerMask;
           if (intensity < 0.015) discard;
 
           vec3 magenta = vec3(0.85, 0.27, 0.94);
           vec3 crimson = vec3(0.98, 0.14, 0.38);
           vec3 coreWhite = vec3(1.0, 0.85, 0.92);
 
-          vec3 col = mix(magenta, crimson, clamp(rays + inner * 0.5, 0.0, 1.0));
-          col = mix(col, coreWhite, clamp(ring * 0.55, 0.0, 1.0));
+          vec3 col = mix(magenta, crimson, clamp(rays + bioGust * 0.5, 0.0, 1.0));
+          col = mix(col, coreWhite, clamp(bioGust * 0.55, 0.0, 1.0));
 
           gl_FragColor = vec4(col * 1.1, clamp(intensity * uAlpha, 0.0, 1.0));
         }
@@ -5122,6 +5987,270 @@ export class ThreeVFX {
         lifetime: 0.55 + Math.random() * 0.15,
         maxLifetime: 0.70,
         groundY: baseElev + 1.5
+      });
+    }
+  }
+
+  /**
+   * Swirling molten bio-lava explosion for the Stage 1 Titan's Elemental Barrage balls.
+   * Renders a boiling 3D spiral-vortex magma dome, terrain-conforming swirling lava ground pool,
+   * twin counter-rotating swirl rings, and glowing molten globule embers.
+   */
+  public spawnLavaSwirlExplosion(
+    pos: Vector2,
+    radius: number = 65,
+    elevation: number = 0,
+    impactZ?: number
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const burstY = impactZ !== undefined ? Math.max(baseElev + 8, impactZ) : baseElev + 12;
+    const spinSign = Math.random() < 0.5 ? 1 : -1;
+
+    // Volumetric magma fireball, billowing smoke plumes & fiery sparks
+    this.spawnRealisticExplosion(pos, baseElev, Math.max(78, radius * 1.15), 'lava', impactZ);
+
+    const grp = new THREE.Group();
+    grp.position.set(pos.x, 0, pos.y);
+    this.group.add(grp);
+
+    // 1. Undulating Rising Molten Magma Plume Flame Column (zero SphereGeometry)
+    const domeGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.42, radius * 0.72, 16, 8, 0.34, 1.6);
+    const domeMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime: { value: 0 },
+        uProgress: { value: 0 },
+        uAlpha: { value: 1.0 },
+        uSpin: { value: spinSign }
+      },
+      vertexShader: `
+        uniform float uTime;
+        uniform float uProgress;
+        varying vec3 vLocalPos;
+        varying vec3 vViewNormal;
+        varying vec3 vViewDir;
+
+        void main() {
+          // Boiling convective surface displacement
+          float boil = sin(position.x * 0.16 + uTime * 11.0)
+                     * cos(position.y * 0.18 - uTime * 9.5)
+                     * sin(position.z * 0.16 + uTime * 10.2);
+          vec3 displaced = position + normal * (boil * 3.2 * (1.0 - uProgress * 0.6));
+          vLocalPos = normalize(position);
+          vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
+          vViewNormal = normalize(normalMatrix * normal);
+          vViewDir = normalize(-mvPos.xyz);
+          gl_Position = projectionMatrix * mvPos;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform float uProgress;
+        uniform float uAlpha;
+        uniform float uSpin;
+        varying vec3 vLocalPos;
+        varying vec3 vViewNormal;
+        varying vec3 vViewDir;
+
+        void main() {
+          float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
+          float angle = atan(vLocalPos.z, vLocalPos.x);
+          float lat = vLocalPos.y;
+
+          // Helical swirling magma currents wrapping around the fireball
+          float swirlCoord = angle * 3.0 * uSpin + lat * 7.5 - uTime * 8.5;
+          float wave1 = sin(swirlCoord + sin(lat * 9.0 + uTime * 6.0) * 1.4);
+          float wave2 = cos(angle * 5.0 * uSpin - lat * 11.0 + uTime * 7.2 + wave1 * 1.2);
+          float magma = clamp(0.5 + 0.38 * wave1 + 0.28 * wave2, 0.0, 1.0);
+
+          // High-contrast molten lava bands: dark volcanic crust -> deep crimson-red -> incandescent orange -> white-gold core
+          vec3 darkCrust = vec3(0.04, 0.01, 0.02);
+          vec3 deepLava = vec3(0.68, 0.08, 0.02);
+          vec3 hotLava = vec3(0.96, 0.36, 0.03);
+          vec3 coreWhite = vec3(1.0, 0.85, 0.28);
+
+          float coolShift = uProgress * 0.35;
+          float m = clamp(magma - coolShift * 0.45, 0.0, 1.0);
+          vec3 col = mix(darkCrust, deepLava, smoothstep(0.24, 0.54, m));
+          col = mix(col, hotLava, smoothstep(0.52, 0.80, m));
+          col = mix(col, coreWhite, smoothstep(0.78, 0.96, m) * (1.0 - uProgress * 0.5));
+
+          // Subtle dark-orange rim
+          float rim = pow(1.0 - ndotv, 2.2);
+          col = mix(col, darkCrust, rim * 0.55);
+
+          float alpha = smoothstep(0.05, 0.35, ndotv) * (0.78 + 0.22 * m) * uAlpha;
+          gl_FragColor = vec4(col * 0.92, clamp(alpha, 0.0, 1.0));
+        }
+      `
+    });
+    const domeMesh = new THREE.Mesh(domeGeo, domeMat);
+    domeMesh.position.set(0, burstY - 4, 0);
+    domeMesh.scale.setScalar(0.25);
+    grp.add(domeMesh);
+
+    // 2. Terrain-Conforming Swirling Molten Lava Crater Pool (dark volcanic rock crust rim + incandescent spiral magma core)
+    const poolGeo = this.createTerrainConformingGrid(
+      pos.x,
+      pos.y,
+      radius * 1.65,
+      24,
+      1.6,
+      baseElev
+    );
+    const poolMat = new THREE.ShaderMaterial({
+      transparent: true,
+      depthWrite: false,
+      blending: THREE.NormalBlending,
+      side: THREE.DoubleSide,
+      uniforms: {
+        uTime: { value: 0 },
+        uProgress: { value: 0 },
+        uAlpha: { value: 1.0 },
+        uSpin: { value: spinSign }
+      },
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv * 2.0 - 1.0;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform float uProgress;
+        uniform float uAlpha;
+        uniform float uSpin;
+        varying vec2 vUv;
+
+        void main() {
+          float r = length(vUv);
+          float a = atan(vUv.y, vUv.x);
+
+          // Jagged organic volcanic crater edge
+          float edgeJagged = 0.07 * sin(a * 9.0 + 1.3) + 0.04 * cos(a * 15.0 - 0.8);
+          float rw = r + edgeJagged * smoothstep(0.35, 0.95, r);
+          if (rw > 0.98) discard;
+
+          // Logarithmic spiral lava vortex arms rotating around the blast crater
+          float spiralA = sin(a * 4.0 * uSpin - r * 12.5 + uTime * 8.5 + sin(r * 9.5 - uTime * 5.5) * 1.2);
+          float spiralB = cos(a * 7.0 * uSpin - r * 18.0 + uTime * 11.0);
+          float swirl = clamp(0.5 + 0.36 * spiralA + 0.24 * spiralB, 0.0, 1.0);
+
+          // Expanding outer crater radius
+          float expandR = mix(0.28, 0.92, 1.0 - pow(1.0 - min(1.0, uProgress * 2.2), 2.0));
+          if (rw > expandR + 0.06) discard;
+
+          // Dark obsidian volcanic rock crust rim + glowing spiral magma channels
+          vec3 obsidianCrust = vec3(0.05, 0.03, 0.04);
+          vec3 deepMagma = vec3(0.75, 0.10, 0.03);
+          vec3 orangeLava = vec3(1.0, 0.46, 0.06);
+          vec3 whiteGold = vec3(1.0, 0.94, 0.52);
+
+          // Center is hot boiling magma; outer ring (rw > 0.58) cools into dark volcanic rock with glowing cracks
+          float coreHeat = smoothstep(expandR * 0.95, 0.08, rw);
+          float lavaFactor = clamp(swirl * (0.45 + 0.85 * coreHeat) - uProgress * 0.28, 0.0, 1.0);
+
+          vec3 col = mix(obsidianCrust, deepMagma, smoothstep(0.26, 0.52, lavaFactor));
+          col = mix(col, orangeLava, smoothstep(0.50, 0.78, lavaFactor));
+          col = mix(col, whiteGold, smoothstep(0.76, 0.96, lavaFactor) * coreHeat);
+
+          float hdrBoost = 0.78 + 0.42 * smoothstep(0.58, 0.92, lavaFactor);
+          float outerFade = smoothstep(expandR + 0.05, expandR - 0.14, rw);
+          float alpha = clamp((0.92 * outerFade) * uAlpha, 0.0, 1.0);
+          gl_FragColor = vec4(col * hdrBoost, alpha);
+        }
+      `
+    });
+    const poolMesh = new THREE.Mesh(poolGeo, poolMat);
+    poolMesh.position.set(0, baseElev, 0);
+    grp.add(poolMesh);
+
+    // 3. Swirling Molten Ember Whisker Ribbons (zero RingGeometry)
+    const ribbonPtsA: THREE.Vector3[] = [];
+    const ribbonPtsB: THREE.Vector3[] = [];
+    for (let k = 0; k <= 12; k++) {
+      const a = (k / 12) * Math.PI * 1.4;
+      const rA = radius * (0.28 + (k / 12) * 0.18);
+      ribbonPtsA.push(new THREE.Vector3(Math.cos(a) * rA, k * 2.5, Math.sin(a) * rA));
+      const rB = radius * (0.18 + (k / 12) * 0.16);
+      ribbonPtsB.push(new THREE.Vector3(Math.cos(-a) * rB, k * 3.0, Math.sin(-a) * rB));
+    }
+    const ringGeoA = this.createJaggedRibbonGeometry(ribbonPtsA, 6.5);
+    const ringAMat = new THREE.MeshBasicMaterial({
+      color: 0xff9e2c,
+      transparent: true,
+      opacity: 0.48,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const ringA = new THREE.Mesh(ringGeoA, ringAMat);
+    ringA.position.set(0, burstY + 2, 0);
+    grp.add(ringA);
+
+    const ringGeoB = this.createJaggedRibbonGeometry(ribbonPtsB, 5.2);
+    const ringBMat = new THREE.MeshBasicMaterial({
+      color: 0xfef08a,
+      transparent: true,
+      opacity: 0.45,
+      blending: THREE.AdditiveBlending,
+      side: THREE.DoubleSide,
+      depthWrite: false
+    });
+    const ringB = new THREE.Mesh(ringGeoB, ringBMat);
+    ringB.position.set(0, burstY + 5, 0);
+    grp.add(ringB);
+
+    this.activeLavaSwirls.push({
+      group: grp,
+      domeMesh,
+      domeMat,
+      poolMesh,
+      poolMat,
+      ringA,
+      ringAMat,
+      ringB,
+      ringBMat,
+      elapsed: 0,
+      maxLifetime: 1.45,
+      spinSign
+    });
+
+    // 4. Rising Molten Globules / Glowing Magma Embers
+    for (let s = 0; s < 10; s++) {
+      const sAngle = (s / 10) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const spd = 95 + Math.random() * 145;
+      const m = new THREE.Mesh(
+        this.sharedSparkGeo,
+        new THREE.MeshBasicMaterial({
+          color: s % 3 === 0 ? 0xfef08a : s % 3 === 1 ? 0xf43f5e : 0xe879f9,
+          transparent: true,
+          opacity: 0.95,
+          blending: THREE.AdditiveBlending
+        })
+      );
+      m.position.set(pos.x, burstY, pos.y);
+      const sc = 2.4 + Math.random() * 1.8;
+      m.scale.setScalar(sc);
+      this.group.add(m);
+      this.orbitalParticles.push({
+        mesh: m,
+        kind: 'spark',
+        vx: Math.cos(sAngle) * spd,
+        vy: 110 + Math.random() * 130,
+        vz: Math.sin(sAngle) * spd,
+        rotSpeedX: 7,
+        rotSpeedY: 9,
+        rotSpeedZ: 5,
+        baseScale: sc,
+        endScale: 0.25,
+        lifetime: 0.42 + Math.random() * 0.18,
+        maxLifetime: 0.60,
+        groundY: baseElev
       });
     }
   }
@@ -5308,7 +6437,7 @@ export class ThreeVFX {
       }
     }
 
-    // 1. Update expanding rings
+    // 1. Update expanding organic ripple waves
     for (let i = this.rings.length - 1; i >= 0; i--) {
       const r = this.rings[i];
       r.lifetime -= dt;
@@ -5320,12 +6449,85 @@ export class ThreeVFX {
         continue;
       }
       const t = 1 - r.lifetime / r.maxLifetime;
-      const s = 1 + t * (r.maxRadius / r.currentRadius);
-      r.mesh.scale.set(s, s, s);
-      (r.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.9;
+      const mat = r.mesh.material as THREE.ShaderMaterial | THREE.MeshBasicMaterial;
+      if ((mat as THREE.ShaderMaterial).uniforms?.uProgress) {
+        const sm = mat as THREE.ShaderMaterial;
+        sm.uniforms.uProgress.value = t;
+        sm.uniforms.uAlpha.value = Math.pow(1 - t, 1.15);
+        const s = r.maxRadius * (0.45 + 0.65 * Math.pow(t, 0.72));
+        r.mesh.scale.set(s, s, 1);
+      } else {
+        const s = 1 + t * (r.maxRadius / r.currentRadius);
+        r.mesh.scale.set(s, s, s);
+        (mat as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.9;
+      }
     }
 
-    // 2. Update orbital beams
+    // 1B. Update Realistic Volumetric Explosion Fireballs & Smoke Clouds
+    for (let i = this.explosionClouds.length - 1; i >= 0; i--) {
+      const cl = this.explosionClouds[i];
+      cl.elapsed += dt;
+      if (cl.elapsed >= cl.duration) {
+        this.group.remove(cl.mesh);
+        cl.mesh.geometry.dispose();
+        cl.mat.dispose();
+        this.explosionClouds.splice(i, 1);
+        continue;
+      }
+      const p = cl.elapsed / cl.duration;
+      const damp = Math.exp(-cl.drag * dt);
+      cl.vx *= damp;
+      cl.vz *= damp;
+      cl.vy = cl.vy * Math.exp(-1.8 * dt) + cl.lift * dt;
+      cl.mesh.position.x += cl.vx * dt;
+      cl.mesh.position.y += cl.vy * dt;
+      cl.mesh.position.z += cl.vz * dt;
+      cl.mesh.quaternion.copy(camera.quaternion);
+      const scale = cl.startScale + (cl.endScale - cl.startScale) * (1 - Math.pow(1 - p, 2.1));
+      cl.mesh.scale.setScalar(scale);
+      cl.mat.uniforms.uProgress.value = p;
+    }
+
+    // 1C. Update Ballistic Internal-Rupture Ichor Splatter Droplets
+    for (let i = this.splatterDroplets.length - 1; i >= 0; i--) {
+      const dr = this.splatterDroplets[i];
+      dr.elapsed += dt;
+      if (dr.elapsed >= dr.duration) {
+        this.group.remove(dr.mesh);
+        dr.mesh.geometry.dispose();
+        dr.mat.dispose();
+        this.splatterDroplets.splice(i, 1);
+        continue;
+      }
+      dr.vy -= 740 * dt;
+      dr.mesh.position.x += dr.vx * dt;
+      dr.mesh.position.y += dr.vy * dt;
+      dr.mesh.position.z += dr.vz * dt;
+
+      if (dr.mesh.position.y <= dr.groundY) {
+        dr.mesh.position.y = dr.groundY;
+        dr.vy = 0;
+        dr.vx *= 0.25;
+        dr.vz *= 0.25;
+        if (!dr.spawnedSplat) {
+          dr.spawnedSplat = true;
+          this.spawnAlienBloodSplatter(
+            { x: dr.mesh.position.x, y: dr.mesh.position.z },
+            dr.groundY,
+            dr.splatColor,
+            0.55 + Math.random() * 0.45
+          );
+        }
+      }
+      dr.mesh.quaternion.copy(camera.quaternion);
+      const p = dr.elapsed / dr.duration;
+      const speed2 = Math.hypot(dr.vx, dr.vy, dr.vz);
+      const stretchY = Math.min(2.2, 1.0 + speed2 * 0.003);
+      dr.mesh.scale.set(1.0 / Math.sqrt(stretchY), stretchY, 1);
+      dr.mat.uniforms.uAlpha.value = Math.max(0, 0.95 * (1 - Math.pow(p, 1.8)));
+    }
+
+    // 2. Update beams & organic rift plumes
     for (let i = this.beams.length - 1; i >= 0; i--) {
       const b = this.beams[i];
       b.lifetime -= dt;
@@ -5337,7 +6539,12 @@ export class ThreeVFX {
         continue;
       }
       const t = 1 - b.lifetime / b.maxLifetime;
-      (b.mesh.material as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.85;
+      const mat = b.mesh.material as THREE.ShaderMaterial | THREE.MeshBasicMaterial;
+      if ((mat as THREE.ShaderMaterial).uniforms?.uProgress) {
+        (mat as THREE.ShaderMaterial).uniforms.uProgress.value = t;
+      } else {
+        (mat as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.85;
+      }
     }
 
     // 3. Update floating damage numbers
@@ -5378,12 +6585,19 @@ export class ThreeVFX {
       b.lifetime -= dt;
       if (b.lifetime <= 0) {
         this.group.remove(b.mesh);
+        b.mesh.geometry.dispose();
         (b.mesh.material as THREE.Material).dispose();
         this.bloodDecals.splice(i, 1);
         continue;
       }
-      if (b.lifetime < 5) {
-        (b.mesh.material as THREE.MeshBasicMaterial).opacity = (b.lifetime / 5) * 0.88;
+      if (b.lifetime < 2.2) {
+        const mat = b.mesh.material as THREE.ShaderMaterial | THREE.MeshBasicMaterial;
+        const alphaVal = (b.lifetime / 2.2) * 0.88;
+        if ((mat as THREE.ShaderMaterial).uniforms?.uAlpha) {
+          (mat as THREE.ShaderMaterial).uniforms.uAlpha.value = alphaVal;
+        } else {
+          (mat as THREE.MeshBasicMaterial).opacity = alphaVal;
+        }
       }
     }
 
@@ -5948,8 +7162,7 @@ export class ThreeVFX {
                 const cx = beam.to.x + Math.cos(cAngle) * cDist;
                 const cz = beam.to.z + Math.sin(cAngle) * cDist;
                 const cHeight = this.getTerrainHeight(cx, cz, beam.elevation);
-                const crystalGeo = new THREE.OctahedronGeometry(4.5 + Math.random() * 4.0, 0);
-                crystalGeo.scale(1.0, 2.6, 1.0);
+                const crystalGeo = this.createJaggedShardGeo(5.5 + Math.random() * 4.0, 26 + Math.random() * 12, 5, 300 + c);
                 const crystalMat = new THREE.MeshBasicMaterial({
                   color: 0x38bdf8,
                   transparent: true,
@@ -5957,7 +7170,7 @@ export class ThreeVFX {
                   blending: THREE.AdditiveBlending
                 });
                 const crystalMesh = new THREE.Mesh(crystalGeo, crystalMat);
-                crystalMesh.position.set(cx, cHeight + 6, cz);
+                crystalMesh.position.set(cx, cHeight - 1, cz);
                 crystalMesh.rotation.set((Math.random() - 0.5) * 0.4, Math.random() * Math.PI, (Math.random() - 0.5) * 0.4);
                 this.group.add(crystalMesh);
                 this.activeGroundSpikes.push({
@@ -6082,6 +7295,66 @@ export class ThreeVFX {
       hm.mesh.position.z += hm.vz * dt;
       hm.mesh.quaternion.copy(camera.quaternion);
       hm.mat.opacity = 0.9 * (hm.lifetime / hm.maxLifetime);
+    }
+
+    // 0M2. Update Regional Refreeze Frost Motes
+    for (let i = this.regionalFrostMotes.length - 1; i >= 0; i--) {
+      const fm = this.regionalFrostMotes[i];
+      fm.lifetime -= dt;
+      if (fm.lifetime <= 0) {
+        this.group.remove(fm.mesh);
+        fm.mat.dispose();
+        this.regionalFrostMotes.splice(i, 1);
+        continue;
+      }
+      fm.mesh.position.x += fm.vx * dt;
+      fm.mesh.position.y += fm.vy * dt;
+      fm.mesh.position.z += fm.vz * dt;
+      fm.mesh.quaternion.copy(camera.quaternion);
+      fm.mat.opacity = 0.72 * (fm.lifetime / fm.maxLifetime);
+    }
+
+    // 0N. Update Stage 1 Boss Swirling Molten Bio-Lava Ball Explosions
+    for (let i = this.activeLavaSwirls.length - 1; i >= 0; i--) {
+      const fx = this.activeLavaSwirls[i];
+      fx.elapsed += dt;
+      if (fx.elapsed >= fx.maxLifetime) {
+        this.group.remove(fx.group);
+        fx.domeMesh.geometry.dispose();
+        fx.domeMat.dispose();
+        fx.poolMesh.geometry.dispose();
+        fx.poolMat.dispose();
+        fx.ringA.geometry.dispose();
+        fx.ringAMat.dispose();
+        fx.ringB.geometry.dispose();
+        fx.ringBMat.dispose();
+        this.activeLavaSwirls.splice(i, 1);
+        continue;
+      }
+
+      const p = fx.elapsed / fx.maxLifetime;
+      const bloom = 1.0 - Math.pow(1.0 - Math.min(1.0, p * 2.2), 2.5);
+      const fade = p < 0.25 ? 1.0 : Math.pow(1.0 - (p - 0.25) / 0.75, 1.35);
+
+      fx.domeMesh.scale.setScalar(0.28 + bloom * 1.15);
+      fx.domeMesh.rotation.y += dt * 4.5 * fx.spinSign;
+      fx.domeMat.uniforms.uTime.value = fx.elapsed;
+      fx.domeMat.uniforms.uProgress.value = p;
+      fx.domeMat.uniforms.uAlpha.value = fade;
+
+      fx.poolMat.uniforms.uTime.value = fx.elapsed;
+      fx.poolMat.uniforms.uProgress.value = p;
+      fx.poolMat.uniforms.uAlpha.value = p < 0.2 ? 1.0 : Math.pow(1.0 - (p - 0.2) / 0.8, 1.15);
+
+      const ringScaleA = 0.35 + bloom * 1.15;
+      fx.ringA.scale.setScalar(ringScaleA);
+      fx.ringA.rotation.z += dt * 5.2 * fx.spinSign;
+      fx.ringAMat.opacity = 0.85 * fade;
+
+      const ringScaleB = 0.25 + bloom * 1.35;
+      fx.ringB.scale.setScalar(ringScaleB);
+      fx.ringB.rotation.z -= dt * 6.4 * fx.spinSign;
+      fx.ringBMat.opacity = 0.78 * fade;
     }
   }
 }

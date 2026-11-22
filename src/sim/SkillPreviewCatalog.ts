@@ -1,7 +1,6 @@
-import { HeroId, SkillSlot, BuffDef, ItemDef } from './types';
-import { HERO_REGISTRY, HeroDef } from './HeroDefs';
+import { HeroId, SkillSlot, ItemDef } from './types';
+import { HERO_REGISTRY } from './HeroDefs';
 import {
-  SKILL_REGISTRY,
   COMMANDER_DEFAULT_SKILLS,
   DOCTOR_DEFAULT_SKILLS
 } from './SkillDefs';

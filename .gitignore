@@ -19,3 +19,7 @@ exports/*.png
 # OS / editor artifacts
 .DS_Store
 Thumbs.db
+
+# Temporary CDP inspection directories & raw unreferenced voice source folder
+.tmp_cdp_*/
+public/dialogue/Voice Lines/

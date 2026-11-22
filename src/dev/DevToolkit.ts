@@ -30,6 +30,13 @@ export class DevToolkit {
     }
     if (!e.shiftKey && e.key === 'F8') {
       e.preventDefault();
+      const willOpen = !this.gameplayDebugger.getIsOpen();
+      if (willOpen) {
+        this.app.isDevModeSession = true;
+        this.setDevPaused(true);
+        this.updateReturnButtonVisibility();
+        this.playtestBarEl?.classList.remove('hidden');
+      }
       this.gameplayDebugger.toggle();
       return;
     }
@@ -52,6 +59,10 @@ export class DevToolkit {
 
     this.stageEditor.onPlaytestRequested = (snapshot) => {
       this.startPlaytestFromEditor(snapshot);
+    };
+
+    this.gameplayDebugger.onPauseChanged = () => {
+      this.syncPlaytestPauseUI();
     };
 
     this.app.setPostRenderCallback((dt, now, info) => {
@@ -128,17 +139,24 @@ export class DevToolkit {
 
     el.querySelector('#dev-card-debugger')?.addEventListener('click', () => {
       this.closeDashboard();
-      if (!this.app.getSimulation().state.isGameStarted) {
+      this.app.isDevModeSession = true;
+      const sim = this.app.getSimulation();
+      if (!sim.state.isGameStarted) {
         this.uiManager.hideAllGameModalsForDev();
-        this.app.startRun();
+        this.app.startRun(true);
       }
-      this.app.exitPointerLock();
+      this.setDevPaused(true);
+      const snapBadge = this.playtestBarEl?.querySelector('#dev-pt-snapshot-badge');
+      if (snapBadge) snapBadge.textContent = '⏸ PAUSED — Mouse Free';
+      this.playtestBarEl?.classList.remove('hidden');
+      this.updateReturnButtonVisibility();
       this.gameplayDebugger.open();
     });
 
     el.querySelector('#dev-card-perf')?.addEventListener('click', () => {
       this.closeDashboard();
-      this.app.exitPointerLock();
+      this.app.isDevModeSession = true;
+      this.setDevPaused(true);
       this.perfMonitor.open();
     });
 
@@ -148,6 +166,9 @@ export class DevToolkit {
 
     el.querySelector('#btn-dev-dash-back')?.addEventListener('click', () => {
       this.closeDashboard();
+      this.app.isDevModeSession = false;
+      this.setDevPaused(false);
+      this.playtestBarEl?.classList.add('hidden');
       document.getElementById('screen-main-menu')?.classList.remove('hidden');
     });
   }
@@ -158,15 +179,25 @@ export class DevToolkit {
     bar.id = 'dev-playtest-bar';
     bar.className = 'dev-playtest-bar interactive hidden';
     bar.innerHTML = `
-      <span class="dev-pt-tag">▶ PLAYTEST</span>
-      <span id="dev-pt-snapshot-badge" class="dev-pt-snap">In-Memory Layout</span>
+      <span class="dev-pt-tag">🛠 DEV MODE</span>
+      <button id="btn-playtest-pause" class="sci-btn primary-gold dev-ed-btn">▶ Play</button>
+      <span id="dev-pt-snapshot-badge" class="dev-pt-snap">⏸ PAUSED — Mouse Free</span>
       <button id="btn-playtest-debugger" class="sci-btn dev-ed-btn">🧪 Debugger [F8]</button>
       <button id="btn-playtest-perf" class="sci-btn dev-ed-btn">📊 Perf [F7]</button>
-      <button id="btn-playtest-return" class="sci-btn primary-gold dev-ed-btn">← Return to Editor (Shift+F8)</button>
+      <button id="btn-playtest-return" class="sci-btn dev-ed-btn">← Return to Editor (Shift+F8)</button>
+      <button id="btn-playtest-dashboard" class="sci-btn dev-ed-btn">⚙ Dev Menu</button>
     `;
     document.body.appendChild(bar);
     this.playtestBarEl = bar;
 
+    bar.querySelector('#btn-playtest-pause')?.addEventListener('click', () => {
+      const sim = this.app.getSimulation();
+      const nextPaused = !sim.state.isPaused;
+      this.setDevPaused(nextPaused);
+      if (!nextPaused && sim.state.isGameStarted) {
+        this.app.requestPointerLock();
+      }
+    });
     bar.querySelector('#btn-playtest-debugger')?.addEventListener('click', () => {
       this.app.exitPointerLock();
       this.gameplayDebugger.toggle();
@@ -178,6 +209,44 @@ export class DevToolkit {
     bar.querySelector('#btn-playtest-return')?.addEventListener('click', () => {
       this.returnToEditorFromPlaytest();
     });
+    bar.querySelector('#btn-playtest-dashboard')?.addEventListener('click', () => {
+      this.setDevPaused(true);
+      this.gameplayDebugger.close();
+      this.playtestBarEl?.classList.add('hidden');
+      this.openDashboard();
+    });
+  }
+
+  private setDevPaused(paused: boolean): void {
+    const sim = this.app.getSimulation();
+    sim.state.isPaused = paused;
+    if (paused) {
+      this.app.exitPointerLock();
+    }
+    this.syncPlaytestPauseUI();
+    this.gameplayDebugger.syncPauseButton();
+  }
+
+  private syncPlaytestPauseUI(): void {
+    const paused = this.app.getSimulation().state.isPaused;
+    const btn = this.playtestBarEl?.querySelector('#btn-playtest-pause') as HTMLElement | null;
+    if (btn) {
+      btn.textContent = paused ? '▶ Play' : '⏸ Pause';
+      btn.classList.toggle('primary-gold', paused);
+    }
+    const snapBadge = this.playtestBarEl?.querySelector('#dev-pt-snapshot-badge') as HTMLElement | null;
+    if (snapBadge) {
+      snapBadge.textContent = paused
+        ? '⏸ PAUSED — Mouse Free'
+        : '▶ PLAYING (Esc to free mouse)';
+    }
+  }
+
+  private updateReturnButtonVisibility(): void {
+    const retBtn = this.playtestBarEl?.querySelector('#btn-playtest-return') as HTMLElement | null;
+    if (retBtn) {
+      retBtn.classList.toggle('hidden', !this.isInPlaytest);
+    }
   }
 
   public startPlaytestFromEditor(snapshot: StageConfig): void {
@@ -196,6 +265,7 @@ export class DevToolkit {
     this.playtestWasDirty = this.stageEditor.getIsDirty();
     this.playtestProfileKey = profileKey;
     this.isInPlaytest = true;
+    this.app.isDevModeSession = true;
 
     this.stageEditor.close();
     this.closeDashboard();
@@ -203,24 +273,20 @@ export class DevToolkit {
 
     // Apply in-memory config so startRun spawns at edited playerSpawnPos with edited layout
     sim.state.applyStageConfig(this.playtestSnapshot, this.playtestProfileKey);
-    this.app.startRun();
-
-    const snapBadge = this.playtestBarEl?.querySelector('#dev-pt-snapshot-badge');
-    if (snapBadge) {
-      snapBadge.textContent = this.playtestWasDirty
-        ? `● Temporary Unsaved Edit (${sim.state.selectedHeroId})`
-        : `Saved Layout (${sim.state.selectedHeroId})`;
-    }
+    this.app.startRun(true);
+    this.setDevPaused(true);
+    this.updateReturnButtonVisibility();
     this.playtestBarEl?.classList.remove('hidden');
 
     if (issues.length > 0) {
-      this.uiManager.showPickupNotification(`Playtest started with ${issues.length} validation warning(s). Press Shift+F8 to return.`);
+      this.uiManager.showPickupNotification(`Playtest ready (Paused) with ${issues.length} warning(s). Click Play when ready.`);
     }
   }
 
   public returnToEditorFromPlaytest(): void {
     if (!this.isInPlaytest) return;
     this.isInPlaytest = false;
+    this.app.isDevModeSession = false;
     this.gameplayDebugger.close();
     this.playtestBarEl?.classList.add('hidden');
     this.app.stopPlaytestAndClear();
@@ -239,6 +305,8 @@ export class DevToolkit {
 
   public openDashboard(): void {
     document.getElementById('screen-main-menu')?.classList.add('hidden');
+    this.app.isDevModeSession = true;
+    this.setDevPaused(true);
     const state = this.app.getSimulation().state;
     const meta = this.dashboardEl?.querySelector('#dev-dash-stage-meta');
     if (meta) {

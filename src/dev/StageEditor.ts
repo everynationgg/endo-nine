@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { TransformControls } from 'three/examples/jsm/controls/TransformControls.js';
 import type { ThreeApp } from '../render/ThreeApp';
+import type { TerrainSurfaceCategory } from '../sim/types';
 import type {
   EnemyType,
   StageCatalogItem,
@@ -73,7 +74,6 @@ export class StageEditor {
   private posSnap: number = 0;
   private rotSnapDeg: number = 0;
   private autoTerrainSnap: boolean = true;
-  private leftTab: 'library' | 'hierarchy' = 'library';
   private showShipColliders: boolean = false;
   private pendingCatalogItem: StageCatalogItem | null = null;
   private showValidationDrawer: boolean = false;
@@ -119,6 +119,7 @@ export class StageEditor {
   private showGrid: boolean = true;
   private showSpawnMarkers: boolean = true;
   private showCollisionOverlay: boolean = false;
+  private lastGridSpan: number = 3600;
 
   // Callbacks
   public onReturnToDashboard: (() => void) | null = null;
@@ -432,11 +433,15 @@ export class StageEditor {
       boxGrp.position.set(reg.x, elev + (reg.zOffset ?? 0), reg.y);
       boxGrp.userData.editorRef = { category: 'enemy_region', id: reg.id };
 
+      const isExclude = (reg.mode || 'include') === 'exclude';
       const w = Math.max(20, reg.width);
       const h = Math.max(20, reg.height);
-      const col = reg.enabled ? 0x22c55e : 0x64748b;
+      const r = Math.max(20, reg.radius || Math.max(w, h) * 0.5);
+      const col = !reg.enabled ? 0x64748b : isExclude ? 0xef4444 : 0x22c55e;
 
-      const fillGeo = new THREE.BoxGeometry(w, 22, h);
+      const fillGeo = reg.shape === 'circle'
+        ? new THREE.CylinderGeometry(r, r, 22, 28)
+        : new THREE.BoxGeometry(w, 22, h);
       const fillMat = new THREE.MeshBasicMaterial({
         color: col,
         transparent: true,
@@ -470,6 +475,76 @@ export class StageEditor {
     const wireMatPod = new THREE.MeshBasicMaterial({ color: 0xa855f7, wireframe: true, transparent: true, opacity: 0.55 });
     const wireMatEv = new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true, transparent: true, opacity: 0.35 });
 
+    const meshCol = state.terrain.meshCollider;
+    if (meshCol && meshCol.allTriangles.length > 0) {
+      const tris = meshCol.allTriangles;
+      const linePos: number[] = [];
+      const lineCol: number[] = [];
+      const tmpC = new THREE.Color();
+      const catHex = (cat: TerrainSurfaceCategory): number => {
+        switch (cat) {
+          case 'ground':
+            return 0x22c55e;
+          case 'water':
+            return 0x06b6d4;
+          case 'waterfall_rock':
+          case 'bridge':
+          case 'tower_ledge':
+          case 'ship_walkable':
+            return 0xf59e0b;
+          case 'tree_nonsolid':
+            return 0x94a3b8;
+          case 'solid_obstacle':
+          case 'cliff':
+          case 'border':
+          default:
+            return 0xef4444;
+        }
+      };
+
+      for (let i = 0; i < tris.length; i++) {
+        const t = tris[i];
+        tmpC.setHex(catHex(t.category));
+        const y0 = t.ay + 1.5;
+        const y1 = t.by + 1.5;
+        const y2 = t.cy + 1.5;
+        linePos.push(
+          t.ax, y0, t.az, t.bx, y1, t.bz,
+          t.bx, y1, t.bz, t.cx, y2, t.cz,
+          t.cx, y2, t.cz, t.ax, y0, t.az
+        );
+        for (let k = 0; k < 6; k++) lineCol.push(tmpC.r, tmpC.g, tmpC.b);
+      }
+
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3));
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(lineCol, 3));
+      const lines = new THREE.LineSegments(
+        geo,
+        new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.58 })
+      );
+      this.collisionOverlayGroup.add(lines);
+
+      const navSegs = meshCol.getNavDebugSegments();
+      if (navSegs.length > 0) {
+        const navPos: number[] = [];
+        const navCol: number[] = [];
+        for (const s of navSegs) {
+          navPos.push(s.ax, s.ay + 6, s.az, s.bx, s.by + 6, s.bz);
+          const r = s.isWater ? 0.1 : 0.9;
+          const g = s.isWater ? 0.85 : 0.95;
+          const b = s.isWater ? 1.0 : 0.25;
+          navCol.push(r, g, b, r, g, b);
+        }
+        const navGeo = new THREE.BufferGeometry();
+        navGeo.setAttribute('position', new THREE.Float32BufferAttribute(navPos, 3));
+        navGeo.setAttribute('color', new THREE.Float32BufferAttribute(navCol, 3));
+        this.collisionOverlayGroup.add(
+          new THREE.LineSegments(navGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.85 }))
+        );
+      }
+    }
+
     for (const obs of profile.obstacles || []) {
       if (!obs.enabled) continue;
       const elev = state.terrain.getElevation(obs.x, obs.y).height + (obs.zOffset ?? 0);
@@ -499,9 +574,33 @@ export class StageEditor {
     }
   }
 
+  private syncGridDimensions(worldWidth: number, worldHeight: number): void {
+    const span = Math.max(3600, Math.ceil(Math.max(worldWidth, worldHeight) / 200) * 200);
+    if (span !== this.lastGridSpan && this.gridHelper) {
+      this.helpersGroup.remove(this.gridHelper);
+      this.gridHelper.geometry.dispose();
+      const oldMats = Array.isArray(this.gridHelper.material) ? this.gridHelper.material : [this.gridHelper.material];
+      oldMats.forEach((m) => m.dispose());
+      const divs = Math.max(36, Math.round(span / 100));
+      this.gridHelper = new THREE.GridHelper(span, divs, 0x38bdf8, 0x1e3a5f);
+      const mats = Array.isArray(this.gridHelper.material) ? this.gridHelper.material : [this.gridHelper.material];
+      mats.forEach((m) => {
+        m.transparent = true;
+        m.opacity = 0.24;
+        m.depthWrite = false;
+      });
+      this.helpersGroup.add(this.gridHelper);
+      this.lastGridSpan = span;
+    }
+    if (this.gridHelper) {
+      this.gridHelper.position.set(worldWidth * 0.5, 2, worldHeight * 0.5);
+    }
+  }
+
   private syncMarkers(): void {
     const state = this.app.getSimulation().state;
     const profile = this.getActiveProfile();
+    this.syncGridDimensions(state.worldWidth, state.worldHeight);
 
     const sp = profile.playerSpawn;
     const spY = state.terrain.getElevation(sp.x, sp.y).height + (sp.zOffset ?? 0);
@@ -649,6 +748,7 @@ export class StageEditor {
         if (ref.category === 'enemy_region' && d.region && base.width && base.height) {
           d.region.width = Math.max(40, Math.round(base.width * Math.abs(this.gizmoProxy.scale.x)));
           d.region.height = Math.max(40, Math.round(base.height * Math.abs(this.gizmoProxy.scale.z)));
+          d.region.radius = Math.max(20, Math.round(Math.max(d.region.width, d.region.height) * 0.5));
           this.rebuildSpawnRegionHelpers();
         } else {
           const avgScale = (Math.abs(this.gizmoProxy.scale.x) + Math.abs(this.gizmoProxy.scale.y) + Math.abs(this.gizmoProxy.scale.z)) / 3;
@@ -708,14 +808,15 @@ export class StageEditor {
     if (this.keysHeld['a'] || this.keysHeld['arrowleft']) right -= 1;
 
     if (fwd !== 0 || right !== 0) {
+      const st = this.app.getSimulation().state;
       const speed = (this.keysHeld['shift'] ? 1200 : 520) * dt;
       const fx = Math.sin(this.camYaw);
       const fz = Math.cos(this.camYaw);
       const rx = Math.cos(this.camYaw);
       const rz = -Math.sin(this.camYaw);
-      this.camFocus.x = Math.max(0, Math.min(3600, this.camFocus.x + (fx * fwd - rx * right) * speed));
-      this.camFocus.z = Math.max(0, Math.min(3600, this.camFocus.z + (fz * fwd - rz * right) * speed));
-      const h = this.app.getSimulation().state.terrain.getElevation(this.camFocus.x, this.camFocus.z).height;
+      this.camFocus.x = Math.max(0, Math.min(st.worldWidth, this.camFocus.x + (fx * fwd - rx * right) * speed));
+      this.camFocus.z = Math.max(0, Math.min(st.worldHeight, this.camFocus.z + (fz * fwd - rz * right) * speed));
+      const h = st.terrain.getElevation(this.camFocus.x, this.camFocus.z).height;
       this.camFocus.y += (h - this.camFocus.y) * Math.min(1, dt * 8);
     }
 
@@ -861,20 +962,21 @@ export class StageEditor {
     const terrain = this.app.getThreeTerrain();
     const isCustom = this.app.getSimulation().state.terrain.isCustomTestMap;
     const terrainTarget = isCustom ? terrain.testMapGroup : terrain.stage1Group;
+    const st = this.app.getSimulation().state;
     if (terrainTarget) {
       const hits = this.raycaster.intersectObject(terrainTarget, true);
       if (hits.length > 0) {
         const pt = hits[0].point;
-        const clamped = clampWorldPos({ x: pt.x, y: pt.z }, 20, 3600, 3600);
-        const h = this.app.getSimulation().state.terrain.getElevation(clamped.x, clamped.y).height;
+        const clamped = clampWorldPos({ x: pt.x, y: pt.z }, 20, st.worldWidth, st.worldHeight);
+        const h = st.terrain.getElevation(clamped.x, clamped.y).height;
         return { x: clamped.x, y: clamped.y, height: h };
       }
     }
     const pt = new THREE.Vector3();
     this.dragPlane.constant = -this.camFocus.y;
     if (this.raycaster.ray.intersectPlane(this.dragPlane, pt)) {
-      const clamped = clampWorldPos({ x: pt.x, y: pt.z }, 20, 3600, 3600);
-      const h = this.app.getSimulation().state.terrain.getElevation(clamped.x, clamped.y).height;
+      const clamped = clampWorldPos({ x: pt.x, y: pt.z }, 20, st.worldWidth, st.worldHeight);
+      const h = st.terrain.getElevation(clamped.x, clamped.y).height;
       return { x: clamped.x, y: clamped.y, height: h };
     }
     return null;
@@ -954,14 +1056,15 @@ export class StageEditor {
     }
 
     if (this.pointerMode === 'pan') {
+      const st = this.app.getSimulation().state;
       const panScale = this.camDist * 0.0014;
       const fx = Math.sin(this.camYaw);
       const fz = Math.cos(this.camYaw);
       const rx = Math.cos(this.camYaw);
       const rz = -Math.sin(this.camYaw);
-      this.camFocus.x = Math.max(0, Math.min(3600, this.camFocus.x + (rx * dx + fx * dy) * panScale));
-      this.camFocus.z = Math.max(0, Math.min(3600, this.camFocus.z + (rz * dx + fz * dy) * panScale));
-      this.camFocus.y = this.app.getSimulation().state.terrain.getElevation(this.camFocus.x, this.camFocus.z).height;
+      this.camFocus.x = Math.max(0, Math.min(st.worldWidth, this.camFocus.x + (rx * dx + fx * dy) * panScale));
+      this.camFocus.z = Math.max(0, Math.min(st.worldHeight, this.camFocus.z + (rz * dx + fz * dy) * panScale));
+      this.camFocus.y = st.terrain.getElevation(this.camFocus.x, this.camFocus.z).height;
       return;
     }
 
@@ -1098,23 +1201,26 @@ export class StageEditor {
       }
     } else if (item.kind === 'enemy_region') {
       if (!p.enemySpawnRegions) p.enemySpawnRegions = [];
-      const id = this.makeUniqueId('spawn_region');
+      const isExclude = item.key === 'region_enemy_exclusion';
+      const id = this.makeUniqueId(isExclude ? 'exclude_region' : 'spawn_region');
       const newReg: StageEnemySpawnRegionConfig = {
         id,
-        name: `Spawn Zone ${p.enemySpawnRegions.length + 1}`,
+        name: `${isExclude ? 'Exclusion Zone' : 'Spawn Zone'} ${p.enemySpawnRegions.length + 1}`,
+        mode: isExclude ? 'exclude' : 'include',
+        usage: isExclude ? 'both' : 'enemy',
         shape: 'rect',
         x: rx,
         y: ry,
-        radius: 160,
-        width: 320,
-        height: 320,
-        allowedTypes: ['crawler', 'spitter', 'wasp'],
+        radius: 260,
+        width: 520,
+        height: 520,
+        allowedTypes: ['crawler', 'spitter', 'wasp', 'elite'],
         spawnDensity: 1,
         maxActiveEnemies: 8,
-        minPlayerDistance: 320,
+        minPlayerDistance: 420,
         terrainRestriction: 'walkable',
         minElevation: -20,
-        maxElevation: 600,
+        maxElevation: 900,
         enabled: true
       };
       p.enemySpawnRegions.push(newReg);
@@ -1199,32 +1305,33 @@ export class StageEditor {
         this.pushUndo();
         pushed = true;
       }
+      const st = this.app.getSimulation().state;
       if (ref.category === 'pod') {
         const src = p.pods.find((x) => x.id === ref.id);
         if (!src) continue;
         const id = this.makeUniqueId('pod');
-        const c = clampWorldPos({ x: src.x + 48, y: src.y + 48 });
+        const c = clampWorldPos({ x: src.x + 48, y: src.y + 48 }, 20, st.worldWidth, st.worldHeight);
         p.pods.push({ ...src, id, name: `${src.name || 'Biological Pod'} Copy`, x: c.x, y: c.y });
         created.push({ category: 'pod', id });
       } else if (ref.category === 'world_event') {
         const src = p.worldEvents.find((x) => x.id === ref.id);
         if (!src) continue;
         const id = this.makeUniqueId(`event_${src.type}`);
-        const c = clampWorldPos({ x: src.x + 65, y: src.y + 65 });
+        const c = clampWorldPos({ x: src.x + 65, y: src.y + 65 }, 20, st.worldWidth, st.worldHeight);
         p.worldEvents.push({ ...src, id, name: `${src.name} Copy`, x: c.x, y: c.y });
         created.push({ category: 'world_event', id });
       } else if (ref.category === 'obstacle') {
         const src = p.obstacles.find((x) => x.id === ref.id);
         if (!src) continue;
         const id = this.makeUniqueId(`obs_${src.type}`);
-        const c = clampWorldPos({ x: src.x + 45, y: src.y + 45 });
+        const c = clampWorldPos({ x: src.x + 45, y: src.y + 45 }, 20, st.worldWidth, st.worldHeight);
         p.obstacles.push({ ...src, id, name: `${src.name || src.type} Copy`, x: c.x, y: c.y });
         created.push({ category: 'obstacle', id });
       } else if (ref.category === 'enemy_region') {
         const src = (p.enemySpawnRegions || []).find((x) => x.id === ref.id);
         if (!src) continue;
         const id = this.makeUniqueId('spawn_region');
-        const c = clampWorldPos({ x: src.x + 80, y: src.y + 80 });
+        const c = clampWorldPos({ x: src.x + 80, y: src.y + 80 }, 20, st.worldWidth, st.worldHeight);
         p.enemySpawnRegions.push({ ...src, allowedTypes: [...src.allowedTypes], id, name: `${src.name} Copy`, x: c.x, y: c.y });
         created.push({ category: 'enemy_region', id });
       }
@@ -1687,6 +1794,10 @@ export class StageEditor {
             <button id="dev-ed-validate-btn" class="sci-btn dev-ed-btn">Validation</button>
           </div>
           <div class="dev-ed-toolgroup">
+            <button id="dev-ed-load-big-map" class="sci-btn dev-ed-btn" title="Load Big Map Stage 1 GLB into custom_map profile">🏔 Big Map</button>
+            <button id="dev-ed-load-map" class="sci-btn dev-ed-btn" title="Load a custom 3D map (.glb/.gltf/.dae/.obj/.stl) to edit">📂 Load Map</button>
+            <button id="dev-ed-reset-map" class="sci-btn dev-ed-btn ${this.app.isTestMapActive ? '' : 'hidden'}" title="Revert to default procedural Stage 1 terrain">↩ Default Map</button>
+            <input id="dev-ed-map-file" type="file" accept=".glb,.gltf,.dae,.obj,.stl" style="display:none;" />
             <button id="dev-ed-save" class="sci-btn primary-gold dev-ed-btn">💾 Save</button>
             <button id="dev-ed-reload" class="sci-btn dev-ed-btn">↻ Reload</button>
             <button id="dev-ed-playtest" class="sci-btn dev-ed-btn" style="border-color:#22c55e; color:#86efac;">▶ Playtest</button>
@@ -1777,6 +1888,83 @@ export class StageEditor {
       this.refreshValidationUI();
     });
 
+    const syncAfterMapLoad = (fileName: string, triangleCount: number) => {
+      const state = this.app.getSimulation().state;
+      this.activeProfileKey = state.getActiveProfileKey();
+      this.workingConfig.stageName = state.stageName;
+      this.workingConfig.profiles[this.activeProfileKey] = state.exportCurrentProfile();
+      this.selectedRefs = [{ category: 'player_spawn', id: 'player_spawn' }];
+      this.undoStack = [];
+      this.redoStack = [];
+      this.markDirty();
+      this.app.rebuildStageVisualsFromState();
+      this.rebuildSpawnRegionHelpers();
+      this.rebuildCollisionOverlay();
+      this.syncMarkers();
+      this.syncGizmoAttachment();
+      this.refreshHierarchyUI();
+      this.refreshSelectionUI();
+      this.refreshValidationUI();
+      this.updateUndoRedoButtons();
+      const profEl = this.rootEl?.querySelector('.dev-ed-profile');
+      if (profEl) profEl.textContent = `Stage ${this.workingConfig.stageNumber}: ${this.workingConfig.stageName} [${this.activeProfileKey}]`;
+      this.rootEl?.querySelector('#dev-ed-reset-map')?.classList.remove('hidden');
+      const sp = this.getActiveProfile().playerSpawn;
+      const spElev = state.terrain.getElevation(sp.x, sp.y).height;
+      this.camFocus.set(sp.x, spElev, sp.y - 160);
+      this.setStatus(`Loaded "${fileName}" (${triangleCount.toLocaleString()} tris) into [${this.activeProfileKey}].`, false);
+    };
+
+    root.querySelector('#dev-ed-load-big-map')?.addEventListener('click', async () => {
+      this.setStatus('Loading Blenderrr.glb Stage 1...', false);
+      try {
+        const loaded = await this.app.loadTestMapUrl('/assets/maps/Blenderrr.glb', 'Blenderrr.glb', 'auto');
+        syncAfterMapLoad(loaded.fileName, loaded.triangleCount);
+      } catch (err: any) {
+        this.setStatus(err?.message || 'Failed to load Blenderrr.glb.', true);
+      }
+    });
+
+    const mapFileInput = root.querySelector('#dev-ed-map-file') as HTMLInputElement | null;
+    root.querySelector('#dev-ed-load-map')?.addEventListener('click', () => mapFileInput?.click());
+    mapFileInput?.addEventListener('change', async () => {
+      const file = mapFileInput.files?.[0];
+      if (!file) return;
+      this.setStatus(`Loading custom map "${file.name}"...`, false);
+      try {
+        const loaded = await this.app.loadTestMap(file, 'auto');
+        syncAfterMapLoad(loaded.fileName, loaded.triangleCount);
+      } catch (err: any) {
+        this.setStatus(err?.message || 'Failed to load custom map.', true);
+      } finally {
+        mapFileInput.value = '';
+      }
+    });
+    root.querySelector('#dev-ed-reset-map')?.addEventListener('click', () => {
+      this.app.clearTestMap();
+      const state = this.app.getSimulation().state;
+      this.activeProfileKey = state.getActiveProfileKey();
+      this.workingConfig.stageName = state.stageName;
+      if (!this.workingConfig.profiles[this.activeProfileKey]) {
+        this.workingConfig.profiles[this.activeProfileKey] = state.exportCurrentProfile();
+      } else {
+        state.applyStageConfig(this.workingConfig, this.activeProfileKey);
+      }
+      this.selectedRefs = [{ category: 'player_spawn', id: 'player_spawn' }];
+      this.app.rebuildStageVisualsFromState();
+      this.rebuildSpawnRegionHelpers();
+      this.rebuildCollisionOverlay();
+      this.syncMarkers();
+      this.syncGizmoAttachment();
+      this.refreshHierarchyUI();
+      this.refreshSelectionUI();
+      this.refreshValidationUI();
+      const profEl = this.rootEl?.querySelector('.dev-ed-profile');
+      if (profEl) profEl.textContent = `Stage ${this.workingConfig.stageNumber}: ${this.workingConfig.stageName} [${this.activeProfileKey}]`;
+      this.rootEl?.querySelector('#dev-ed-reset-map')?.classList.add('hidden');
+      this.setStatus('Restored default procedural Stage 1 map.', false);
+    });
+
     root.querySelector('#dev-ed-save')?.addEventListener('click', () => void this.handleSave());
     root.querySelector('#dev-ed-reload')?.addEventListener('click', () => void this.handleReload());
     root.querySelector('#dev-ed-playtest')?.addEventListener('click', () => {
@@ -1808,7 +1996,6 @@ export class StageEditor {
   }
 
   private switchLeftTab(tab: 'library' | 'hierarchy'): void {
-    this.leftTab = tab;
     this.rootEl?.querySelector('#tab-library')?.classList.toggle('active', tab === 'library');
     this.rootEl?.querySelector('#tab-hierarchy')?.classList.toggle('active', tab === 'hierarchy');
     this.rootEl?.querySelector('#dev-ed-library-pane')?.classList.toggle('hidden', tab !== 'library');
@@ -1943,7 +2130,72 @@ export class StageEditor {
     if (!body) return;
 
     if (this.selectedRefs.length === 0) {
-      body.innerHTML = `<div class="dev-ed-empty">Select an object in the 3D viewport or Hierarchy, or pick a category asset from "+ Library" to place on terrain.</div>`;
+      const meshCol = this.app.getSimulation().state.terrain.meshCollider;
+      if (!meshCol) {
+        body.innerHTML = `<div class="dev-ed-empty">Select an object in the 3D viewport or Hierarchy, or pick a category asset from "+ Library" to place on terrain.</div>`;
+        return;
+      }
+      const cats: TerrainSurfaceCategory[] = [
+        'ground',
+        'water',
+        'waterfall_rock',
+        'bridge',
+        'tower_ledge',
+        'ship_walkable',
+        'solid_obstacle',
+        'cliff',
+        'border',
+        'tree_nonsolid'
+      ];
+      const summary = meshCol.getSourceSummary();
+      const prof = this.getActiveProfile();
+      const rowsHtml = summary
+        .map(
+          (row, idx) => `<div style="display:flex; flex-direction:column; gap:3px; padding:4px 0; border-bottom:1px solid rgba(148,163,184,0.14);">
+            <div style="display:flex; justify-content:space-between; font-size:10px; color:#cbd5e1;">
+              <span title="${row.sourceTag}" style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; max-width:165px;">${row.sourceTag}</span>
+              <span style="color:#94a3b8;">${row.triCount} tris</span>
+            </div>
+            <select class="dev-ed-input dev-ed-tclass-sel" data-idx="${idx}" data-tag="${row.sourceTag.replace(/"/g, '&quot;')}">
+              ${cats.map((c) => `<option value="${c}" ${row.activeCategory === c ? 'selected' : ''}>${c}${c === row.defaultCategory ? ' (auto)' : ''}</option>`).join('')}
+            </select>
+          </div>`
+        )
+        .join('');
+
+      body.innerHTML = `
+        <div class="dev-ed-empty">Select an object in 3D or adjust <b>Mesh Terrain Classifications</b> below:</div>
+        <div class="dev-ed-panel-header" style="margin-top:6px;">TERRAIN CLASSES (${summary.length} groups)</div>
+        <div style="max-height:360px; overflow-y:auto; padding-right:2px;">${rowsHtml}</div>
+        <button id="dev-ed-tclass-reset" class="sci-btn dev-ed-btn" style="margin-top:6px; width:100%;">Reset Auto Classifications</button>
+      `;
+
+      body.querySelectorAll<HTMLSelectElement>('.dev-ed-tclass-sel').forEach((sel) => {
+        sel.addEventListener('change', () => {
+          const tag = sel.dataset.tag!;
+          const val = sel.value as TerrainSurfaceCategory;
+          if (!prof.terrainOverrides) prof.terrainOverrides = {};
+          const entry = summary[Number(sel.dataset.idx)];
+          if (entry && val === entry.defaultCategory) {
+            delete prof.terrainOverrides[tag];
+          } else {
+            prof.terrainOverrides[tag] = val;
+          }
+          meshCol.applyOverrides(prof.terrainOverrides);
+          this.markDirty();
+          this.rebuildCollisionOverlay();
+          this.setStatus(`Terrain class "${tag}" → ${val}`, false);
+        });
+      });
+
+      body.querySelector('#dev-ed-tclass-reset')?.addEventListener('click', () => {
+        prof.terrainOverrides = {};
+        meshCol.applyOverrides({});
+        this.markDirty();
+        this.rebuildCollisionOverlay();
+        this.refreshSelectionUI();
+        this.setStatus('Reset all terrain surface classifications to automatic.', false);
+      });
       return;
     }
 
@@ -1991,6 +2243,26 @@ export class StageEditor {
       regionHtml = `
         <div class="dev-ed-panel-header" style="margin-top:6px;">SPAWN REGION RULES</div>
         <div class="dev-ed-prop-grid">
+          <div><label>Mode</label>
+            <select id="prop-reg-mode" class="dev-ed-input">
+              <option value="include" ${(reg.mode || 'include') === 'include' ? 'selected' : ''}>Include (Green)</option>
+              <option value="exclude" ${reg.mode === 'exclude' ? 'selected' : ''}>Exclude (Red)</option>
+            </select>
+          </div>
+          <div><label>Applies To</label>
+            <select id="prop-reg-usage" class="dev-ed-input">
+              <option value="enemy" ${(reg.usage || 'enemy') === 'enemy' ? 'selected' : ''}>Enemies</option>
+              <option value="pod" ${reg.usage === 'pod' ? 'selected' : ''}>Bio-Pods</option>
+              <option value="both" ${reg.usage === 'both' ? 'selected' : ''}>Both</option>
+            </select>
+          </div>
+          <div><label>Shape</label>
+            <select id="prop-reg-shape" class="dev-ed-input">
+              <option value="rect" ${reg.shape === 'rect' ? 'selected' : ''}>Rect</option>
+              <option value="circle" ${reg.shape === 'circle' ? 'selected' : ''}>Circle</option>
+            </select>
+          </div>
+          <div><label>Radius</label><input id="prop-reg-r" class="dev-ed-input" type="number" step="20" min="20" value="${reg.radius}" /></div>
           <div><label>Width</label><input id="prop-reg-w" class="dev-ed-input" type="number" step="20" min="40" value="${reg.width}" /></div>
           <div><label>Height</label><input id="prop-reg-h" class="dev-ed-input" type="number" step="20" min="40" value="${reg.height}" /></div>
           <div><label>Density</label><input id="prop-reg-density" class="dev-ed-input" type="number" step="0.1" min="0.1" value="${reg.spawnDensity}" /></div>
@@ -2093,6 +2365,10 @@ export class StageEditor {
 
       if (obj.region) {
         const reg = obj.region;
+        const modeEl = body.querySelector('#prop-reg-mode') as HTMLSelectElement | null;
+        const usageEl = body.querySelector('#prop-reg-usage') as HTMLSelectElement | null;
+        const shapeEl = body.querySelector('#prop-reg-shape') as HTMLSelectElement | null;
+        const rr = parseFloat((body.querySelector('#prop-reg-r') as HTMLInputElement)?.value || '');
         const rw = parseFloat((body.querySelector('#prop-reg-w') as HTMLInputElement).value);
         const rh = parseFloat((body.querySelector('#prop-reg-h') as HTMLInputElement).value);
         const rden = parseFloat((body.querySelector('#prop-reg-density') as HTMLInputElement).value);
@@ -2101,6 +2377,10 @@ export class StageEditor {
         const rminel = parseFloat((body.querySelector('#prop-reg-minel') as HTMLInputElement).value);
         const rmaxel = parseFloat((body.querySelector('#prop-reg-maxel') as HTMLInputElement).value);
         const restEl = body.querySelector('#prop-reg-restrict') as HTMLSelectElement | null;
+        if (modeEl) reg.mode = modeEl.value as 'include' | 'exclude';
+        if (usageEl) reg.usage = usageEl.value as 'enemy' | 'pod' | 'both';
+        if (shapeEl) reg.shape = shapeEl.value as 'circle' | 'rect';
+        if (Number.isFinite(rr)) reg.radius = Math.max(20, rr);
         if (restEl) reg.terrainRestriction = restEl.value as 'any' | 'walkable' | 'near_water';
         if (Number.isFinite(rw)) reg.width = Math.max(40, rw);
         if (Number.isFinite(rh)) reg.height = Math.max(40, rh);

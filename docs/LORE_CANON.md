@@ -130,19 +130,17 @@ This begins Endo Nine.
 
 The Alien pilots the spacecraft back toward the frozen world.
 
-The ship crashes near the location of the artifact recovered during Errant Night.
+During atmospheric descent, the crippled ship strikes the Stage 1 Overseer artifact tower, damaging its concealment system and scattering four concealment components across the crater region before spinning out of control and crashing elsewhere near the location of the artifact recovered during *Errant Night*.
 
 The crash threatens the remaining human survivors.
 
 An Overseer intervenes and protects the crew from the worst of the impact.
 
-The intervention leaves the Overseer severely injured and weakened.
+The intervention leaves the Overseer severely injured and weakened, with fragmented memory.
 
-The surviving crew eventually awakens on the planet.
+The surviving crew eventually awakens on the planet alongside the wrecked hull.
 
-They find themselves stranded on a hostile world whose frozen environment is beginning to change.
-
-The Alien has survived.
+They find themselves stranded on a hostile world whose frozen environment is beginning to change as the Alien survives and resumes thawing the planet.
 
 ## 9. The Overseer
 
@@ -179,6 +177,16 @@ Each artifact is connected to the environmental state of its surrounding region.
 The artifacts are not ordinary monuments.
 
 They are advanced technological devices capable of altering the planetary environment.
+
+### 10.1 Stage 1 Artifact Tower & Concealment System
+
+Stage 1 takes place around one of the nine major Overseer artifact towers maintaining the planet's frozen state while the original Alien attempts to reverse the planetary freeze.
+
+- **Protective Concealment:** The Stage 1 tower originally housed a concealment system designed to shield the artifact against Alien interference (functional protection rather than visual invisibility, so the tower structure remains physically visible and accessible throughout Stage 1).
+- **Crash Damage & Four Scattered Modules:** Striking the tower during atmospheric descent damaged this concealment array and scattered four concealment components across the crater—corresponding to the four enhancement anomalies (LMB, RMB, Dash, and Ultimate). Each event recovers one concealment component while interfacing with the crew's combat gear to grant its skill augment.
+- **Four-Event Lock & Delayed Memory:** Because the injured Overseer cannot safely reactivate an unshielded artifact, tower activation stays locked until all four distinct enhancement events are completed. Only after recovering the fourth component does the Overseer reconstruct its memory of the concealment function.
+- **Boss Ambush, Regional Refreezing & Departure:** Activating the unlocked tower triggers an unexpected ambush by the Stage 1 Boss (retaining public `"STAGE 1 BOSS"` designation unless separately named). Defeating the boss enables concealment restoration and localized regional refreezing around Stage 1 before the tower portal transfers the crew toward the next stage.
+- **Stage Scope & Legacy Note:** This four-component recovery requirement applies specifically to Stage 1's crash damage rather than universally across future stages. Meanwhile, the earlier reference to the *Errant Night* artifact in Sections 3 and 8 is preserved intact without conflating it as definitively identical to the Stage 1 Artifact Tower pending explicit author confirmation.
 
 ## 11. The Alien's Plan
 
@@ -435,6 +443,7 @@ The good ending becomes possible through understanding, not merely superior comb
 
 - The game begins at the actual start of **Endo Nine**: after the Alien pilots the ship back to the frozen planet and crashes near the first Overseer artifact.
 - Every run begins at the **crash-site crater** alongside the large wrecked spacecraft.
+- **Stage 1 Gameplay Progression Loop:** Explore the freshly thawing crater, complete all four unique enhancement events (recovering the Stage 1 tower's scattered concealment modules alongside Commander/Doctor skill augments), unlock and activate the visible Artifact Tower, defeat the Stage 1 Boss ambush to restore concealment and trigger localized regional refreezing, and press Interact at the tower to proceed onward.
 - The environment reflects a **freshly thawing alien world**—blending thawed dark soil, frost and snow patches, exposed crater rock, and reawakening alien biological flora.
 - The **Dimensional Loop** (Part III) remains canonical as the later alternate campaign route triggered at Stage 8 that reveals the truth about the alien civilization.
 

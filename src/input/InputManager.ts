@@ -1,5 +1,4 @@
 import { InputSnapshot, Vector2 } from '../sim/types';
-import { CameraController } from '../render/CameraController';
 
 export class InputManager {
   public keys: Record<string, boolean> = {};
@@ -95,27 +94,6 @@ export class InputManager {
       if (target && target.closest('.interactive, .screen-modal')) return;
       this.zoomDelta += Math.sign(e.deltaY) * -0.04;
     }, { passive: true });
-  }
-
-  private activeCameraController: CameraController | null = null;
-
-  public updateWorldMouse(cameraController: CameraController): void {
-    this.activeCameraController = cameraController;
-
-    // Keyboard camera rotation shortcuts (Q rotates left, C resets)
-    if (this.keys['q']) {
-      cameraController.rotateYaw(-0.032);
-    }
-    if (this.keys['c']) {
-      cameraController.resetCamera();
-    }
-
-    const worldPt = cameraController.unprojectScreenToWorld(
-      this.mouseScreenPos.x,
-      this.mouseScreenPos.y
-    );
-    this.mouseWorldPos.x = worldPt.x;
-    this.mouseWorldPos.y = worldPt.y;
   }
 
   public getSnapshot(

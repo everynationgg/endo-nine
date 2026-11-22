@@ -22,14 +22,14 @@ export interface BossSpriteEntry {
 export const STAGE1_BOSS_CONFIG = {
   name: 'COLOSSAL BIO-CULTIVATOR',
   title: 'STAGE 1 TITAN',
-  // Size: Further 10% reduced (438W x 438H) while remaining larger than the crashed spaceship (420W x 315H)
-  baseHeight: 438,
-  baseWidth: 438,
-  footOffset: 31, // Offsets the mesh downward so the feet soles firmly make contact with the terrain surface
-  radius: 71,
-  speed: 63.79, // +35% more movement speed (was 47.25) for relentless pursuit
+  // 2x entity scaling (876W x 876H) matching 2x character & enemy scale without rescaling the map
+  baseHeight: 876,
+  baseWidth: 876,
+  footOffset: 62,
+  radius: 142,
+  speed: 105, // Scaled for 2x entity stature & hero stride speed
   touchDamage: 40,
-  maxHealth: 10800, // 2x Stage Boss HP
+  maxHealth: 8000, // Stage 1 Boss HP
   attackCooldown: 1.63, // +35% attack speed (was 2.2s)
   initialCooldown: 1.67, // +35% attack speed (was 2.25s)
   postAttackPause: 0.33, // +35% faster recovery between attacks (was 0.45s)

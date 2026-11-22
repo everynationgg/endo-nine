@@ -20,6 +20,9 @@ export interface DialogueTurn {
   durationSec: number;
   pauseAfterSec?: number;
   direction?: string;
+  optionalOnResume?: boolean;
+  unlocksObjectives?: boolean;
+  requiresPreviousTurnId?: string;
 }
 
 export interface Conversation {
@@ -36,6 +39,7 @@ export interface Conversation {
 
   ttlSec?: number;
   cooldownSec?: number;
+  leadInSec?: number;
   resumable?: boolean;
 
   prerequisiteRule?: string;

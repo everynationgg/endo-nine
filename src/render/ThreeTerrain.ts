@@ -8,11 +8,18 @@ export class ThreeTerrain {
   public terrainMeshes: THREE.Object3D[] = [];
   private riverMesh: THREE.Mesh | null = null;
   private riverUniforms: { uTime: { value: number } } = { uTime: { value: 0 } };
+  private freezeUniforms = {
+    uFreezeProgress: { value: 0 },
+    uFreezeOriginXZ: { value: new THREE.Vector2(1400, 1050) },
+    uFreezeMaxRadius: { value: 4200 }
+  };
   private textureLoader: THREE.TextureLoader;
 
   // 2.5D Billboarded Crashed Colony Shipwreck
   public shipHull: THREE.Mesh | null = null;
   public shipPos: THREE.Vector3 = new THREE.Vector3(1800, 0, 2960);
+
+  private testMapAnimatedUniforms: Array<{ uTime: { value: number } }> = [];
 
   constructor(terrain: TerrainSystem, textureLoader?: THREE.TextureLoader) {
     this.group = new THREE.Group();
@@ -24,7 +31,11 @@ export class ThreeTerrain {
     this.buildTerrain(terrain);
   }
 
-  public setTestMapGroup(model: THREE.Object3D | null): void {
+  public setTestMapGroup(
+    model: THREE.Object3D | null,
+    animatedUniforms?: Array<{ uTime: { value: number } }>
+  ): void {
+    this.testMapAnimatedUniforms = animatedUniforms ? [...animatedUniforms] : [];
     while (this.testMapGroup.children.length > 0) {
       const child = this.testMapGroup.children[0];
       this.testMapGroup.remove(child);
@@ -51,8 +62,22 @@ export class ThreeTerrain {
     }
   }
 
+  public setRegionalFreeze(progress: number, originX?: number, originY?: number, maxRadius?: number): void {
+    this.freezeUniforms.uFreezeProgress.value = Math.max(0, Math.min(1, progress));
+    if (originX !== undefined && originY !== undefined) {
+      this.freezeUniforms.uFreezeOriginXZ.value.set(originX, originY);
+    }
+    if (maxRadius !== undefined) {
+      this.freezeUniforms.uFreezeMaxRadius.value = Math.max(1000, maxRadius);
+    }
+  }
+
   public update(dt: number, timeMs: number, camera?: THREE.Camera): void {
-    this.riverUniforms.uTime.value = timeMs * 0.001;
+    const timeSec = timeMs * 0.001;
+    this.riverUniforms.uTime.value = timeSec;
+    for (let i = 0; i < this.testMapAnimatedUniforms.length; i++) {
+      this.testMapAnimatedUniforms[i].uTime.value = timeSec;
+    }
 
     // Constrained Billboarding: Continuously rotate on vertical Y-axis to face active gameplay camera horizontally
     if (this.shipHull && camera) {
@@ -122,6 +147,7 @@ export class ThreeTerrain {
       color: 0xffffff,
       map: texThawedEarth
     });
+    groundMat.customProgramCacheKey = () => 'proc_stage1_terrain_v2';
 
     groundMat.onBeforeCompile = (shader) => {
       shader.uniforms.uTexThawedEarth = { value: texThawedEarth };
@@ -129,6 +155,9 @@ export class ThreeTerrain {
       shader.uniforms.uTexOrganicMoss = { value: texOrganicMoss };
       shader.uniforms.uTexMacroCrater = { value: texMacroCrater };
       shader.uniforms.uCrashSite = { value: new THREE.Vector2(1800, 2960) };
+      shader.uniforms.uFreezeProgress = this.freezeUniforms.uFreezeProgress;
+      shader.uniforms.uFreezeOriginXZ = this.freezeUniforms.uFreezeOriginXZ;
+      shader.uniforms.uFreezeMaxRadius = this.freezeUniforms.uFreezeMaxRadius;
 
       shader.vertexShader =
         `
@@ -152,6 +181,9 @@ export class ThreeTerrain {
         uniform sampler2D uTexOrganicMoss;
         uniform sampler2D uTexMacroCrater;
         uniform vec2 uCrashSite;
+        uniform float uFreezeProgress;
+        uniform vec2 uFreezeOriginXZ;
+        uniform float uFreezeMaxRadius;
 
         varying vec3 vCustomWorldPos;
         varying vec3 vCustomWorldNorm;
@@ -264,6 +296,16 @@ export class ThreeTerrain {
           float skidZ = smoothstep(2720.0, 2920.0, vCustomWorldPos.z) * (1.0 - smoothstep(3100.0, 3280.0, vCustomWorldPos.z));
           groundCol = mix(groundCol, vec3(0.035, 0.030, 0.030), skidX * skidZ * 0.70);
         }
+
+        float pFreezeDist = length(vCustomWorldPos.xz - uFreezeOriginXZ);
+        float pFreezeFront = uFreezeProgress * uFreezeMaxRadius * 1.15;
+        float pFreezeNoise = fbm(vCustomWorldPos.xz * 0.008) * 260.0;
+        float pFreezeWave = clamp(1.0 - smoothstep(pFreezeFront - 360.0, pFreezeFront + 120.0, pFreezeDist + pFreezeNoise), 0.0, 1.0);
+        float pFreezeActive = smoothstep(0.0, 0.04, uFreezeProgress) * pFreezeWave;
+        float pFreezeBand = exp(-pow((pFreezeDist + pFreezeNoise - pFreezeFront) / 145.0, 2.0)) * smoothstep(0.0, 0.08, uFreezeProgress) * (1.0 - smoothstep(0.88, 1.0, uFreezeProgress));
+        vec3 pFrostTint = mix(vec3(0.68, 0.84, 0.96), vec3(0.84, 0.93, 1.0), clamp(vCustomWorldNorm.y, 0.0, 1.0));
+        groundCol = mix(groundCol, pFrostTint, pFreezeActive * 0.60);
+        groundCol = mix(groundCol, vec3(0.64, 0.88, 1.0), pFreezeBand * 0.34);
 
         diffuseColor.rgb = groundCol;
         `
@@ -385,7 +427,10 @@ export class ThreeTerrain {
     // Animated water shader with directional flow, shallow-to-deep depth gradient, and specular ripples
     const riverMat = new THREE.ShaderMaterial({
       uniforms: {
-        uTime: this.riverUniforms.uTime
+        uTime: this.riverUniforms.uTime,
+        uFreezeProgress: this.freezeUniforms.uFreezeProgress,
+        uFreezeOriginXZ: this.freezeUniforms.uFreezeOriginXZ,
+        uFreezeMaxRadius: this.freezeUniforms.uFreezeMaxRadius
       },
       vertexShader: `
         attribute float aDepth;
@@ -405,6 +450,9 @@ export class ThreeTerrain {
       `,
       fragmentShader: `
         uniform float uTime;
+        uniform float uFreezeProgress;
+        uniform vec2 uFreezeOriginXZ;
+        uniform float uFreezeMaxRadius;
         varying vec2 vUv;
         varying vec3 vWorldPos;
         varying vec3 vNormal;
@@ -449,8 +497,18 @@ export class ThreeTerrain {
           float specular = pow(max(0.0, wave * 1.25), 4.0) * 0.35;
           finalColor += vec3(specular);
 
+          // Cosmetic radial regional refreezing wave after Stage 1 Boss containment
+          float rFreezeDist = length(vWorldPos.xz - uFreezeOriginXZ);
+          float rFreezeFront = uFreezeProgress * uFreezeMaxRadius * 1.15;
+          float rFreezeJitter = (n1 - 0.5) * 200.0;
+          float rFreezeWave = clamp(1.0 - smoothstep(rFreezeFront - 340.0, rFreezeFront + 110.0, rFreezeDist + rFreezeJitter), 0.0, 1.0);
+          float rFreezeActive = smoothstep(0.0, 0.04, uFreezeProgress) * rFreezeWave;
+          float rFreezeBand = exp(-pow((rFreezeDist + rFreezeJitter - rFreezeFront) / 140.0, 2.0)) * smoothstep(0.0, 0.08, uFreezeProgress) * (1.0 - smoothstep(0.88, 1.0, uFreezeProgress));
+          vec3 iceSurfaceCol = mix(vec3(0.46, 0.72, 0.88), vec3(0.82, 0.94, 1.0), 0.35 + 0.45 * n2);
+          finalColor = mix(finalColor, iceSurfaceCol, rFreezeActive * 0.84) + vec3(0.24, 0.46, 0.62) * rFreezeBand;
+
           // Alpha fade smoothly at shorelines
-          float alpha = clamp(vDepth / 0.45, 0.0, 0.88);
+          float alpha = clamp(mix(vDepth / 0.45, 0.94, rFreezeActive * 0.65), 0.0, 0.94);
           gl_FragColor = vec4(finalColor, alpha);
         }
       `,

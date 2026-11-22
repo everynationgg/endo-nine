@@ -1,7 +1,10 @@
 import * as THREE from 'three';
 import type { ThreeApp } from '../render/ThreeApp';
-import type { BuffId, EnemyType, HeroId, ItemId } from '../sim/types';
-import { BUFF_REGISTRY, ALL_BUFF_IDS, ITEM_REGISTRY } from '../sim/ItemDefs';
+import type { MeshTerrainCollider } from '../sim/MeshTerrainCollider';
+import type { BuffId, EnemyType, HeroId, ItemId, TerrainSurfaceCategory } from '../sim/types';
+import { BUFF_REGISTRY, ALL_BUFF_IDS, ITEM_REGISTRY, isBuffEligibleForPlayer, getEffectiveBuffWeight } from '../sim/ItemDefs';
+import { STAGE1_ENHANCEMENT_CATEGORIES } from '../sim/StageProgressionPolicy';
+import { getDifficultyTier } from '../sim/DifficultyDefs';
 import { HERO_REGISTRY } from '../sim/HeroDefs';
 
 export type DebuggerTab = 'player' | 'enemies' | 'boss' | 'stage';
@@ -14,7 +17,7 @@ export class GameplayDebugger {
 
   private isOpen: boolean = false;
   private activeTab: DebuggerTab = 'player';
-  private isPausedByDebugger: boolean = false;
+  public onPauseChanged: ((paused: boolean) => void) | null = null;
 
   // Visual Debug Overlays
   private showEnemyHealthState: boolean = false;
@@ -22,13 +25,18 @@ export class GameplayDebugger {
   private showNavPaths: boolean = false;
   private showLineOfSight: boolean = false;
   private showSpawnRegions: boolean = false;
+  private showTerrainCollisionDebug: boolean = false;
 
   private debugSceneGroup: THREE.Group = new THREE.Group();
+  private terrainDebugGroup: THREE.Group = new THREE.Group();
+  private cachedTerrainCollider: MeshTerrainCollider | null = null;
+  private cachedTerrainOverrideSig: string = '';
   private lastUiSyncTime: number = 0;
 
   constructor(app: ThreeApp) {
     this.app = app;
     this.debugSceneGroup.name = 'DevGameplayDebugger_Overlay3D';
+    this.terrainDebugGroup.name = 'DevGameplayDebugger_Terrain3D';
   }
 
   public getIsOpen(): boolean {
@@ -40,15 +48,28 @@ export class GameplayDebugger {
     this.isOpen = true;
     this.ensureOverlayCanvas();
     this.mountPanelDOM();
+    this.syncPauseButton();
     if (!this.debugSceneGroup.parent) {
       this.app.getScene().add(this.debugSceneGroup);
     }
+    if (!this.terrainDebugGroup.parent) {
+      this.app.getScene().add(this.terrainDebugGroup);
+    }
+    this.terrainDebugGroup.visible = this.showTerrainCollisionDebug;
     this.rootEl?.classList.remove('hidden');
     this.refreshDynamicContent();
   }
 
+  public syncPauseButton(): void {
+    const btn = this.rootEl?.querySelector('#dbg-pause-sim') as HTMLElement | null;
+    if (!btn) return;
+    const paused = this.app.getSimulation().state.isPaused;
+    btn.textContent = paused ? '▶ Play' : '⏸ Pause';
+  }
+
   public close(): void {
     this.isOpen = false;
+    this.terrainDebugGroup.visible = false;
     this.rootEl?.classList.add('hidden');
   }
 
@@ -61,6 +82,7 @@ export class GameplayDebugger {
     const anyVisuals =
       this.showEnemyHealthState ||
       this.showCollisionBounds ||
+      this.showTerrainCollisionDebug ||
       this.showNavPaths ||
       this.showLineOfSight ||
       this.showSpawnRegions;
@@ -114,12 +136,109 @@ export class GameplayDebugger {
     }
   }
 
+  private syncTerrainDebugCache(): void {
+    const meshCol = this.app.getSimulation().state.terrain.meshCollider;
+    this.terrainDebugGroup.visible = this.isOpen && this.showTerrainCollisionDebug && !!meshCol;
+    if (!this.isOpen || !this.showTerrainCollisionDebug || !meshCol) return;
+
+    const sig = JSON.stringify(meshCol.overrides || {});
+    if (this.cachedTerrainCollider === meshCol && this.cachedTerrainOverrideSig === sig && this.terrainDebugGroup.children.length > 0) {
+      return;
+    }
+
+    while (this.terrainDebugGroup.children.length > 0) {
+      const ch = this.terrainDebugGroup.children[0];
+      this.terrainDebugGroup.remove(ch);
+      ch.traverse((o: any) => {
+        if (o.geometry) o.geometry.dispose?.();
+        if (o.material) o.material.dispose?.();
+      });
+    }
+
+    const catHex = (cat: TerrainSurfaceCategory): number => {
+      switch (cat) {
+        case 'ground':
+          return 0x22c55e;
+        case 'water':
+          return 0x06b6d4;
+        case 'waterfall_rock':
+        case 'bridge':
+        case 'tower_ledge':
+        case 'ship_walkable':
+          return 0xf59e0b;
+        case 'tree_nonsolid':
+          return 0x94a3b8;
+        case 'solid_obstacle':
+        case 'cliff':
+        case 'border':
+        default:
+          return 0xef4444;
+      }
+    };
+
+    const tris = meshCol.allTriangles;
+    const pos: number[] = [];
+    const col: number[] = [];
+    const nPos: number[] = [];
+    const tmpC = new THREE.Color();
+
+    for (let i = 0; i < tris.length; i++) {
+      const t = tris[i];
+      tmpC.setHex(catHex(t.category));
+      pos.push(
+        t.ax, t.ay + 1.5, t.az, t.bx, t.by + 1.5, t.bz,
+        t.bx, t.by + 1.5, t.bz, t.cx, t.cy + 1.5, t.cz,
+        t.cx, t.cy + 1.5, t.cz, t.ax, t.ay + 1.5, t.az
+      );
+      for (let k = 0; k < 6; k++) col.push(tmpC.r, tmpC.g, tmpC.b);
+
+      if (i % 8 === 0 && t.category !== 'border') {
+        const mx = (t.ax + t.bx + t.cx) / 3;
+        const my = (t.ay + t.by + t.cy) / 3 + 1.5;
+        const mz = (t.az + t.bz + t.cz) / 3;
+        nPos.push(mx, my, mz, mx + t.nx * 14, my + t.ny * 14, mz + t.nz * 14);
+      }
+    }
+
+    const triGeo = new THREE.BufferGeometry();
+    triGeo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    triGeo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    this.terrainDebugGroup.add(
+      new THREE.LineSegments(triGeo, new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.55 }))
+    );
+
+    if (nPos.length > 0) {
+      const normGeo = new THREE.BufferGeometry();
+      normGeo.setAttribute('position', new THREE.Float32BufferAttribute(nPos, 3));
+      this.terrainDebugGroup.add(
+        new THREE.LineSegments(normGeo, new THREE.LineBasicMaterial({ color: 0xe2e8f0, transparent: true, opacity: 0.5 }))
+      );
+    }
+
+    const navSegs = meshCol.getNavDebugSegments();
+    if (navSegs.length > 0) {
+      const navPos: number[] = [];
+      for (const s of navSegs) {
+        navPos.push(s.ax, s.ay + 6, s.az, s.bx, s.by + 6, s.bz);
+      }
+      const navGeo = new THREE.BufferGeometry();
+      navGeo.setAttribute('position', new THREE.Float32BufferAttribute(navPos, 3));
+      this.terrainDebugGroup.add(
+        new THREE.LineSegments(navGeo, new THREE.LineBasicMaterial({ color: 0xfacc15, transparent: true, opacity: 0.8 }))
+      );
+    }
+
+    this.cachedTerrainCollider = meshCol;
+    this.cachedTerrainOverrideSig = sig;
+  }
+
   private renderVisualDebugOverlays(): void {
     const ctx = this.overlayCtx;
     const canvas = this.overlayCanvas;
     if (!ctx || !canvas) return;
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     this.clearDebugGroup();
+    this.syncTerrainDebugCache();
 
     const state = this.app.getSimulation().state;
     const cam = this.app.getCamera();
@@ -135,15 +254,24 @@ export class GameplayDebugger {
       };
     };
 
-    // 1. Spawn Regions Overlay (3D green outlines)
+    // 1. Spawn Regions Overlay (3D circle & rect outlines; green include, red exclude)
     if (this.showSpawnRegions && state.enemySpawnRegions?.length) {
       for (const reg of state.enemySpawnRegions) {
         const elev = state.terrain.getElevation(reg.x, reg.y).height;
-        const geo = new THREE.BoxGeometry(reg.width, 20, reg.height);
+        const isExclude = (reg.mode || 'include') === 'exclude';
+        const col = !reg.enabled ? 0x64748b : isExclude ? 0xef4444 : 0x22c55e;
+        const geo = reg.shape === 'circle'
+          ? new THREE.CylinderGeometry(
+            Math.max(20, reg.radius || Math.max(reg.width, reg.height) * 0.5),
+            Math.max(20, reg.radius || Math.max(reg.width, reg.height) * 0.5),
+            20,
+            28
+          )
+          : new THREE.BoxGeometry(reg.width, 20, reg.height);
         const edges = new THREE.EdgesGeometry(geo);
         const line = new THREE.LineSegments(
           edges,
-          new THREE.LineBasicMaterial({ color: reg.enabled ? 0x22c55e : 0x64748b })
+          new THREE.LineBasicMaterial({ color: col })
         );
         line.position.set(reg.x, elev + 10, reg.y);
         this.debugSceneGroup.add(line);
@@ -151,8 +279,8 @@ export class GameplayDebugger {
       }
     }
 
-    // 2. Collision Boundaries (Player + Obstacles + Enemies)
-    if (this.showCollisionBounds) {
+    // 2. Collision Boundaries (Player Combat + Terrain Collision Footprint + Rejected Moves + Obstacles + Enemies)
+    if (this.showCollisionBounds || this.showTerrainCollisionDebug) {
       const playerCyl = new THREE.Mesh(
         new THREE.CylinderGeometry(18, 18, 36, 14, 1, true),
         new THREE.MeshBasicMaterial({ color: 0x38bdf8, wireframe: true })
@@ -160,6 +288,43 @@ export class GameplayDebugger {
       playerCyl.position.set(p.pos.x, p.z + 18, p.pos.y);
       this.debugSceneGroup.add(playerCyl);
 
+      // Actual terrain / wall collision footprint (radius ~30u, body height 88u)
+      const terrainColCyl = new THREE.Mesh(
+        new THREE.CylinderGeometry(30, 30, 88, 18, 1, true),
+        new THREE.MeshBasicMaterial({ color: 0xe879f9, wireframe: true, transparent: true, opacity: 0.72 })
+      );
+      terrainColCyl.position.set(p.pos.x, p.z + 44, p.pos.y);
+      this.debugSceneGroup.add(terrainColCyl);
+
+      const rejected = state.terrain.meshCollider?.recentRejectedMoves;
+      if (rejected && rejected.length > 0) {
+        const rejMat = new THREE.LineBasicMaterial({ color: 0xf43f5e });
+        for (let i = Math.max(0, rejected.length - 12); i < rejected.length; i++) {
+          const rm = rejected[i];
+          if (Math.hypot(rm.toX - p.pos.x, rm.toY - p.pos.y) > 1500) continue;
+          const postGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(rm.toX, rm.z + 4, rm.toY),
+            new THREE.Vector3(rm.toX, rm.z + 82, rm.toY)
+          ]);
+          this.debugSceneGroup.add(new THREE.Line(postGeo, rejMat));
+          const dirGeo = new THREE.BufferGeometry().setFromPoints([
+            new THREE.Vector3(rm.fromX, rm.z + 18, rm.fromY),
+            new THREE.Vector3(rm.toX, rm.z + 18, rm.toY)
+          ]);
+          this.debugSceneGroup.add(new THREE.Line(dirGeo, rejMat));
+          const scr = project(rm.toX, rm.z + 88, rm.toY);
+          if (scr.visible && scr.x >= 0 && scr.x <= canvas.width && scr.y >= 0 && scr.y <= canvas.height) {
+            ctx.font = 'bold 10px monospace';
+            ctx.fillStyle = 'rgba(24, 6, 12, 0.85)';
+            ctx.fillRect(scr.x - 42, scr.y - 11, 84, 14);
+            ctx.fillStyle = '#fda4af';
+            ctx.fillText(`BLK:${rm.reason.slice(0, 11)}`, scr.x - 39, scr.y);
+          }
+        }
+      }
+    }
+
+    if (this.showCollisionBounds) {
       const obsMat = new THREE.MeshBasicMaterial({ color: 0xf97316, wireframe: true, transparent: true, opacity: 0.45 });
       for (let i = 0; i < state.obstacles.length; i++) {
         const obs = state.obstacles[i];
@@ -259,11 +424,14 @@ export class GameplayDebugger {
     this.rootEl = panel;
 
     panel.querySelector('#dbg-close')?.addEventListener('click', () => this.close());
-    panel.querySelector('#dbg-pause-sim')?.addEventListener('click', (ev) => {
+    panel.querySelector('#dbg-pause-sim')?.addEventListener('click', () => {
       const sim = this.app.getSimulation();
-      this.isPausedByDebugger = !this.isPausedByDebugger;
-      sim.state.isPaused = this.isPausedByDebugger;
-      (ev.currentTarget as HTMLElement).textContent = this.isPausedByDebugger ? '▶ Resume Time' : '⏸ Freeze Time';
+      sim.state.isPaused = !sim.state.isPaused;
+      if (sim.state.isPaused) {
+        this.app.exitPointerLock();
+      }
+      this.syncPauseButton();
+      this.onPauseChanged?.(sim.state.isPaused);
     });
 
     panel.querySelectorAll<HTMLButtonElement>('.dev-dbg-tab').forEach((btn) => {
@@ -500,10 +668,10 @@ export class GameplayDebugger {
           </div>
         </div>
         <div class="dev-dbg-section">
-          <div class="dev-ed-panel-header">TELEPORTER &amp; CHESTS</div>
+          <div class="dev-ed-panel-header">${state.stageNumber === 1 ? 'TOWER PROGRESSION &amp; CHESTS' : 'TELEPORTER &amp; CHESTS'}</div>
           <div class="dev-dbg-btn-grid">
-            <button id="dbg-tele-25" class="sci-btn dev-ed-btn">Charge +25%</button>
-            <button id="dbg-tele-100" class="sci-btn primary-gold dev-ed-btn">Charge 100%</button>
+            <button id="dbg-tele-25" class="sci-btn dev-ed-btn">${state.stageNumber === 1 ? 'Complete Next Anomaly' : 'Charge +25%'}</button>
+            <button id="dbg-tele-100" class="sci-btn primary-gold dev-ed-btn">${state.stageNumber === 1 ? 'Unlock Tower (4/4)' : 'Charge 100%'}</button>
             <button id="dbg-tele-reset" class="sci-btn dev-ed-btn">Reset Teleporter</button>
             <button id="dbg-reset-pods" class="sci-btn dev-ed-btn">Reopen All Pods</button>
           </div>
@@ -514,9 +682,32 @@ export class GameplayDebugger {
         </div>
         <div class="dev-dbg-section">
           <div class="dev-ed-panel-header">VISUALIZATION OVERLAYS</div>
-          <label class="dev-ed-chk-line"><input id="dbg-vis-regions" type="checkbox" ${this.showSpawnRegions ? 'checked' : ''} /> Show Enemy Spawn Regions</label>
+          <label class="dev-ed-chk-line"><input id="dbg-vis-terrain" type="checkbox" ${this.showTerrainCollisionDebug ? 'checked' : ''} /> Terrain Collision &amp; Nav Debug (3D)</label>
+          <label class="dev-ed-chk-line"><input id="dbg-vis-regions" type="checkbox" ${this.showSpawnRegions ? 'checked' : ''} /> Show Spawn Regions (Include/Exclude)</label>
           <label class="dev-ed-chk-line"><input id="dbg-vis-cols2" type="checkbox" ${this.showCollisionBounds ? 'checked' : ''} /> Show Collision Boundaries</label>
         </div>
+        <details class="dev-dbg-section" open>
+          <summary class="dev-ed-panel-header" style="cursor:pointer;">COMBAT DIRECTORS (FAST / SLOW)</summary>
+          <div class="dev-dbg-readout" id="dbg-director-readout"></div>
+        </details>
+        <details class="dev-dbg-section" open>
+          <summary class="dev-ed-panel-header" style="cursor:pointer;">SCENE DIRECTOR (BIO-PODS)</summary>
+          <div class="dev-dbg-readout" id="dbg-scene-readout"></div>
+          <div style="display:flex; gap:4px; margin-top:4px; align-items:center;">
+            <input id="dbg-layout-seed" type="number" class="dev-ed-input" placeholder="Pin Seed..." value="${state.pinnedLayoutSeed ?? ''}" style="flex:1; min-width:80px;" />
+            <button id="dbg-pin-seed" class="sci-btn dev-ed-btn">Pin</button>
+            <button id="dbg-clear-seed" class="sci-btn dev-ed-btn">Clear</button>
+            <button id="dbg-regen-layout" class="sci-btn primary-gold dev-ed-btn">Regenerate Layout</button>
+          </div>
+        </details>
+        <details class="dev-dbg-section">
+          <summary class="dev-ed-panel-header" style="cursor:pointer;">LOOT, PITY &amp; TIMED EFFECTS</summary>
+          <div class="dev-dbg-readout" id="dbg-loot-readout"></div>
+        </details>
+        <details class="dev-dbg-section">
+          <summary class="dev-ed-panel-header" style="cursor:pointer;">STAGE 1 PROGRESSION &amp; DIALOGUE</summary>
+          <div class="dev-dbg-readout" id="dbg-prog-readout"></div>
+        </details>
       `;
 
       const tpTo = (x: number, y: number) => {
@@ -535,21 +726,26 @@ export class GameplayDebugger {
         if (unopened) tpTo(unopened.pos.x, unopened.pos.y + 42);
       });
       body.querySelector('#dbg-tele-25')?.addEventListener('click', () => {
-        state.artifact.chargeProgress = Math.min(100, state.artifact.chargeProgress + 25);
-        if (state.artifact.chargeProgress >= 100) state.artifact.isCharged = true;
+        if (state.stageNumber === 1) {
+          const nextEv = state.worldEvents.find((ev) => !ev.isCompleted);
+          if (nextEv && sim.completeWorldEventForDev(nextEv.id)) {
+            this.refreshDynamicContent();
+          }
+        } else {
+          state.artifact.chargeProgress = Math.min(100, state.artifact.chargeProgress + 25);
+          if (state.artifact.chargeProgress >= 100) {
+            state.artifact.isCharged = true;
+            state.artifact.isTeleporterReady = true;
+            state.artifact.phase = 'unlocked_ready';
+          }
+        }
       });
       body.querySelector('#dbg-tele-100')?.addEventListener('click', () => {
-        state.artifact.chargeProgress = 100;
-        state.artifact.isCharged = true;
+        sim.forceUnlockArtifactForDev();
       });
       body.querySelector('#dbg-tele-reset')?.addEventListener('click', () => {
-        state.artifact.chargeProgress = 0;
-        state.artifact.isCharged = false;
-        state.artifact.isTeleporterReady = false;
-        state.artifact.isSummoning = false;
-        state.artifact.isBossSpawned = false;
-        state.artifact.isBossDefeated = false;
-        state.artifact.isCompleted = false;
+        state.resetArtifactProgression();
+        this.app.resetRegionalFreeze();
       });
       body.querySelector('#dbg-reset-pods')?.addEventListener('click', () => {
         state.pods.forEach((pod) => (pod.isOpened = false));
@@ -561,21 +757,47 @@ export class GameplayDebugger {
       });
       body.querySelectorAll<HTMLButtonElement>('.dbg-complete-ev').forEach((btn) => {
         btn.addEventListener('click', () => {
-          const ev = state.worldEvents.find((e) => e.id === btn.dataset.id);
-          if (ev) {
-            ev.chargeProgress = 100;
-            ev.isCompleted = true;
-            ev.isActive = false;
+          const evId = btn.dataset.id || '';
+          if (sim.completeWorldEventForDev(evId)) {
             this.refreshDynamicContent();
           }
         });
       });
 
+      body.querySelector('#dbg-vis-terrain')?.addEventListener('change', (ev) => {
+        this.showTerrainCollisionDebug = (ev.currentTarget as HTMLInputElement).checked;
+        this.syncTerrainDebugCache();
+      });
       body.querySelector('#dbg-vis-regions')?.addEventListener('change', (ev) => {
         this.showSpawnRegions = (ev.currentTarget as HTMLInputElement).checked;
       });
       body.querySelector('#dbg-vis-cols2')?.addEventListener('change', (ev) => {
         this.showCollisionBounds = (ev.currentTarget as HTMLInputElement).checked;
+      });
+      body.querySelector('#dbg-pin-seed')?.addEventListener('click', () => {
+        const raw = (body.querySelector('#dbg-layout-seed') as HTMLInputElement | null)?.value?.trim();
+        const parsed = raw ? Number(raw) : NaN;
+        if (Number.isFinite(parsed) && parsed > 0) {
+          sim.regenerateRuntimePodLayout(Math.floor(parsed));
+          this.app.rebuildStageVisualsFromState();
+          this.refreshDynamicContent();
+        }
+      });
+      body.querySelector('#dbg-clear-seed')?.addEventListener('click', () => {
+        state.pinnedLayoutSeed = null;
+        this.refreshDynamicContent();
+      });
+      body.querySelector('#dbg-regen-layout')?.addEventListener('click', () => {
+        const raw = (body.querySelector('#dbg-layout-seed') as HTMLInputElement | null)?.value?.trim();
+        const parsed = raw ? Number(raw) : NaN;
+        if (Number.isFinite(parsed) && parsed > 0) {
+          sim.regenerateRuntimePodLayout(Math.floor(parsed));
+        } else {
+          state.pinnedLayoutSeed = null;
+          sim.regenerateRuntimePodLayout(null);
+        }
+        this.app.rebuildStageVisualsFromState();
+        this.refreshDynamicContent();
       });
     }
 
@@ -583,15 +805,23 @@ export class GameplayDebugger {
   }
 
   private updateLiveReadouts(): void {
-    const state = this.app.getSimulation().state;
+    const sim = this.app.getSimulation();
+    const state = sim.state;
     const p = state.player;
     const pOut = this.rootEl?.querySelector('#dbg-player-readout');
     if (pOut) {
-      pOut.textContent = `HP: ${Math.round(p.health)}/${Math.round(p.calculatedStats.maxHealth)} • Shield: ${Math.round(p.energyShield)} • Biomass: ${p.currency} • Lvl: ${p.level} • Pos: (${Math.round(p.pos.x)}, ${Math.round(p.pos.y)}, z=${Math.round(p.z)})`;
+      const supCat = state.terrain.meshCollider
+        ? state.terrain.meshCollider.querySupport(p.pos.x, p.pos.y, p.z, 22).category || 'void'
+        : state.terrain.getElevation(p.pos.x, p.pos.y, p.z).isInWater
+          ? 'water'
+          : 'ground';
+      const waterTag = p.inWater ? 'WATER(-32%)' : 'LAND';
+      pOut.textContent = `HP: ${Math.round(p.health)}/${Math.round(p.calculatedStats.maxHealth)} • Shield: ${Math.round(p.energyShield)} • Biomass: ${p.currency} • Lvl: ${p.level} • Pos: (${Math.round(p.pos.x)}, ${Math.round(p.pos.y)}, z=${Math.round(p.z)}, gz=${Math.round(p.groundZ)}) • [${supCat}/${waterTag}] • AirJumps: ${p.airJumpsRemaining}/${p.maxAirJumps}`;
     }
     const eOut = this.rootEl?.querySelector('#dbg-enemy-readout');
     if (eOut) {
-      eOut.textContent = `Active Enemies: ${state.enemies.length} • Diff Tier: ${Math.floor(state.gameTime / 60)} • Projectiles: ${state.projectiles.length}`;
+      const diff = getDifficultyTier(state.gameTime);
+      eOut.textContent = `Active Enemies: ${state.enemies.length} • Diff Tier: ${diff.tierIndex} (${diff.tierDef.name}) • Projectiles: ${state.projectiles.length}`;
     }
     const bOut = this.rootEl?.querySelector('#dbg-boss-readout');
     if (bOut) {
@@ -602,6 +832,59 @@ export class GameplayDebugger {
         const d = Math.round(Math.hypot(boss.pos.x - p.pos.x, boss.pos.y - p.pos.y));
         bOut.textContent = `TITAN [${boss.titanState}] • HP: ${Math.round(boss.health)}/${Math.round(boss.maxHealth)} • Timer: ${(boss.titanTimer ?? 0).toFixed(2)}s • Dist: ${d}u`;
       }
+    }
+
+    const dirOut = this.rootEl?.querySelector('#dbg-director-readout');
+    if (dirOut) {
+      const d = sim.getCombatDirectorDiagnostics();
+      const fails = Object.entries(d.placementDiagnostics.failures)
+        .filter(([, cnt]) => cnt > 0)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 4)
+        .map(([k, v]) => `${k}:${v}`)
+        .join(', ');
+      dirOut.textContent = `Mode: ${d.mode} | Coeff: ${d.smoothThreat}x | Pop: ${d.activeExploration}/${d.hardCap} (soft ${d.softCap}, scripted ${d.activeScripted}) | Fast: ${d.fastCredits}cr (${d.fastTimer}s) | Slow: ${d.slowCredits}cr (${d.slowTimer}s) | Fails: ${fails || 'none'}`;
+    }
+
+    const scnOut = this.rootEl?.querySelector('#dbg-scene-readout');
+    if (scnOut) {
+      const r = state.sceneDirectorReport;
+      const opened = state.pods.filter((pod) => pod.isOpened).length;
+      scnOut.textContent = r
+        ? `Seed: ${r.layoutSeed}${state.pinnedLayoutSeed ? ' (PINNED)' : ''} | Credits: ${r.spent}/${r.budget} | Pods: ${state.pods.length} (opened ${opened}, target ${r.targetCount}) | Rejected: ${r.rejectedAttempts}`
+        : `Pods: ${state.pods.length} (opened ${opened}) | Layout Seed: ${state.layoutSeed}`;
+    }
+
+    const lootOut = this.rootEl?.querySelector('#dbg-loot-readout');
+    if (lootOut) {
+      const eligibleCnt = ALL_BUFF_IDS.filter((id) => isBuffEligibleForPlayer(id, p)).length;
+      const projW = getEffectiveBuffWeight(BUFF_REGISTRY.buff_extra_lmb_projectile, p);
+      const src = p.buffsBySource || { level: 0, pod: 0, elite: 0, event: 0 };
+      const timed = Object.values(p.activeTimedEffects || {})
+        .filter((e) => e && e.remaining > 0)
+        .map((e) => `${e!.name}:${e!.remaining.toFixed(1)}s`)
+        .join(', ');
+      const icds = Object.entries(p.timedEffectCooldowns || {})
+        .filter(([, rem]) => (rem ?? 0) > 0)
+        .map(([k, rem]) => `${k}:${(rem ?? 0).toFixed(1)}s`)
+        .join(', ');
+      lootOut.textContent = `Eligible: ${eligibleCnt} | Pity Streak: ${p.nonProjectileBuffCount} (ProjW=${projW}) | Sources L/P/E/Ev: ${src.level}/${src.pod}/${src.elite}/${src.event} | Active Timed: ${timed || 'none'} | ICDs: ${icds || 'ready'}`;
+    }
+
+    const progOut = this.rootEl?.querySelector('#dbg-prog-readout');
+    if (progOut) {
+      const labels: Record<string, string> = {
+        primal_totem: 'LMB',
+        secondary_totem: 'RMB',
+        dash_totem: 'Dash',
+        orbital_uplink: 'Ult'
+      };
+      const catStr = STAGE1_ENHANCEMENT_CATEGORIES.map(
+        (c) => `${state.completedEnhancementCategories.has(c) ? '✓' : '○'}${labels[c]}`
+      ).join(' ');
+      const dd = this.app.getDialogueDirector()?.getDebugInfo();
+      const artPhase = state.artifact?.phase || 'unknown';
+      progOut.textContent = `Modules (${state.completedEnhancementCategories.size}/4): [${catStr}] | Tower Phase: ${artPhase} | Dialogue Active: ${dd?.activeId || 'idle'} | Queue: [${dd?.queueIds?.join(', ') || 'empty'}]`;
     }
   }
 }

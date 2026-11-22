@@ -1,5 +1,6 @@
-import { Vector2 } from './types';
+import { DashEventPlatform, TerrainSurfaceCategory, Vector2 } from './types';
 import { SeededRandom } from './ItemDefs';
+import { MeshTerrainCollider, SupportQueryResult } from './MeshTerrainCollider';
 
 export interface PlateauDef {
   id: string;
@@ -61,6 +62,9 @@ export interface TerrainSample {
   height: number;
   surfaceType: 'valley' | 'plateau' | 'ramp' | 'chasm' | 'bridge';
   isWalkable: boolean;
+  isInWater?: boolean;
+  category?: TerrainSurfaceCategory;
+  sourceTag?: string;
 }
 
 export class TerrainSystem {
@@ -93,6 +97,7 @@ export class TerrainSystem {
   public isCustomTestMap: boolean = false;
   public testSpawnPos: Vector2 | null = null;
   public testBossSpawnPos: Vector2 | null = null;
+  public testRedCrystalMouthPos: { x: number; y: number; z: number } | null = null;
   public testWalkableBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
   public testCircularBounds: { cx: number; cz: number; radius: number } | null = null;
   public testTowerStepBounds: { minX: number; maxX: number; minY: number; maxY: number } | null = null;
@@ -100,6 +105,11 @@ export class TerrainSystem {
   public testEnemySpawnCells: number[] = [];
   public testWaterMask: Uint8Array | null = null;
   public allowTestMapNarrative: boolean = false;
+  public testFloraAnchors: Array<{ x: number; y: number; z: number }> = [];
+  public meshCollider: MeshTerrainCollider | null = null;
+  public testDoubleJumpPos: { x: number; y: number; z?: number } | null = null;
+  public testShipBox: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } | null = null;
+  public activeDashPlatforms: DashEventPlatform[] = [];
 
   constructor(seed: number = 133799) {
     this.rebuildWithSeed(seed);
@@ -201,12 +211,24 @@ export class TerrainSystem {
       enemySpawnMask?: Uint8Array | null;
       waterMask?: Uint8Array | null;
       allowTestMapNarrative?: boolean;
+      meshCollider?: MeshTerrainCollider | null;
+      worldWidth?: number;
+      worldHeight?: number;
+      testDoubleJumpPos?: { x: number; y: number; z?: number } | null;
+      testRedCrystalMouthPos?: { x: number; y: number; z: number } | null;
+      testShipBox?: { minX: number; maxX: number; minY: number; maxY: number; minZ: number; maxZ: number } | null;
     }
   ): void {
     if (!grid) {
       this.isCustomTestMap = false;
+      this.worldWidth = 3600;
+      this.worldHeight = 3600;
+      this.meshCollider = null;
+      this.testDoubleJumpPos = null;
+      this.testShipBox = null;
       this.testSpawnPos = null;
       this.testBossSpawnPos = null;
+      this.testRedCrystalMouthPos = null;
       this.testWalkableBounds = null;
       this.testCircularBounds = null;
       this.testTowerStepBounds = null;
@@ -214,12 +236,19 @@ export class TerrainSystem {
       this.testEnemySpawnCells = [];
       this.testWaterMask = null;
       this.allowTestMapNarrative = false;
+      this.testFloraAnchors = [];
       this.rebuildWithSeed(this.seed);
       return;
     }
     this.isCustomTestMap = true;
-    this.testSpawnPos = spawnPos ? { ...spawnPos } : { x: 1800, y: 1800 };
+    this.worldWidth = options?.worldWidth ?? 3600;
+    this.worldHeight = options?.worldHeight ?? 3600;
+    this.meshCollider = options?.meshCollider ?? null;
+    this.testDoubleJumpPos = options?.testDoubleJumpPos ? { ...options.testDoubleJumpPos } : null;
+    this.testShipBox = options?.testShipBox ? { ...options.testShipBox } : null;
+    this.testSpawnPos = spawnPos ? { ...spawnPos } : { x: this.worldWidth * 0.5, y: this.worldHeight * 0.5 };
     this.testBossSpawnPos = bossSpawnPos ? { ...bossSpawnPos } : { x: 340, y: 440 };
+    this.testRedCrystalMouthPos = options?.testRedCrystalMouthPos ? { ...options.testRedCrystalMouthPos } : null;
     this.testWalkableBounds = walkableBounds ? { ...walkableBounds } : null;
     this.testCircularBounds = circularBounds ? { ...circularBounds } : null;
     this.testTowerStepBounds = options?.towerStepBounds ? { ...options.towerStepBounds } : null;
@@ -237,7 +266,9 @@ export class TerrainSystem {
       this.heightGrid = new Float32Array(grid.length);
     }
     this.heightGrid.set(grid);
-    this.updateNavNodes();
+    if (!this.meshCollider) {
+      this.updateNavNodes();
+    }
   }
 
   public isInTowerStepZone(wx: number, wy: number): boolean {
@@ -246,16 +277,16 @@ export class TerrainSystem {
     return wx >= b.minX && wx <= b.maxX && wy >= b.minY && wy <= b.maxY;
   }
 
-  public getStepUpLimitAt(wx: number, wy: number, targetHeight?: number): number {
-    if (this.isInTowerStepZone(wx, wy)) {
-      if (targetHeight === undefined || targetHeight >= 145) {
-        return 142.0;
-      }
-    }
-    return this.isCustomTestMap ? 18.0 : 14.0;
+  public getStepUpLimitAt(_wx: number, _wy: number, _targetHeight?: number): number {
+    // Knee/waist step height for 2x-scaled characters (~104u tall): walks smoothly over slopes,
+    // bridges, and potholes without ever wall-teleporting up vertical cliffs or walls.
+    return this.isCustomTestMap ? 56.0 : 28.0;
   }
 
   public isPointValidEnemySpawn(wx: number, wy: number): boolean {
+    if (this.meshCollider) {
+      return this.meshCollider.isPointValidEnemySpawn(wx, wy);
+    }
     if (!this.isInsidePlayableBounds(wx, wy, 40)) return false;
     if (this.testEnemySpawnMask) {
       const gx = Math.max(0, Math.min(360, Math.round(wx / 10)));
@@ -266,7 +297,23 @@ export class TerrainSystem {
   }
 
   public isPointNearWater(wx: number, wy: number): boolean {
-    if (!this.testWaterMask) return false;
+    if (this.meshCollider) {
+      for (let ox = -24; ox <= 24; ox += 24) {
+        for (let oy = -24; oy <= 24; oy += 24) {
+          const s = this.meshCollider.querySupport(wx + ox, wy + oy, 1e6, 22);
+          if (s.hit && (s.isInWater || s.category === 'water')) return true;
+        }
+      }
+      return false;
+    }
+    if (!this.testWaterMask) {
+      for (let ox = -24; ox <= 24; ox += 24) {
+        for (let oy = -24; oy <= 24; oy += 24) {
+          if (this.calculateHeight(wx + ox, wy + oy) <= 5.5) return true;
+        }
+      }
+      return false;
+    }
     const gx = Math.max(0, Math.min(360, Math.round(wx / 10)));
     const gz = Math.max(0, Math.min(360, Math.round(wy / 10)));
     for (let dz = -2; dz <= 2; dz++) {
@@ -285,13 +332,16 @@ export class TerrainSystem {
     this.isCustomTestMap = false;
     this.testSpawnPos = null;
     this.testBossSpawnPos = null;
+    this.testRedCrystalMouthPos = null;
     this.testWalkableBounds = null;
     this.testCircularBounds = null;
     this.testTowerStepBounds = null;
+    this.testShipBox = null;
     this.testEnemySpawnMask = null;
     this.testEnemySpawnCells = [];
     this.testWaterMask = null;
     this.allowTestMapNarrative = false;
+    this.testFloraAnchors = [];
     this.seed = seed;
     const rng = new SeededRandom(seed);
 
@@ -374,11 +424,17 @@ export class TerrainSystem {
    * Runs in ~3ns instead of computing 50+ lines of transcendental trigonometry.
    */
   public calculateHeight(wx: number, wy: number): number {
+    if (this.meshCollider) {
+      const sup = this.meshCollider.querySupport(wx, wy, 1e6, 22);
+      if (sup.hit) return sup.height;
+    }
     if (!this.heightGrid || this.heightGrid.length === 0) {
       return this.calculateRawHeight(wx, wy);
     }
-    const cx = Math.max(0, Math.min(3600, wx)) * 0.1;
-    const cy = Math.max(0, Math.min(3600, wy)) * 0.1;
+    const maxW = Math.max(1, this.worldWidth);
+    const maxH = Math.max(1, this.worldHeight);
+    const cx = (Math.max(0, Math.min(maxW, wx)) / maxW) * 360;
+    const cy = (Math.max(0, Math.min(maxH, wy)) / maxH) * 360;
     const x0 = Math.floor(cx);
     const y0 = Math.floor(cy);
     const x1 = Math.min(360, x0 + 1);
@@ -670,30 +726,74 @@ export class TerrainSystem {
   /**
    * Fast query for the ground elevation and surface type at (wx, wy)
    */
-  public getElevation(wx: number, wy: number): TerrainSample {
-    const height = this.calculateHeight(wx, wy);
-
-    let surfaceType: 'valley' | 'plateau' | 'ramp' | 'chasm' | 'bridge' = 'valley';
-    if (height > 400) {
-      surfaceType = 'plateau'; // Upper Summit Plateau / Overseer Altar
-    } else if (height > 180) {
-      surfaceType = 'plateau'; // Middle Combat Plateau
-    } else if (height < 6) {
-      surfaceType = 'chasm'; // Valley riverbed depression
+  public getElevation(wx: number, wy: number, entityZ?: number, stepUpLimit?: number): TerrainSample {
+    let baseSample: TerrainSample;
+    if (this.meshCollider) {
+      const sup: SupportQueryResult = this.meshCollider.querySupport(wx, wy, entityZ ?? 1e6, stepUpLimit ?? 22);
+      const st: 'valley' | 'plateau' | 'ramp' | 'chasm' | 'bridge' =
+        sup.category === 'bridge' ? 'bridge'
+        : sup.category === 'water' ? 'chasm'
+        : sup.category === 'tower_ledge' || sup.category === 'ship_walkable' ? 'plateau'
+        : 'valley';
+      baseSample = {
+        height: sup.height,
+        surfaceType: st,
+        isWalkable: sup.isWalkable && this.isInsidePlayableBounds(wx, wy, 0),
+        isInWater: sup.isInWater,
+        category: sup.category,
+        sourceTag: sup.sourceTag
+      };
     } else {
-      surfaceType = 'valley'; // Lower Valley floor & foothills
+      const height = this.calculateHeight(wx, wy);
+
+      let surfaceType: 'valley' | 'plateau' | 'ramp' | 'chasm' | 'bridge' = 'valley';
+      if (height > 400) {
+        surfaceType = 'plateau'; // Upper Summit Plateau / Overseer Altar
+      } else if (height > 180) {
+        surfaceType = 'plateau'; // Middle Combat Plateau
+      } else if (height < 6) {
+        surfaceType = 'chasm'; // Valley riverbed depression
+      } else {
+        surfaceType = 'valley'; // Lower Valley floor & foothills
+      }
+
+      let isWalkable = height < 750; // Walkable everywhere except insurmountable boundary mountain peaks
+      if (this.isCustomTestMap) {
+        isWalkable = this.isInsidePlayableBounds(wx, wy, 0);
+      }
+
+      baseSample = {
+        height,
+        surfaceType,
+        isWalkable
+      };
     }
 
-    let isWalkable = height < 750; // Walkable everywhere except insurmountable boundary mountain peaks
-    if (this.isCustomTestMap) {
-      isWalkable = this.isInsidePlayableBounds(wx, wy, 0);
+    // One-way jump-through support for active Dash Event platforms (never blocks ground or underside paths)
+    if (this.activeDashPlatforms.length > 0 && entityZ !== undefined && entityZ < 1e5) {
+      let bestPlatZ = baseSample.height;
+      let hitPlatform = false;
+      for (let i = 0; i < this.activeDashPlatforms.length; i++) {
+        const plat = this.activeDashPlatforms[i];
+        if (plat.z <= bestPlatZ) continue;
+        if (entityZ >= plat.z - 16 && Math.hypot(wx - plat.x, wy - plat.y) <= plat.radius) {
+          bestPlatZ = plat.z;
+          hitPlatform = true;
+        }
+      }
+      if (hitPlatform) {
+        return {
+          height: bestPlatZ,
+          surfaceType: 'bridge',
+          isWalkable: true,
+          isInWater: false,
+          category: 'bridge',
+          sourceTag: 'event:dash_platform'
+        };
+      }
     }
 
-    return {
-      height,
-      surfaceType,
-      isWalkable
-    };
+    return baseSample;
   }
 
   /**
@@ -715,6 +815,9 @@ export class TerrainSystem {
    * Checks whether a ground path between from and to is directly walkable without scaling steep cliffs.
    */
   public isDirectlyTraversable(from: Vector2, to: Vector2, isAirborne: boolean = false): boolean {
+    if (this.meshCollider) {
+      return this.meshCollider.isDirectlyTraversable(from, to, isAirborne);
+    }
     if (this.isCustomTestMap) {
       if (!this.isInsidePlayableBounds(from.x, from.y, 0) || !this.isInsidePlayableBounds(to.x, to.y, 0)) {
         return false;
@@ -770,6 +873,9 @@ export class TerrainSystem {
     from: { x: number; y: number; z: number },
     to: { x: number; y: number; z: number }
   ): boolean {
+    if (this.meshCollider) {
+      return !this.meshCollider.raycast3D(from, to, true).hit;
+    }
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     const dz = to.z - from.z;
@@ -1183,8 +1289,13 @@ export class TerrainSystem {
   public getNavWaypointInfo(
     fromPos: Vector2,
     targetPos: Vector2,
-    isAirborne: boolean = false
+    isAirborne: boolean = false,
+    fromZ?: number,
+    toZ?: number
   ): NavWaypointResult {
+    if (this.meshCollider) {
+      return this.meshCollider.findNextNavWaypoint(fromPos, targetPos, fromZ, toZ, isAirborne);
+    }
     if (isAirborne) {
       return {
         waypoint: targetPos,
@@ -1367,6 +1478,10 @@ export class TerrainSystem {
    * into an impassable steep cliff or above step-up limits.
    */
   public pushOutOfSteepTerrain(pos: Vector2, z: number, radius: number): boolean {
+    if (this.meshCollider) {
+      this.meshCollider.pushOutOfWalls(pos, z, radius, 90, this.getStepUpLimitAt(pos.x, pos.y));
+      return true;
+    }
     const inTowerZone = this.isInTowerStepZone(pos.x, pos.y);
     const maxWalkSlope = this.isCustomTestMap ? 1.05 : 0.84;
     const effectiveRadius = inTowerZone ? Math.min(radius, 6) : radius;
@@ -1418,6 +1533,33 @@ export class TerrainSystem {
     isAirborne: boolean,
     colliderRadius: number = 18
   ): { allowed: boolean; newPos: Vector2; blockedByCliff: boolean; surfaceNormal: Vector2 } {
+    if (this.meshCollider) {
+      const dx = to.x - from.x;
+      const dy = to.y - from.y;
+      const dist = Math.hypot(dx, dy);
+      if (dist < 0.0001) {
+        return { allowed: true, newPos: to, blockedByCliff: false, surfaceNormal: { x: 0, y: 0 } };
+      }
+      const numSteps = Math.max(1, Math.ceil(dist / 10));
+      let curPos = { x: from.x, y: from.y };
+      const stepLimit = isAirborne ? 56 : this.getStepUpLimitAt(from.x, from.y);
+      for (let s = 1; s <= numSteps; s++) {
+        const t = s / numSteps;
+        const nextPt = { x: from.x + dx * t, y: from.y + dy * t };
+        const res = this.meshCollider.checkHorizontalMove(curPos, nextPt, currentZ, colliderRadius, 90, stepLimit, isAirborne);
+        if (!res.allowed) {
+          return {
+            allowed: false,
+            newPos: curPos,
+            blockedByCliff: true,
+            surfaceNormal: res.surfaceNormal
+          };
+        }
+        curPos = res.newPos;
+      }
+      return { allowed: true, newPos: curPos, blockedByCliff: false, surfaceNormal: { x: 0, y: 0 } };
+    }
+
     // 1. World / Custom Test Map Boundary bounds (strictly impassable edges with wall-sliding normal)
     const boundaryCheck = this.clampToPlayableBounds(to, 50);
     if (boundaryCheck.clamped) {

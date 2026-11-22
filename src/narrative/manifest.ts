@@ -1,4 +1,4 @@
-import { Conversation, DialogueManifest, DialogueTurn, PacingConfig } from './types';
+import { DialogueManifest, DialogueTurn, PacingConfig } from './types';
 import { PREREQUISITE_REGISTRY, RELEVANCE_REGISTRY, isKnownRule } from './predicates';
 
 export const DEFAULT_PACING_CONFIG: PacingConfig = {

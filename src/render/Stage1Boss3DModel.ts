@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Enemy } from '../sim/types';
+import { EnemyState } from '../sim/types';
 import { STAGE1_BOSS_CONFIG } from '../sim/Stage1BossConfig';
 
 export interface DorsalTentacleEntry {
@@ -22,15 +22,17 @@ export interface DorsalTentacleEntry {
 }
 
 /**
- * Procedural Sculpted 3D Articulated Rig for the Stage 1 Titan Boss (Colossal Bio-Cultivator).
+ * Sculpted 3D Articulated Rig for the Stage 1 Titan Boss (Colossal Bio-Cultivator).
  *
- * Anatomically reconstructed from the canonical Stage 1 Boss design:
- * - Hunched kaiju silhouette (~420+ units tall with full 10-tentacle dorsal crown)
- * - Sculpted iridescent lavender-bone carapace crest, hinged mandibles & glowing furnace throat
- * - Abyssal violet chitinous torso with pulsing magenta bioluminescent core fissures
- * - Massive knuckle-walking forelimbs with swept 3-blade chitinous gauntlets
- * - Planted 3-toed legs with synced stomp callbacks for footstep VFX & camera rumble
- * - 10 smooth tapered 3D dorsal tentacles with razor stingers that hold & unleash the 10 elemental orbs
+ * Anatomically modeled after the 4-angle reference sprite sheets
+ * (boss_walk_front/back/left, boss_laser_front, boss_elemental_front):
+ * - Low, wide, forward-hunched kaiju stance with feet planted at Y = 0
+ * - Swept diamond V-crest skull tucked low between shoulders (cranes upward to roar on laser)
+ * - Stacked glowing magenta sternum chevrons & upper-back cascading bio-crystal petal mantle
+ * - Massive wide-splayed curved crescent scythe-gauntlets with serrated bone-lavender outer blades
+ *   and glowing magenta inner forearm energy fissures
+ * - Flared bone-lavender shin greaves, V-shaped pelvic armor, and glowing shoulder/thigh bio-sacs
+ * - 10 whip-thin sinuous dorsal tendrils fanning into a radial halo for the 10 elemental orbs
  */
 export class Stage1Boss3DModel {
   public readonly group: THREE.Group;
@@ -61,6 +63,7 @@ export class Stage1Boss3DModel {
   private readonly carapaceMat: THREE.MeshStandardMaterial;
   private readonly bladeEdgeMat: THREE.MeshStandardMaterial;
   private readonly coreGlowMat: THREE.MeshStandardMaterial;
+  private readonly podGlowMat: THREE.MeshStandardMaterial;
   private readonly throatGlowMesh: THREE.Mesh;
   private readonly eyeGlowMat: THREE.MeshBasicMaterial;
   private readonly ownedGeos: THREE.BufferGeometry[] = [];
@@ -86,12 +89,13 @@ export class Stage1Boss3DModel {
   private readonly scratchCtrl1 = new THREE.Vector3();
   private readonly scratchCtrl2 = new THREE.Vector3();
   private readonly scratchDir = new THREE.Vector3();
-  private readonly scratchColor = new THREE.Color();
+  private readonly scratchForward = new THREE.Vector3(0, 0, 1);
 
   constructor(tentacleSkinTex: THREE.Texture, tentacleEmissiveTex: THREE.Texture) {
     this.group = new THREE.Group();
     this.group.name = 'titan_3d_boss_group';
     this.group.userData = { isTitanPart: true };
+    this.group.scale.setScalar(2.0);
 
     this.rootGroup = new THREE.Group();
     this.group.add(this.rootGroup);
@@ -101,58 +105,68 @@ export class Stage1Boss3DModel {
     this.fleshMat = new THREE.MeshStandardMaterial({
       map: fleshMap,
       emissiveMap: fleshEmissive,
-      emissive: new THREE.Color(0xd946ef),
-      emissiveIntensity: 0.72,
-      roughness: 0.34,
-      metalness: 0.22
+      emissive: new THREE.Color(0xc026d3),
+      emissiveIntensity: 0.22,
+      roughness: 0.54,
+      metalness: 0.12
     });
 
     this.carapaceMat = new THREE.MeshStandardMaterial({
+      color: 0xd8c2dc,
       map: carapaceMap,
       bumpMap: carapaceBump,
-      bumpScale: 2.2,
-      emissive: new THREE.Color(0x581c87),
-      emissiveIntensity: 0.16,
-      roughness: 0.36,
-      metalness: 0.28
+      bumpScale: 1.05,
+      emissive: new THREE.Color(0x3b1750),
+      emissiveIntensity: 0.12,
+      roughness: 0.48,
+      metalness: 0.16
     });
 
     this.bladeEdgeMat = new THREE.MeshStandardMaterial({
-      color: 0xd8b4fe,
-      emissive: new THREE.Color(0xc026d3),
-      emissiveIntensity: 0.55,
-      roughness: 0.24,
-      metalness: 0.35
+      color: 0xe9d5c0,
+      emissive: new THREE.Color(0x6b21a8),
+      emissiveIntensity: 0.18,
+      roughness: 0.36,
+      metalness: 0.22
     });
 
     this.coreGlowMat = new THREE.MeshStandardMaterial({
-      color: 0xf5d0fe,
+      color: 0xf0abfc,
       emissive: new THREE.Color(0xe879f9),
-      emissiveIntensity: 1.85,
-      roughness: 0.15,
-      metalness: 0.1
+      emissiveIntensity: 1.55,
+      roughness: 0.16,
+      metalness: 0.06
     });
 
+    this.podGlowMat = new THREE.MeshStandardMaterial({
+      color: 0xe879f9,
+      emissive: new THREE.Color(0xc026d3),
+      emissiveIntensity: 1.45,
+      roughness: 0.20,
+      metalness: 0.10
+    });
+
+    // Fierce glowing magenta-violet eye slits matching boss_walk_front / boss_walk_left
     this.eyeGlowMat = new THREE.MeshBasicMaterial({
-      color: 0xfef08a
+      color: 0xf0abfc
     });
 
     const tentacleMat = new THREE.MeshStandardMaterial({
       map: tentacleSkinTex,
       emissiveMap: tentacleEmissiveTex,
-      emissive: new THREE.Color(0xd946ef),
-      emissiveIntensity: 0.9,
-      roughness: 0.28,
-      metalness: 0.35,
+      emissive: new THREE.Color(0xc026d3),
+      emissiveIntensity: 0.85,
+      roughness: 0.30,
+      metalness: 0.26,
       side: THREE.DoubleSide
     });
 
-    const stingerMat = new THREE.MeshStandardMaterial({
-      color: 0x9f1239,
-      emissive: new THREE.Color(0xf43f5e),
-      emissiveIntensity: 1.05,
+    const whipTipMat = new THREE.MeshStandardMaterial({
+      color: 0xc084fc,
+      emissive: new THREE.Color(0xe879f9),
+      emissiveIntensity: 1.15,
       roughness: 0.22,
-      metalness: 0.42
+      metalness: 0.2
     });
 
     this.ownedMats.push(
@@ -160,75 +174,149 @@ export class Stage1Boss3DModel {
       this.carapaceMat,
       this.bladeEdgeMat,
       this.coreGlowMat,
+      this.podGlowMat,
       this.eyeGlowMat,
       tentacleMat,
-      stingerMat
+      whipTipMat
     );
 
     // ------------------------------------------------------------------
-    // SKELETAL HIERARCHY (Feet at Y = 0, Shoulder Peak ~295, Tentacles ~425)
+    // SKELETAL HIERARCHY (Feet soles at Y = 0, Shoulder crest ~265, Tentacles ~410)
     // Facing +Z in local space
     // ------------------------------------------------------------------
     this.pelvis = new THREE.Group();
-    this.pelvis.position.set(0, 122, -6);
+    this.pelvis.position.set(0, 114, -8);
     this.rootGroup.add(this.pelvis);
 
-    const pelvisCore = this.addSculptedPart(this.pelvis, this.createTaperedOrganicGeo(46, 36, 48, 12, 8, 1.15, 0.92), this.fleshMat, [0, 2, 0]);
+    // Muscular tapered waist & hip core
+    const pelvisCore = this.addSculptedPart(
+      this.pelvis,
+      this.createTaperedOrganicGeo(34, 28, 48, 14, 8, 1.18, 0.92),
+      this.fleshMat,
+      [0, 6, 0]
+    );
     pelvisCore.castShadow = false;
 
-    // Armored groin & hip skirt plates
-    this.addSculptedPart(this.pelvis, this.createCrestPlateGeo(36, 44, 14), this.carapaceMat, [0, -8, 28], [0.22, 0, 0]);
+    // Sleek dark-chitin front groin cusp (subtle on front silhouette) + prominent Y/V pelvic armor on the BACK (boss_walk_back)
+    this.addSculptedPart(
+      this.pelvis,
+      this.createPelvisShieldGeo(24, 34, 10),
+      this.carapaceMat,
+      [0, -2, 22],
+      [0.16, 0, 0]
+    );
+    this.addSculptedPart(
+      this.pelvis,
+      this.createPelvisShieldGeo(48, 60, 16),
+      this.carapaceMat,
+      [0, 4, -24],
+      [-0.24, Math.PI, 0]
+    );
     for (const side of [-1, 1]) {
-      this.addSculptedPart(this.pelvis, this.createCrestPlateGeo(28, 42, 12), this.carapaceMat, [side * 42, 6, 8], [0.1, side * 0.45, -side * 0.35]);
+      this.addSculptedPart(
+        this.pelvis,
+        this.createCurvedFinGeo(22, 44, 10, 0.22),
+        this.carapaceMat,
+        [side * 38, 6, 2],
+        [0.08, side * 0.56, -side * 0.42]
+      );
     }
 
-    // Chest / Hunched Torso
+    // ------------------------------------------------------------------
+    // HUNCHED MUSCULAR CHEST & BIOLUMINESCENT MANTLE
+    // ------------------------------------------------------------------
     this.chestPivot = new THREE.Group();
-    this.chestPivot.position.set(0, 24, 6);
+    this.chestPivot.position.set(0, 22, 6);
     this.pelvis.add(this.chestPivot);
 
-    // Upper torso muscular vault
+    // Broad V-tapered upper torso muscular vault (arched trapezius dome — zero flat cylinder lid!)
     this.addSculptedPart(
       this.chestPivot,
-      this.createTaperedOrganicGeo(44, 68, 108, 14, 10, 1.32, 0.95),
+      this.createTaperedOrganicGeo(34, 56, 114, 16, 12, 1.16, 0.88, true),
       this.fleshMat,
-      [0, 56, 8],
-      [0.24, 0, 0]
+      [0, 52, 8],
+      [0.32, 0, 0]
     );
 
-    // Glowing Bio-Core Sternum Fissures (chevron chest reactor from spritesheet)
-    for (let v = 0; v < 4; v++) {
-      const yOff = 24 + v * 17;
-      const w = 14 + v * 5.5;
-      const zOff = 52 + v * 4.5;
-      this.addSculptedPart(this.chestPivot, this.trackGeo(new THREE.OctahedronGeometry(w * 0.42, 1)), this.coreGlowMat, [0, yOff, zOff], [0.15, 0, Math.PI * 0.25], [1.4, 0.65, 0.5]);
+    // Sculpted deltoid/pectoral musculature flanking the center sternum fissure
+    for (const side of [-1, 1]) {
+      this.addSculptedPart(
+        this.chestPivot,
+        this.createTaperedOrganicGeo(20, 32, 84, 12, 8, 1.08, 0.90, true),
+        this.fleshMat,
+        [side * 38, 56, 10],
+        [0.26, side * 0.18, -side * 0.24]
+      );
+    }
+
+    // Stacked Glowing Magenta Sternum Chevrons (sleek glowing V-ribs embedded flush on chest!)
+    for (let v = 0; v < 5; v++) {
+      const t = v / 4;
+      const yOff = 18 + v * 15.5;
+      const zOff = 44 + v * 7.8;
+      const width = 12 + t * 14;
+      // Central glowing rib nodule
+      this.addSculptedPart(
+        this.chestPivot,
+        this.createPetalPodGeo(width * 0.36, 13 + t * 4, 6),
+        this.coreGlowMat,
+        [0, yOff, zOff],
+        [0.26, 0, Math.PI]
+      );
+      // Angled flanking chevron energy slits
       for (const side of [-1, 1]) {
         this.addSculptedPart(
           this.chestPivot,
-          this.createCrestPlateGeo(18, 10, 8),
+          this.createPetalPodGeo(5.5 + t * 1.8, 22 + t * 12, 5),
           this.coreGlowMat,
-          [side * (16 + v * 4), yOff + 4, zOff - 4],
-          [0.2, side * 0.3, side * 0.48]
+          [side * (12 + t * 15), yOff + 5, zOff - 1],
+          [0.28, side * 0.35, -side * 0.98]
         );
       }
     }
 
-    // Broad Overhanging Back Carapace & Pauldron Crest Ridge
+    // Broad Overhanging Spine Carapace + Serrated Bone-Lavender Back Plates
     this.addSculptedPart(
       this.chestPivot,
-      this.createCrestPlateGeo(96, 118, 34),
+      this.createPelvisShieldGeo(98, 104, 28),
       this.carapaceMat,
-      [0, 84, -22],
-      [0.48, 0, 0]
+      [0, 74, -22],
+      [0.54, Math.PI, 0]
     );
     for (let sp = 0; sp < 4; sp++) {
-      const sScale = 1.0 - sp * 0.16;
+      const sScale = 1.0 - sp * 0.14;
       this.addSculptedPart(
         this.chestPivot,
-        this.createHornSpikeGeo(14 * sScale, 54 * sScale),
+        this.createCurvedFinGeo(14 * sScale, 50 * sScale, 10 * sScale, 0.35),
         this.carapaceMat,
-        [0, 118 - sp * 24, -46 - sp * 8],
-        [-0.55 - sp * 0.18, 0, 0]
+        [0, 106 - sp * 20, -34 - sp * 10],
+        [-0.45 - sp * 0.16, Math.PI * 0.5, 0]
+      );
+    }
+
+    // Iconic Upper-Back & Shoulder Cascading Bio-Crystal Petal Mantle (from boss_walk_back.png!)
+    const mantleRows: Array<{ x: number; y: number; z: number; rx: number; ry: number; rz: number; s: number }> = [
+      // Center spine petal cluster
+      { x: 0, y: 102, z: -26, rx: -0.35, ry: Math.PI, rz: Math.PI, s: 1.15 },
+      { x: -16, y: 92, z: -28, rx: -0.32, ry: Math.PI - 0.18, rz: Math.PI + 0.22, s: 1.05 },
+      { x: 16, y: 92, z: -28, rx: -0.32, ry: Math.PI + 0.18, rz: Math.PI - 0.22, s: 1.05 },
+      { x: -30, y: 78, z: -26, rx: -0.25, ry: Math.PI - 0.3, rz: Math.PI + 0.36, s: 0.95 },
+      { x: 30, y: 78, z: -26, rx: -0.25, ry: Math.PI + 0.3, rz: Math.PI - 0.36, s: 0.95 },
+      { x: -12, y: 72, z: -30, rx: -0.22, ry: Math.PI - 0.1, rz: Math.PI + 0.12, s: 0.9 },
+      { x: 12, y: 72, z: -30, rx: -0.22, ry: Math.PI + 0.1, rz: Math.PI - 0.12, s: 0.9 },
+      // Shoulder-slope glowing violet bio-pods (visible in back & side views)
+      { x: -52, y: 90, z: -12, rx: -0.1, ry: -0.75, rz: 0.85, s: 1.0 },
+      { x: 52, y: 90, z: -12, rx: -0.1, ry: 0.75, rz: -0.85, s: 1.0 },
+      { x: -72, y: 78, z: -4, rx: 0.05, ry: -1.05, rz: 1.02, s: 0.92 },
+      { x: 72, y: 78, z: -4, rx: 0.05, ry: 1.05, rz: -1.02, s: 0.92 }
+    ];
+    for (const pod of mantleRows) {
+      this.addSculptedPart(
+        this.chestPivot,
+        this.createPetalPodGeo(16 * pod.s, 36 * pod.s, 11 * pod.s),
+        this.podGlowMat,
+        [pod.x, pod.y, pod.z],
+        [pod.rx, pod.ry, pod.rz]
       );
     }
 
@@ -237,121 +325,183 @@ export class Stage1Boss3DModel {
     this.dorsalSocketAnchor.position.set(0, 96, -12);
     this.chestPivot.add(this.dorsalSocketAnchor);
 
-    // Massive Spiked Shoulder Pauldrons
-    for (const side of [-1, 1]) {
-      this.addSculptedPart(this.chestPivot, this.createCrestPlateGeo(52, 62, 24), this.carapaceMat, [side * 76, 86, 4], [0.22, -side * 0.35, -side * 0.55]);
-      this.addSculptedPart(this.chestPivot, this.createHornSpikeGeo(16, 68), this.carapaceMat, [side * 96, 112, -2], [0.15, 0, -side * 0.72]);
-      this.addSculptedPart(this.chestPivot, this.createHornSpikeGeo(12, 46), this.bladeEdgeMat, [side * 108, 86, 18], [0.35, 0, -side * 0.92]);
+    // Broad Curved Shoulder Mantle Cowl (seamless arch from upper torso onto deltoids, no needle quills!)
+    for (const side of [-1, 1] as const) {
+      this.addSculptedPart(
+        this.chestPivot,
+        this.createPauldronShellGeo(52, 68, 22, side),
+        this.carapaceMat,
+        [side * 64, 84, 14],
+        [0.16, -side * 0.30, -side * 0.46]
+      );
+      this.addSculptedPart(
+        this.chestPivot,
+        this.createCurvedFinGeo(26, 62, 16, 0.34),
+        this.carapaceMat,
+        [side * 88, 94, 6],
+        [0.22, side * 0.32, -side * 0.78]
+      );
     }
 
     // ------------------------------------------------------------------
-    // NECK, CROWNED HEAD SHIELD & HINGED ROARING JAWS
+    // LOW-TUCKED V-CREST SKULL & HINGED LASER FURNACE JAW
     // ------------------------------------------------------------------
     this.neckPivot = new THREE.Group();
-    this.neckPivot.position.set(0, 102, 46);
+    // Tucked low & forward between shoulders (raises on laser_sweep!)
+    this.neckPivot.position.set(0, 68, 52);
     this.chestPivot.add(this.neckPivot);
 
     this.addSculptedPart(
       this.neckPivot,
-      this.createTaperedOrganicGeo(34, 28, 44, 12, 6, 1.05, 1.1),
+      this.createTaperedOrganicGeo(30, 24, 38, 12, 6, 1.04, 1.0, true),
       this.fleshMat,
-      [0, 14, 14],
-      [0.42, 0, 0]
+      [0, 8, 10],
+      [0.54, 0, 0]
     );
 
     this.headGroup = new THREE.Group();
-    this.headGroup.position.set(0, 26, 26);
+    this.headGroup.position.set(0, 14, 28);
     this.neckPivot.add(this.headGroup);
 
-    // Tall Diamond/Crown Head Shield (matches boss_walk_front sharp peaked crest)
-    this.addSculptedPart(this.headGroup, this.createCrestPlateGeo(48, 86, 28), this.carapaceMat, [0, 32, 8], [-0.26, 0, 0]);
-    // Flanking Cheek Blades & Crown Spires
+    // Broad V-Crown Diamond Skull Shield + Layered Brow/Cheek Crest Fins
+    this.addSculptedPart(
+      this.headGroup,
+      this.createHeadCrestGeo(),
+      this.carapaceMat,
+      [0, 14, 0],
+      [0.08, 0, 0]
+    );
+
+    // Swept-back Brow Horns & Jagged Cheek Blades fanning wide like boss_walk_front
     for (const side of [-1, 1]) {
-      this.addSculptedPart(this.headGroup, this.createCrestPlateGeo(24, 62, 16), this.carapaceMat, [side * 24, 16, 14], [0.12, side * 0.42, -side * 0.25]);
-      this.addSculptedPart(this.headGroup, this.createHornSpikeGeo(11, 56), this.carapaceMat, [side * 20, 48, -6], [-0.35, 0, -side * 0.28]);
-      // Fierce Slit Bio-Optics
-      this.addSculptedPart(this.headGroup, this.trackGeo(new THREE.BoxGeometry(10, 3.2, 6)), this.eyeGlowMat, [side * 13, 10, 34], [0.1, side * 0.35, side * 0.42]);
+      this.addSculptedPart(
+        this.headGroup,
+        this.createCurvedFinGeo(18, 66, 12, 0.38),
+        this.carapaceMat,
+        [side * 22, 22, -2],
+        [-0.38, side * 0.32, -side * 0.42]
+      );
+      this.addSculptedPart(
+        this.headGroup,
+        this.createCurvedFinGeo(14, 46, 10, 0.24),
+        this.carapaceMat,
+        [side * 24, 0, 14],
+        [0.24, side * 0.56, -side * 0.28]
+      );
+      // Fierce Slanted Bio-Optic Eye Slit positioned cleanly OUTSIDE cheek ridge so it gleams brightly!
+      this.addSculptedPart(
+        this.headGroup,
+        this.createEyeSlitGeo(),
+        this.eyeGlowMat,
+        [side * 16, 4, 29],
+        [0.14, side * 0.30, side * 0.46]
+      );
     }
 
-    // Upper Jaw Fang Crest
-    this.addSculptedPart(this.headGroup, this.createCrestPlateGeo(28, 34, 16), this.carapaceMat, [0, -2, 26], [0.68, 0, 0]);
+    // Upper Jaw Snout & Downward Fangs
+    this.addSculptedPart(
+      this.headGroup,
+      this.createPelvisShieldGeo(28, 34, 16),
+      this.carapaceMat,
+      [0, -4, 22],
+      [0.72, 0, 0]
+    );
     for (const side of [-1, 1]) {
-      this.addSculptedPart(this.headGroup, this.createHornSpikeGeo(5.5, 22), this.bladeEdgeMat, [side * 10, -14, 34], [Math.PI * 0.88, 0, -side * 0.14]);
+      this.addSculptedPart(
+        this.headGroup,
+        this.createCurvedFinGeo(4.8, 22, 6, 0.22),
+        this.bladeEdgeMat,
+        [side * 10, -14, 29],
+        [Math.PI * 0.92, side * 0.15, -side * 0.14]
+      );
     }
 
-    // Glowing Inner Throat / Laser Furnace Core (exposes when jaw unhinges!)
-    const throatGeo = this.trackGeo(new THREE.SphereGeometry(15, 14, 12));
+    // Glowing Inner Throat / Laser Furnace Core (tucked cleanly inside closed jaw; blazes open on roar!)
+    const throatGeo = this.trackGeo(new THREE.SphereGeometry(11, 14, 12));
     this.throatGlowMesh = new THREE.Mesh(throatGeo, this.coreGlowMat);
-    this.throatGlowMesh.position.set(0, -10, 22);
-    this.throatGlowMesh.scale.set(0.85, 1.15, 1.1);
+    this.throatGlowMesh.position.set(0, -10, 8);
+    this.throatGlowMesh.scale.set(0.75, 0.95, 0.95);
     this.headGroup.add(this.throatGlowMesh);
 
     this.mouthSocket = new THREE.Object3D();
-    this.mouthSocket.position.set(0, -12, 38);
+    this.mouthSocket.position.set(0, -12, 36);
     this.headGroup.add(this.mouthSocket);
 
     // Hinged Lower Jaw Mandible
     this.lowerJawPivot = new THREE.Group();
-    this.lowerJawPivot.position.set(0, -16, 12);
+    this.lowerJawPivot.position.set(0, -15, 8);
     this.headGroup.add(this.lowerJawPivot);
 
-    this.addSculptedPart(this.lowerJawPivot, this.createCrestPlateGeo(24, 32, 14), this.carapaceMat, [0, -10, 14], [1.18, 0, 0]);
+    this.addSculptedPart(
+      this.lowerJawPivot,
+      this.createPelvisShieldGeo(24, 32, 14),
+      this.carapaceMat,
+      [0, -10, 14],
+      [1.22, 0, 0]
+    );
     for (const side of [-1, 1]) {
-      this.addSculptedPart(this.lowerJawPivot, this.createHornSpikeGeo(4.8, 18), this.bladeEdgeMat, [side * 8, -2, 24], [0.32, 0, -side * 0.18]);
+      this.addSculptedPart(
+        this.lowerJawPivot,
+        this.createCurvedFinGeo(4.5, 18, 5, 0.2),
+        this.bladeEdgeMat,
+        [side * 8, -2, 23],
+        [0.34, side * 0.15, -side * 0.18]
+      );
     }
 
     // ------------------------------------------------------------------
-    // MASSIVE KNUCKLE-WALKING CHITINOUS GAUNTLET FORELIMBS
+    // MASSIVE WIDE-SPLAYED CURVED SCYTHE-GAUNTLET FORELIMBS
     // ------------------------------------------------------------------
     this.leftShoulder = new THREE.Group();
-    this.leftShoulder.position.set(-76, 76, 10);
+    this.leftShoulder.position.set(-90, 74, 8);
     this.chestPivot.add(this.leftShoulder);
     this.leftElbow = this.buildArmLimb(this.leftShoulder, -1);
 
     this.rightShoulder = new THREE.Group();
-    this.rightShoulder.position.set(76, 76, 10);
+    this.rightShoulder.position.set(90, 74, 8);
     this.chestPivot.add(this.rightShoulder);
     this.rightElbow = this.buildArmLimb(this.rightShoulder, 1);
 
     // ------------------------------------------------------------------
-    // STOCKY ROOTED HIND LEGS & 3-TOED FEET
+    // ATHLETIC MUSCULAR HIND LEGS, FLARED GREAVES & 3-TOED CLAWS
     // ------------------------------------------------------------------
     this.leftHip = new THREE.Group();
-    this.leftHip.position.set(-40, -6, 0);
+    this.leftHip.position.set(-40, -2, -2);
     this.pelvis.add(this.leftHip);
     this.leftKnee = this.buildLegLimb(this.leftHip, -1);
 
     this.rightHip = new THREE.Group();
-    this.rightHip.position.set(40, -6, 0);
+    this.rightHip.position.set(40, -2, -2);
     this.pelvis.add(this.rightHip);
     this.rightKnee = this.buildLegLimb(this.rightHip, 1);
 
     // ------------------------------------------------------------------
-    // 10 SMOOTH TAPERED 3D DORSAL TENTACLES (Shared Organic Aesthetic)
+    // 10 WHIP-THIN SINUOUS DORSAL TENDRILS (Matches boss_walk_front & boss_elemental_front)
     // ------------------------------------------------------------------
     const tentacleLayouts: Array<{
       rx: number; ry: number; rz: number;
       tx: number; ty: number; tz: number;
       ax: number; az: number; radius: number; phase: number;
     }> = [
-        // Right Crown Fan (5 tentacles matching Stage1BossConfig.tentacleTipOffsets spread)
-        { rx: 52, ry: 96, rz: -18, tx: 162, ty: 245, tz: 44, ax: 132, az: -12, radius: 13.5, phase: 0.0 },
-        { rx: 64, ry: 78, rz: -10, tx: 158, ty: 152, tz: 54, ax: 145, az: 16, radius: 12.0, phase: 0.8 },
-        { rx: 32, ry: 108, rz: -22, tx: 76, ty: 278, tz: 52, ax: 64, az: -22, radius: 12.5, phase: 1.5 },
-        { rx: 46, ry: 100, rz: -24, tx: 118, ty: 328, tz: 36, ax: 86, az: -28, radius: 14.0, phase: 2.2 },
-        { rx: 14, ry: 112, rz: -26, tx: 36, ty: 356, tz: 38, ax: 24, az: -36, radius: 11.5, phase: 2.9 },
-        // Left Crown Fan (5 mirrored tentacles)
-        { rx: -52, ry: 96, rz: -18, tx: -162, ty: 245, tz: 44, ax: -132, az: -12, radius: 13.5, phase: 3.5 },
-        { rx: -64, ry: 78, rz: -10, tx: -158, ty: 152, tz: 54, ax: -145, az: 16, radius: 12.0, phase: 4.2 },
-        { rx: -32, ry: 108, rz: -22, tx: -76, ty: 278, tz: 52, ax: -64, az: -22, radius: 12.5, phase: 4.9 },
-        { rx: -46, ry: 100, rz: -24, tx: -118, ty: 328, tz: 36, ax: -86, az: -28, radius: 14.0, phase: 5.5 },
-        { rx: -14, ry: 112, rz: -26, tx: -36, ty: 356, tz: 38, ax: -24, az: -36, radius: 11.5, phase: 6.1 }
+        // Right Crown Fan (5 whip tendrils)
+        { rx: 38, ry: 96, rz: -18, tx: 168, ty: 235, tz: 36, ax: 132, az: -18, radius: 7.8, phase: 0.0 },
+        { rx: 52, ry: 80, rz: -12, tx: 172, ty: 158, tz: 44, ax: 148, az: 10, radius: 7.0, phase: 0.8 },
+        { rx: 24, ry: 104, rz: -22, tx: 88, ty: 274, tz: 42, ax: 72, az: -26, radius: 7.4, phase: 1.5 },
+        { rx: 34, ry: 98, rz: -24, tx: 126, ty: 318, tz: 28, ax: 92, az: -32, radius: 8.2, phase: 2.2 },
+        { rx: 12, ry: 108, rz: -24, tx: 42, ty: 342, tz: 30, ax: 28, az: -38, radius: 6.8, phase: 2.9 },
+        // Left Crown Fan (5 mirrored whip tendrils)
+        { rx: -38, ry: 96, rz: -18, tx: -168, ty: 235, tz: 36, ax: -132, az: -18, radius: 7.8, phase: 3.5 },
+        { rx: -52, ry: 80, rz: -12, tx: -172, ty: 158, tz: 44, ax: -148, az: 10, radius: 7.0, phase: 4.2 },
+        { rx: -24, ry: 104, rz: -22, tx: -88, ty: 274, tz: 42, ax: -72, az: -26, radius: 7.4, phase: 4.9 },
+        { rx: -34, ry: 98, rz: -24, tx: -126, ty: 318, tz: 28, ax: -92, az: -32, radius: 8.2, phase: 5.5 },
+        { rx: -12, ry: 108, rz: -24, tx: -42, ty: 342, tz: 30, ax: -28, az: -38, radius: 6.8, phase: 6.1 }
       ];
 
-    const stingerGeo = this.trackGeo(new THREE.ConeGeometry(2.6, 18, 7));
-    stingerGeo.rotateX(Math.PI / 2);
+    // Tiny sleek whip-tip cap (no bulky red cone!)
+    const whipTipGeo = this.trackGeo(new THREE.ConeGeometry(1.1, 10, 6));
+    whipTipGeo.rotateX(Math.PI / 2);
 
-    const segs = 16;
+    const segs = 18;
     const radSegs = 8;
     for (let i = 0; i < 10; i++) {
       const cfg = tentacleLayouts[i];
@@ -363,7 +513,7 @@ export class Stage1Boss3DModel {
       mesh.renderOrder = 295;
       this.chestPivot.add(mesh);
 
-      const stinger = new THREE.Mesh(stingerGeo, stingerMat);
+      const stinger = new THREE.Mesh(whipTipGeo, whipTipMat);
       stinger.frustumCulled = false;
       this.chestPivot.add(stinger);
 
@@ -397,129 +547,185 @@ export class Stage1Boss3DModel {
   }
 
   private buildArmLimb(shoulder: THREE.Group, side: -1 | 1): THREE.Group {
-    // Bulky Deltoid/Upper Arm Flesh
+    // Sleek Muscular Deltoid/Upper Arm angled steeply outward from torso
     this.addSculptedPart(
       shoulder,
-      this.createTaperedOrganicGeo(24, 22, 74, 10, 6, 1.0, 1.05),
+      this.createTaperedOrganicGeo(19, 17, 74, 12, 6, 1.04, 1.02),
       this.fleshMat,
-      [-side * -6, -34, 4],
-      [0.08, 0, side * 0.24]
+      [side * 18, -30, 6],
+      [0.08, 0, side * 0.44]
     );
-    // Outer Bicep Armor Plate
+    // Glowing Deltoid Bio-Sac (matches boss_walk_left glowing purple shoulder pods)
     this.addSculptedPart(
       shoulder,
-      this.createCrestPlateGeo(28, 62, 16),
+      this.createPetalPodGeo(11, 22, 9),
+      this.podGlowMat,
+      [side * 24, -22, 14],
+      [0.2, side * 0.4, -side * 0.48]
+    );
+    // Serrated Outer Bicep Armor Plate
+    this.addSculptedPart(
+      shoulder,
+      this.createCurvedFinGeo(24, 68, 14, 0.30),
       this.carapaceMat,
-      [side * 16, -28, 6],
-      [0.08, side * 0.25, -side * 0.28]
+      [side * 28, -24, 2],
+      [0.14, side * 0.34, -side * 0.46]
     );
 
     const elbow = new THREE.Group();
-    elbow.position.set(side * 18, -68, 12);
+    elbow.position.set(side * 42, -58, 14);
     shoulder.add(elbow);
 
-    // Massive Swept Forearm Chitinous Gauntlet
+    // Tapered Muscular Forearm Core sweeping wide and tapering down toward claw wrist
     this.addSculptedPart(
       elbow,
-      this.createTaperedOrganicGeo(22, 34, 92, 12, 7, 1.15, 1.2),
+      this.createTaperedOrganicGeo(15, 25, 92, 12, 7, 1.05, 1.08, true),
       this.fleshMat,
-      [side * 4, -44, 10],
-      [-0.18, 0, side * 0.08]
+      [side * 10, -46, 10],
+      [-0.18, 0, -side * 0.22]
     );
 
-    // Sculpted Armored Shield-Carapace on Outer Forearm
+    // Symmetric Sculpted 3D Crescent Scythe-Gauntlet Outer Carapace (closed manifold, 3 serrated outer barbs!)
     this.addSculptedPart(
       elbow,
-      this.createCrestPlateGeo(46, 98, 22),
+      this.createScytheGauntletGeo(side),
       this.carapaceMat,
-      [side * 22, -46, 14],
-      [-0.22, side * 0.42, -side * 0.16]
-    );
-    // Dorsal Fin Blade on Gauntlet
-    this.addSculptedPart(
-      elbow,
-      this.createHornSpikeGeo(11, 52),
-      this.carapaceMat,
-      [side * 26, -12, -14],
-      [-0.62, side * 0.2, -side * 0.2]
+      [side * 22, -46, 12],
+      [-0.18, -side * 0.24, -side * 0.22]
     );
 
-    // Three Sweeping Scythe Claw Blades Anchoring to the Ground
-    for (let c = 0; c < 3; c++) {
-      const spreadZ = (c - 1) * 16;
-      const spreadX = (c - 1) * 6 * side;
-      this.addSculptedPart(
-        elbow,
-        this.createHornSpikeGeo(9.5, 48),
-        c === 1 ? this.bladeEdgeMat : this.carapaceMat,
-        [side * 10 + spreadX, -98, 26 + spreadZ],
-        [Math.PI * 0.72 + c * 0.06, side * 0.14, -side * 0.08]
-      );
-    }
-
-    // Glowing Energy Vent Inside Gauntlet Hollow
+    // Bright Glowing Magenta Energy Fissure Inside the Hollow of the Gauntlet
     this.addSculptedPart(
       elbow,
-      this.trackGeo(new THREE.OctahedronGeometry(10, 1)),
+      this.createPetalPodGeo(10, 56, 8),
       this.coreGlowMat,
-      [side * 2, -52, 26],
-      [0, 0, 0],
-      [0.65, 1.5, 0.55]
+      [side * 2, -56, 22],
+      [-0.18, side * 0.20, -side * 0.22]
+    );
+
+    // Thick Curved Mantis Pincer Scythe-Claws arcing steeply INWARD toward each other (matches boss_walk_front!)
+    this.addSculptedPart(
+      elbow,
+      this.createCurvedFinGeo(26, 74, 13, 0.52),
+      this.carapaceMat,
+      [side * 2, -96, 22],
+      [Math.PI * 0.78, -side * 0.22, -side * 0.48]
+    );
+    this.addSculptedPart(
+      elbow,
+      this.createCurvedFinGeo(19, 64, 11, 0.46),
+      this.bladeEdgeMat,
+      [-side * 8, -100, 28],
+      [Math.PI * 0.75, -side * 0.14, -side * 0.54]
+    );
+    this.addSculptedPart(
+      elbow,
+      this.createCurvedFinGeo(16, 54, 10, 0.42),
+      this.carapaceMat,
+      [side * 10, -90, 10],
+      [Math.PI * 0.80, -side * 0.30, -side * 0.42]
     );
 
     return elbow;
   }
 
   private buildLegLimb(hip: THREE.Group, side: -1 | 1): THREE.Group {
-    // Muscular Thigh
+    // Sculpted Athletic Kaiju Thigh (slimmer, gnarled, splayed outward)
     this.addSculptedPart(
       hip,
-      this.createTaperedOrganicGeo(24, 19, 58, 10, 5, 1.05, 1.1),
+      this.createTaperedOrganicGeo(17, 13.5, 58, 12, 5, 1.0, 1.12),
       this.fleshMat,
-      [side * 4, -26, 6],
-      [-0.24, 0, side * 0.08]
+      [side * 5, -24, 6],
+      [-0.26, 0, side * 0.12]
     );
-    // Thigh Crest Plate
+    // Sleek Vertical Front-Outer Thigh Armor Crest (matches boss_walk_front thigh ridges!)
     this.addSculptedPart(
       hip,
-      this.createCrestPlateGeo(24, 48, 14),
+      this.createCurvedFinGeo(14, 48, 10, 0.22),
       this.carapaceMat,
-      [side * 10, -24, 18],
-      [-0.22, side * 0.25, -side * 0.12]
+      [side * 10, -24, 17],
+      [-0.24, side * 0.30, -side * 0.14]
+    );
+    this.addSculptedPart(
+      hip,
+      this.createPetalPodGeo(8, 18, 7),
+      this.podGlowMat,
+      [side * 15, -24, 2],
+      [0.15, side * 0.85, 0]
     );
 
     const knee = new THREE.Group();
-    knee.position.set(side * 6, -54, 18);
+    knee.position.set(side * 8, -50, 18);
     hip.add(knee);
 
-    // Knee Armor Spur
-    this.addSculptedPart(knee, this.createHornSpikeGeo(10, 32), this.carapaceMat, [side * 2, 4, 14], [0.42, 0, 0]);
-
-    // Planted Lower Shin
+    // Sharp Knee Spur
     this.addSculptedPart(
       knee,
-      this.createTaperedOrganicGeo(18, 24, 58, 10, 5, 1.0, 1.15),
+      this.createCurvedFinGeo(10, 30, 9, 0.30),
+      this.carapaceMat,
+      [side * 2, 6, 14],
+      [0.44, 0, 0]
+    );
+
+    // Tapered Planted Lower Shin
+    this.addSculptedPart(
+      knee,
+      this.createTaperedOrganicGeo(13, 17, 56, 12, 5, 0.98, 1.12),
       this.fleshMat,
-      [0, -30, -8],
+      [0, -28, -8],
       [0.18, 0, 0]
     );
-    this.addSculptedPart(knee, this.createCrestPlateGeo(24, 48, 14), this.carapaceMat, [0, -26, 4], [0.16, 0, 0]);
 
-    // Rooted 3-Toed Clawed Foot
+    // Sleek Narrow Jagged Front Shin-Crest Blade + Ankle Spur (NOT a cylindrical tin-can sleeve!)
     this.addSculptedPart(
       knee,
-      this.createTaperedOrganicGeo(22, 26, 16, 10, 3, 1.2, 1.35),
+      this.createWrappedGreaveGeo(15, 52, side),
+      this.carapaceMat,
+      [side * 2, -25, 11],
+      [0.18, side * 0.22, 0]
+    );
+    this.addSculptedPart(
+      knee,
+      this.createCurvedFinGeo(10, 34, 9, 0.32),
+      this.carapaceMat,
+      [side * 11, -36, -10],
+      [-0.42, side * 0.55, 0]
+    );
+
+    // Arched Clawed Kaiju Foot (3 splayed muscular toes + armor claw tips + heel spur, sole at Y = 0)
+    this.addSculptedPart(
+      knee,
+      this.createTaperedOrganicGeo(14, 15, 16, 10, 3, 1.12, 1.18),
       this.fleshMat,
-      [0, -56, 2],
+      [0, -52, -4],
       [0, 0, 0]
     );
+    // Heel spur
+    this.addSculptedPart(
+      knee,
+      this.createCurvedFinGeo(12, 22, 10, 0.25),
+      this.carapaceMat,
+      [0, -54, -18],
+      [-Math.PI * 0.48, Math.PI, 0]
+    );
+    // 3 stout forward splayed toes (muscular ridge + chitin claw)
     for (const toe of [-1, 0, 1]) {
+      const toeX = toe * 13;
+      const toeZ = 12 - Math.abs(toe) * 4;
+      const yaw = toe * 0.34;
       this.addSculptedPart(
         knee,
-        this.createHornSpikeGeo(6.5, 24),
+        this.createTaperedOrganicGeo(8.5, 6.5, 22, 8, 3, 1.0, 0.92),
+        this.fleshMat,
+        [toeX * 0.72, -53, toeZ - 3],
+        [Math.PI * 0.46, yaw, 0]
+      );
+      this.addSculptedPart(
+        knee,
+        this.createCurvedFinGeo(10, 22, 9.5, 0.30),
         this.carapaceMat,
-        [toe * 13, -58, 18 - Math.abs(toe) * 4],
-        [Math.PI * 0.48, toe * 0.28, 0]
+        [toeX * 1.1, -55, toeZ + 11],
+        [Math.PI * 0.50, yaw, 0]
       );
     }
 
@@ -548,6 +754,230 @@ export class Stage1Boss3DModel {
     return geo;
   }
 
+  /**
+   * Sculpted diamond V-crest skull shell matching boss_walk_front & boss_walk_left.
+   */
+  private createHeadCrestGeo(): THREE.BufferGeometry {
+    const shape = new THREE.Shape();
+    shape.moveTo(0, -16);
+    shape.lineTo(30, 8);
+    shape.lineTo(24, 38);
+    shape.lineTo(0, 66);
+    shape.lineTo(-24, 38);
+    shape.lineTo(-30, 8);
+    shape.closePath();
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: 22,
+      bevelEnabled: true,
+      bevelThickness: 8,
+      bevelSize: 6,
+      bevelSegments: 3
+    });
+    geo.translate(0, 0, -6);
+
+    // Pull center ridge forward and curve crown backward
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      let z = pos.getZ(i);
+      const centerWeight = Math.max(0, 1.0 - Math.abs(x) / 26);
+      const heightNorm = Math.min(1, Math.max(0, (y + 14) / 82));
+      z += centerWeight * 12.0;
+      z -= Math.pow(heightNorm, 1.55) * 26.0;
+      pos.setXYZ(i, x * (1.0 - heightNorm * 0.22), y, z);
+    }
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Symmetric closed-manifold 3D curved crescent scythe-gauntlet carapace shield along the outer forearm
+   * with 3 bold serrated dorsal barbs (guaranteed mirror-symmetric on both -1 and +1 arms!).
+   */
+  private createScytheGauntletGeo(side: -1 | 1): THREE.BufferGeometry {
+    const height = 102;
+    const geo = new THREE.BoxGeometry(22, height, 34, 4, 16, 4);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const ny = Math.min(1, Math.max(0, (y + height * 0.5) / height)); // 0 bottom wrist -> 1 top elbow
+
+      // Sculpt outer edge (where sign(x) === side) into a sweeping curved multi-barbed crescent blade
+      const outerT = Math.min(1, Math.max(0, (x * side + 11) / 22)); // 0 inner edge -> 1 outer spine edge
+      const barb1 = Math.exp(-Math.pow((ny - 0.24) / 0.08, 2));
+      const barb2 = Math.exp(-Math.pow((ny - 0.55) / 0.09, 2));
+      const barb3 = Math.exp(-Math.pow((ny - 0.84) / 0.09, 2));
+      const barbFlare = (barb1 * 22 + barb2 * 26 + barb3 * 22) * Math.pow(outerT, 1.4);
+
+      const widthTaper = 0.62 + Math.sin(ny * Math.PI) * 0.55;
+      const crescentCurve = Math.sin(ny * Math.PI) * 14 * side;
+      const bowForwardZ = Math.sin(ny * Math.PI) * 10;
+
+      // Narrow thickness sharply toward the outer razor spine (outerT -> 1)
+      const edgePinch = 1.0 - Math.pow(outerT, 1.8) * 0.72;
+
+      pos.setXYZ(
+        i,
+        x * widthTaper + crescentCurve + side * barbFlare,
+        y + barbFlare * 0.42,
+        z * edgePinch * widthTaper + bowForwardZ
+      );
+    }
+
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Narrow jagged V-ridge shin crest blade that hugs ONLY the front-outer calf without boxing the ankle.
+   */
+  private createWrappedGreaveGeo(width: number, height: number, side: -1 | 1): THREE.BufferGeometry {
+    const geo = new THREE.CylinderGeometry(width * 0.5, width * 0.65, height, 8, 8, false, -Math.PI * 0.42, Math.PI * 0.84);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const ny = Math.min(1, Math.max(0, (y + height * 0.5) / height));
+      const crest = Math.max(0, 1.0 - Math.abs(x) / (width * 0.48));
+      const ankleFlare = Math.pow(Math.max(0, 0.25 - ny) / 0.25, 1.3) * 7;
+      const kneePoint = Math.pow(Math.max(0, ny - 0.72) / 0.28, 1.4) * 14 * crest;
+      pos.setXYZ(
+        i,
+        x * (0.72 + ankleFlare * 0.06) + side * (crest * 2 + ankleFlare * 0.35),
+        y + kneePoint,
+        z * 0.65 + crest * 8 + ankleFlare * 0.8
+      );
+    }
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Flared curved shoulder pauldron armor shell.
+   */
+  private createPauldronShellGeo(width: number, height: number, depth: number, side: -1 | 1): THREE.BufferGeometry {
+    const s = side;
+    const shape = new THREE.Shape();
+    shape.moveTo(-s * width * 0.35, -height * 0.38);
+    shape.quadraticCurveTo(0, -height * 0.15, s * width * 0.45, -height * 0.45);
+    shape.quadraticCurveTo(s * width * 0.62, 0, s * width * 0.48, height * 0.48);
+    shape.lineTo(0, height * 0.36);
+    shape.lineTo(-s * width * 0.32, height * 0.18);
+    shape.closePath();
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: depth * 0.6,
+      bevelEnabled: true,
+      bevelThickness: 6,
+      bevelSize: 5,
+      bevelSegments: 2
+    });
+    geo.translate(0, 0, -depth * 0.3);
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Diamond/V-tapered beveled armor plate (pelvis, back, chest, greaves).
+   */
+  private createPelvisShieldGeo(width: number, height: number, depth: number): THREE.BufferGeometry {
+    const hw = width * 0.5;
+    const hh = height * 0.5;
+    const shape = new THREE.Shape();
+    shape.moveTo(0, -hh);
+    shape.lineTo(hw * 0.65, -hh * 0.15);
+    shape.lineTo(hw, hh * 0.45);
+    shape.lineTo(hw * 0.42, hh);
+    shape.lineTo(0, hh * 0.78);
+    shape.lineTo(-hw * 0.42, hh);
+    shape.lineTo(-hw, hh * 0.45);
+    shape.lineTo(-hw * 0.65, -hh * 0.15);
+    shape.closePath();
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: depth * 0.55,
+      bevelEnabled: true,
+      bevelThickness: depth * 0.25,
+      bevelSize: 4,
+      bevelSegments: 2
+    });
+    geo.translate(0, 0, -depth * 0.28);
+
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      let z = pos.getZ(i);
+      const centerRidge = Math.max(0, 1.0 - Math.abs(x) / (hw + 4));
+      z += centerRidge * depth * 0.26;
+      pos.setXYZ(i, x, y, z);
+    }
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Glowing teardrop crystal-petal pod (for upper-back mantle & shoulder/thigh bio-sacs).
+   */
+  private createPetalPodGeo(width: number, height: number, depth: number): THREE.BufferGeometry {
+    const geo = new THREE.OctahedronGeometry(1, 2);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const ny = Math.min(1, Math.max(0, (y + 1) * 0.5)); // 0 bottom tip -> 1 top rounded crown
+      const teardrop = Math.sin(Math.pow(ny, 0.72) * Math.PI);
+      pos.setXYZ(i, x * width * 0.5 * (0.45 + 0.65 * teardrop), y * height * 0.5, z * depth * 0.5 * (0.5 + 0.6 * teardrop));
+    }
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Swept-back curved horn/claw/spine fin blade.
+   */
+  private createCurvedFinGeo(baseWidth: number, length: number, thickness: number, curveAmt: number): THREE.BufferGeometry {
+    const geo = new THREE.ConeGeometry(baseWidth * 0.5, length, 8, 6);
+    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
+    for (let i = 0; i < pos.count; i++) {
+      const x = pos.getX(i);
+      const y = pos.getY(i);
+      const z = pos.getZ(i);
+      const t = Math.min(1, Math.max(0, (y + length * 0.5) / length));
+      const sweepZ = Math.pow(t, 1.75) * length * curveAmt;
+      const bladeScaleZ = thickness / Math.max(1, baseWidth);
+      pos.setXYZ(i, x * 0.75, y, z * bladeScaleZ * 1.15 - sweepZ);
+    }
+    geo.computeVertexNormals();
+    return this.trackGeo(geo);
+  }
+
+  /**
+   * Tapered diamond razor eye slit.
+   */
+  private createEyeSlitGeo(): THREE.BufferGeometry {
+    const shape = new THREE.Shape();
+    shape.moveTo(-7, 0);
+    shape.lineTo(0, 2.6);
+    shape.lineTo(7.5, 0.4);
+    shape.lineTo(0, -1.8);
+    shape.closePath();
+
+    const geo = new THREE.ExtrudeGeometry(shape, {
+      depth: 4,
+      bevelEnabled: false
+    });
+    geo.translate(0, 0, -2);
+    return this.trackGeo(geo);
+  }
+
   private createTaperedOrganicGeo(
     bottomR: number,
     topR: number,
@@ -555,7 +985,8 @@ export class Stage1Boss3DModel {
     radialSegs: number,
     heightSegs: number,
     scaleX: number,
-    scaleZ: number
+    scaleZ: number,
+    domeEnds: boolean = false
   ): THREE.BufferGeometry {
     const geo = new THREE.CylinderGeometry(topR, bottomR, height, radialSegs, heightSegs);
     const pos = geo.getAttribute('position') as THREE.BufferAttribute;
@@ -563,45 +994,13 @@ export class Stage1Boss3DModel {
       const x = pos.getX(i);
       const y = pos.getY(i);
       const z = pos.getZ(i);
-      const ny = y / (height * 0.5); // -1..1
-      const bulge = 1.0 + 0.16 * (1.0 - ny * ny) + 0.05 * Math.sin(ny * Math.PI * 3.0);
+      const ny = y / (height * 0.5);
+      let bulge = 1.0 + 0.18 * (1.0 - ny * ny) + 0.05 * Math.sin(ny * Math.PI * 3.0);
+      if (domeEnds && ny > 0.72) {
+        const capT = Math.min(1, (ny - 0.72) / 0.28);
+        bulge *= 1.0 - capT * 0.34;
+      }
       pos.setXYZ(i, x * scaleX * bulge, y, z * scaleZ * bulge);
-    }
-    geo.computeVertexNormals();
-    return this.trackGeo(geo);
-  }
-
-  private createCrestPlateGeo(width: number, height: number, depth: number): THREE.BufferGeometry {
-    const geo = new THREE.OctahedronGeometry(1, 2);
-    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      let x = pos.getX(i);
-      let y = pos.getY(i);
-      let z = pos.getZ(i);
-      // Taper vertically into sharp diamond armor crest, convex front ridge
-      const taper = Math.max(0.18, 1.0 - Math.pow(Math.abs(y), 1.6) * 0.78);
-      x *= width * 0.5 * taper;
-      y *= height * 0.5;
-      z *= depth * 0.5 * taper;
-      // Central chitin ridge pop forward
-      z += (1.0 - Math.abs(pos.getX(i))) * depth * 0.22;
-      pos.setXYZ(i, x, y, z);
-    }
-    geo.computeVertexNormals();
-    return this.trackGeo(geo);
-  }
-
-  private createHornSpikeGeo(baseR: number, length: number): THREE.BufferGeometry {
-    const geo = new THREE.ConeGeometry(baseR, length, 8, 5);
-    const pos = geo.getAttribute('position') as THREE.BufferAttribute;
-    for (let i = 0; i < pos.count; i++) {
-      const x = pos.getX(i);
-      const y = pos.getY(i);
-      const z = pos.getZ(i);
-      const t = (y + length * 0.5) / length; // 0 base -> 1 tip
-      // Natural curved talon sweep along +Z / -Z
-      const sweepZ = Math.pow(t, 1.8) * length * 0.24;
-      pos.setXYZ(i, x * 0.85, y, z * 1.15 - sweepZ);
     }
     geo.computeVertexNormals();
     return this.trackGeo(geo);
@@ -682,9 +1081,10 @@ export class Stage1Boss3DModel {
       B.crossVectors(T, N).normalize();
 
       const t = s / segments;
-      const taper = Math.pow(1.0 - t * 0.88, 1.28);
-      const ripple = 1.0 + 0.07 * Math.sin(t * Math.PI * 14.0);
-      const radius = (baseRadius * taper + 1.8) * ripple;
+      // Sleek whip-like taper down to ~0.7px tip
+      const taper = Math.pow(1.0 - t * 0.93, 1.38);
+      const ripple = 1.0 + 0.06 * Math.sin(t * Math.PI * 14.0);
+      const radius = (baseRadius * taper + 0.7) * ripple;
 
       for (let r = 0; r < radialSegments; r++) {
         const theta = (r / radialSegments) * Math.PI * 2;
@@ -705,7 +1105,7 @@ export class Stage1Boss3DModel {
     const prevPt = spinePoints[segments - 1];
     T.subVectors(lastPt, prevPt).normalize();
     const tipIdx = (segments + 1) * radialSegments;
-    posAttr.setXYZ(tipIdx, lastPt.x + T.x * 7.0, lastPt.y + T.y * 7.0, lastPt.z + T.z * 7.0);
+    posAttr.setXYZ(tipIdx, lastPt.x + T.x * 5.0, lastPt.y + T.y * 5.0, lastPt.z + T.z * 5.0);
     normAttr.setXYZ(tipIdx, T.x, T.y, T.z);
 
     posAttr.needsUpdate = true;
@@ -719,26 +1119,27 @@ export class Stage1Boss3DModel {
     carapaceMap: THREE.CanvasTexture;
     carapaceBump: THREE.CanvasTexture;
   } {
-    // 1. Abyssal Violet Muscle & Bio-Vein Flesh
+    // 1. Deep Obsidian-Plum Muscle Flesh with subtle longitudinal muscle bundles (NO horizontal zebra stripes!)
     const fCanvas = document.createElement('canvas');
     fCanvas.width = 256;
     fCanvas.height = 256;
     const fCtx = fCanvas.getContext('2d')!;
     const fGrad = fCtx.createLinearGradient(0, 0, 0, 256);
-    fGrad.addColorStop(0, '#3b1557');
-    fGrad.addColorStop(0.5, '#290d42');
-    fGrad.addColorStop(1, '#1a062b');
+    fGrad.addColorStop(0, '#3a1559');
+    fGrad.addColorStop(0.5, '#240a3b');
+    fGrad.addColorStop(1, '#130421');
     fCtx.fillStyle = fGrad;
     fCtx.fillRect(0, 0, 256, 256);
 
-    for (let y = 0; y < 256; y += 14) {
-      fCtx.strokeStyle = 'rgba(139, 92, 246, 0.22)';
-      fCtx.lineWidth = 2;
+    // Subtle organic longitudinal muscle striations + mottled sinew shadows
+    for (let x = 0; x < 256; x += 14) {
+      fCtx.strokeStyle = x % 28 === 0 ? 'rgba(139, 92, 246, 0.14)' : 'rgba(8, 2, 18, 0.42)';
+      fCtx.lineWidth = x % 28 === 0 ? 1.8 : 2.6;
       fCtx.beginPath();
-      for (let x = 0; x <= 256; x += 16) {
-        const wy = y + Math.sin(x * 0.05 + y) * 5;
-        if (x === 0) fCtx.moveTo(x, wy);
-        else fCtx.lineTo(x, wy);
+      for (let y = 0; y <= 256; y += 16) {
+        const wx = x + Math.sin(y * 0.05 + x * 0.15) * 4.2;
+        if (y === 0) fCtx.moveTo(wx, y);
+        else fCtx.lineTo(wx, y);
       }
       fCtx.stroke();
     }
@@ -747,36 +1148,37 @@ export class Stage1Boss3DModel {
     fleshMap.wrapS = fleshMap.wrapT = THREE.RepeatWrapping;
     fleshMap.colorSpace = THREE.SRGBColorSpace;
 
+    // Deep subtle bio-vein glow map (very muted so core sternum/fissures/back-petals dominate!)
     const eCanvas = document.createElement('canvas');
     eCanvas.width = 256;
     eCanvas.height = 256;
     const eCtx = eCanvas.getContext('2d')!;
-    eCtx.fillStyle = '#000000';
+    eCtx.fillStyle = '#07010d';
     eCtx.fillRect(0, 0, 256, 256);
-    eCtx.strokeStyle = '#d946ef';
-    eCtx.lineWidth = 3;
-    for (let i = 0; i < 12; i++) {
-      const sy = i * 22;
+    eCtx.strokeStyle = 'rgba(168, 85, 247, 0.35)';
+    eCtx.lineWidth = 1.6;
+    for (let i = 0; i < 8; i++) {
+      const sx = i * 32 + 12;
       eCtx.beginPath();
-      for (let x = 0; x <= 256; x += 16) {
-        const py = sy + Math.sin(x * 0.04 + i) * 7;
-        if (x === 0) eCtx.moveTo(x, py);
-        else eCtx.lineTo(x, py);
+      for (let y = 0; y <= 256; y += 16) {
+        const px = sx + Math.sin(y * 0.045 + i * 1.3) * 8;
+        if (y === 0) eCtx.moveTo(px, y);
+        else eCtx.lineTo(px, y);
       }
       eCtx.stroke();
     }
     const fleshEmissive = new THREE.CanvasTexture(eCanvas);
     fleshEmissive.wrapS = fleshEmissive.wrapT = THREE.RepeatWrapping;
 
-    // 2. Iridescent Lavender-Bone Carapace Armor Striations & Bump
+    // 2. Painted Bone-Lavender Chitin Carapace with isotropic organic mottling (NO barcode bevel lines!)
     const cCanvas = document.createElement('canvas');
     cCanvas.width = 256;
     cCanvas.height = 256;
     const cCtx = cCanvas.getContext('2d')!;
-    const cGrad = cCtx.createLinearGradient(0, 0, 0, 256);
-    cGrad.addColorStop(0, '#e9d5ff');
-    cGrad.addColorStop(0.55, '#c090c8');
-    cGrad.addColorStop(1, '#7c4d8d');
+    const cGrad = cCtx.createRadialGradient(128, 128, 12, 128, 128, 170);
+    cGrad.addColorStop(0, '#edd9fa');
+    cGrad.addColorStop(0.55, '#c49bd6');
+    cGrad.addColorStop(1, '#7a4d91');
     cCtx.fillStyle = cGrad;
     cCtx.fillRect(0, 0, 256, 256);
 
@@ -787,21 +1189,20 @@ export class Stage1Boss3DModel {
     bCtx.fillStyle = '#808080';
     bCtx.fillRect(0, 0, 256, 256);
 
-    for (let i = 0; i < 18; i++) {
-      const y = i * 14;
-      cCtx.strokeStyle = 'rgba(255, 240, 255, 0.25)';
-      cCtx.lineWidth = 1.6;
+    // Isotropic organic chitin pores & mottled highlights
+    for (let i = 0; i < 42; i++) {
+      const cx = (i * 73 + 29) % 256;
+      const cy = (i * 137 + 53) % 256;
+      const rad = 12 + (i % 5) * 6;
+      cCtx.fillStyle = i % 2 === 0 ? 'rgba(248, 232, 255, 0.16)' : 'rgba(65, 22, 88, 0.18)';
       cCtx.beginPath();
-      cCtx.moveTo(0, y);
-      cCtx.lineTo(256, y + 8);
-      cCtx.stroke();
+      cCtx.arc(cx, cy, rad, 0, Math.PI * 2);
+      cCtx.fill();
 
-      bCtx.strokeStyle = i % 2 === 0 ? '#b8b8b8' : '#555555';
-      bCtx.lineWidth = 3;
+      bCtx.fillStyle = i % 2 === 0 ? 'rgba(180, 180, 180, 0.28)' : 'rgba(72, 72, 72, 0.28)';
       bCtx.beginPath();
-      bCtx.moveTo(0, y);
-      bCtx.lineTo(256, y + 8);
-      bCtx.stroke();
+      bCtx.arc(cx, cy, rad * 0.85, 0, Math.PI * 2);
+      bCtx.fill();
     }
 
     const carapaceMap = new THREE.CanvasTexture(cCanvas);
@@ -815,11 +1216,11 @@ export class Stage1Boss3DModel {
   }
 
   /**
-   * Updates skeletal posture, facing yaw, jaw aperture, 10 dorsal 3D tentacles, and status flashes.
+   * Updates skeletal posture, facing yaw, jaw aperture, 10 dorsal 3D tendrils, and status flashes.
    * Returns `true` on walk footstep contact frames so footsteps & camera trauma match strides.
    */
   public update(
-    enemy: Enemy,
+    enemy: EnemyState,
     dt: number,
     playerPos: { x: number; y: number },
     nowSec: number
@@ -841,7 +1242,10 @@ export class Stage1Boss3DModel {
     // Target 360-degree facing yaw (local +Z points forward)
     let aimDx = playerPos.x - enemy.pos.x;
     let aimDz = playerPos.y - enemy.pos.y;
-    if (enemy.titanState === 'laser_sweep' && enemy.titanLaserAngle !== undefined) {
+    if (enemy.titanState === 'emerging' && enemy.bossEmergeOrigin && enemy.bossEmergeTarget) {
+      aimDx = enemy.bossEmergeTarget.x - enemy.bossEmergeOrigin.x;
+      aimDz = enemy.bossEmergeTarget.y - enemy.bossEmergeOrigin.y;
+    } else if (enemy.titanState === 'laser_sweep' && enemy.titanLaserAngle !== undefined) {
       aimDx = Math.cos(enemy.titanLaserAngle);
       aimDz = Math.sin(enemy.titanLaserAngle);
     } else if (enemy.titanState === 'tentacle_strike' && enemy.titanTentacleTarget) {
@@ -861,57 +1265,68 @@ export class Stage1Boss3DModel {
 
     // Status tint & flash modulation
     const flash = this.hitFlashTimer / 0.14;
-    const pulse = 0.72 + 0.22 * Math.sin(nowSec * 3.4);
+    const pulse = 0.78 + 0.24 * Math.sin(nowSec * 3.4);
     if (flash > 0) {
-      this.fleshMat.emissive.setHex(0xffffff);
-      this.fleshMat.emissiveIntensity = 0.75 + flash * 1.4;
-      this.carapaceMat.emissive.setHex(0xf5d0fe);
-      this.carapaceMat.emissiveIntensity = 0.25 + flash * 0.9;
+      this.fleshMat.emissive.setHex(0xe879f9);
+      this.fleshMat.emissiveIntensity = 0.22 + flash * 0.32;
+      this.carapaceMat.emissive.setHex(0xa855f7);
+      this.carapaceMat.emissiveIntensity = 0.14 + flash * 0.22;
     } else if (enemy.isChilled) {
       this.fleshMat.emissive.setHex(0x38bdf8);
       this.fleshMat.emissiveIntensity = 0.85;
       this.carapaceMat.emissive.setHex(0x0ea5e9);
       this.carapaceMat.emissiveIntensity = 0.35;
-    } else if ((enemy.shredStacks ?? 0) > 0) {
-      this.fleshMat.emissive.setHex(0xf97316);
+    } else if (enemy.isToxic) {
+      this.fleshMat.emissive.setHex(0x84cc16);
       this.fleshMat.emissiveIntensity = 0.85;
-      this.carapaceMat.emissive.setHex(0x9a3412);
+      this.carapaceMat.emissive.setHex(0x365314);
       this.carapaceMat.emissiveIntensity = 0.3;
+    } else if (enemy.isElectrified) {
+      this.fleshMat.emissive.setHex(0xa855f7);
+      this.fleshMat.emissiveIntensity = 1.05;
+      this.carapaceMat.emissive.setHex(0x3b82f6);
+      this.carapaceMat.emissiveIntensity = 0.35;
     } else {
-      this.fleshMat.emissive.setHex(0xd946ef);
-      this.fleshMat.emissiveIntensity = pulse;
-      this.carapaceMat.emissive.setHex(0x581c87);
-      this.carapaceMat.emissiveIntensity = 0.16;
+      this.fleshMat.emissive.setHex(0xc026d3);
+      this.fleshMat.emissiveIntensity = pulse * 0.26;
+      this.carapaceMat.emissive.setHex(0x3b1256);
+      this.carapaceMat.emissiveIntensity = 0.14;
     }
 
     this.breathPhase += dt * 2.4;
     const breath = Math.sin(this.breathPhase);
     const state = enemy.titanState || 'idle';
 
-    // Reset default pose accumulators before state blending
-    let jawOpen = 0.10 + breath * 0.04;
-    let headPitch = 0.06;
-    let chestPitch = 0.16 + breath * 0.03;
-    let chestBobY = breath * 4.5;
-    let tentacleSpreadFactor = 0.38;
-    let tentacleWaveFreq = 2.6;
+    // Default wide forward-hunched kaiju pose matching boss_walk_front / boss_walk_left
+    let jawOpen = 0.08 + breath * 0.03;
+    let neckLiftY = 74;
+    let headPitch = 0.12;
+    let chestPitch = 0.34 + breath * 0.03;
+    let chestBobY = breath * 4.0;
+    let tentacleSpreadFactor = 0.42;
+    let tentacleWaveFreq = 2.8;
     let tentacleWaveAmp = 14.0;
-    let throatScale = 0.75;
+    let throatScale = 0.72;
 
     if (state === 'emerging') {
-      const emergeProg = 1.0 - Math.max(0, (enemy.titanTimer ?? 4.0) / 4.0);
-      chestPitch = 0.55 * (1.0 - emergeProg) + 0.18;
-      jawOpen = 0.35 * Math.sin(emergeProg * Math.PI);
-      headPitch = -0.35 * Math.sin(emergeProg * Math.PI);
-      tentacleSpreadFactor = 0.5 + 0.5 * emergeProg;
-      tentacleWaveAmp = 24;
-      this.rootGroup.scale.setScalar(Math.max(0.25, 0.35 + emergeProg * 0.65));
+      const emergeProg = Math.min(1.0, Math.max(0.0, 1.0 - (enemy.titanTimer ?? 3.6) / 3.6));
+      const breachPulse = emergeProg >= 0.20 ? Math.sin(Math.min(1, (emergeProg - 0.20) / 0.68) * Math.PI) : 0;
+      chestPitch = 0.56 * (1.0 - emergeProg) + 0.34;
+      jawOpen = 0.14 + 0.52 * breachPulse;
+      neckLiftY = 74 + 18 * breachPulse;
+      headPitch = -0.32 * breachPulse;
+      tentacleSpreadFactor = 0.48 + 0.55 * emergeProg;
+      tentacleWaveAmp = 26;
+      const emergeScale = emergeProg < 0.22 ? 0.56 + (emergeProg / 0.22) * 0.08 : 0.64 + ((emergeProg - 0.22) / 0.78) * 0.36;
+      this.rootGroup.scale.setScalar(Math.min(1.0, emergeScale));
+      this.leftShoulder.rotation.set(-0.55 * breachPulse, 0.24, -0.28 * breachPulse);
+      this.rightShoulder.rotation.set(-0.55 * breachPulse, -0.24, 0.28 * breachPulse);
       this.lastStepHalfCycle = -1;
     } else if (state === 'dying') {
       const deathProg = 1.0 - Math.max(0, (enemy.titanTimer ?? 3.2) / 3.2);
-      chestPitch = 0.25 + deathProg * 0.95;
-      chestBobY = -deathProg * 95;
-      jawOpen = 0.65 * (1 - deathProg * 0.6);
+      chestPitch = 0.34 + deathProg * 0.92;
+      chestBobY = -deathProg * 90;
+      jawOpen = 0.68 * (1 - deathProg * 0.6);
       tentacleSpreadFactor = Math.max(0.1, 0.45 * (1 - deathProg));
       this.rootGroup.scale.setScalar(Math.max(0.55, 1.0 - deathProg * 0.35));
       this.lastStepHalfCycle = -1;
@@ -929,102 +1344,131 @@ export class Stage1Boss3DModel {
         const liftL = Math.max(0, Math.cos(this.walkPhase));
         const liftR = Math.max(0, -Math.cos(this.walkPhase));
 
-        chestBobY += Math.abs(stride) * 7.0;
-        chestPitch = 0.22 + Math.abs(stride) * 0.05;
+        chestBobY += Math.abs(stride) * 6.5;
+        chestPitch = 0.36 + Math.abs(stride) * 0.05;
         this.chestPivot.rotation.z = stride * 0.055;
-        this.chestPivot.rotation.y = stride * 0.06;
+        this.chestPivot.rotation.y = stride * 0.065;
 
-        // Alternate heavy gauntlet strides + hind legs
-        this.leftShoulder.rotation.set(stride * 0.36 - liftL * 0.14, 0.12, -0.08);
-        this.rightShoulder.rotation.set(-stride * 0.36 - liftR * 0.14, -0.12, 0.08);
-        this.leftElbow.rotation.set(-0.22 - liftL * 0.25, 0, 0);
-        this.rightElbow.rotation.set(-0.22 - liftR * 0.25, 0, 0);
+        // Heavy wide-splayed scythe-gauntlet stride
+        this.leftShoulder.rotation.set(stride * 0.34 - liftL * 0.14, 0.14, -0.14);
+        this.rightShoulder.rotation.set(-stride * 0.34 - liftR * 0.14, -0.14, 0.14);
+        this.leftElbow.rotation.set(-0.24 - liftL * 0.22, 0, 0.08);
+        this.rightElbow.rotation.set(-0.24 - liftR * 0.22, 0, -0.08);
 
-        this.leftHip.rotation.set(-stride * 0.42 - liftL * 0.18, 0, 0);
-        this.leftKnee.rotation.set(0.2 + liftL * 0.45, 0, 0);
-        this.rightHip.rotation.set(stride * 0.42 - liftR * 0.18, 0, 0);
-        this.rightKnee.rotation.set(0.2 + liftR * 0.45, 0, 0);
-      } else if (state === 'laser_sweep') {
+        this.leftHip.rotation.set(-stride * 0.40 - liftL * 0.18, 0, 0);
+        this.leftKnee.rotation.set(0.20 + liftL * 0.42, 0, 0);
+        this.rightHip.rotation.set(stride * 0.40 - liftR * 0.18, 0, 0);
+        this.rightKnee.rotation.set(0.20 + liftR * 0.42, 0, 0);
+      } else if (state === 'leap') {
         this.lastStepHalfCycle = -1;
-        // Rears head slightly back, jaws unhinge wide, arms plant firmly forward to brace beam recoil!
-        chestPitch = 0.05;
-        headPitch = -0.22;
-        jawOpen = 0.78 + Math.sin(nowSec * 18) * 0.06;
-        throatScale = 1.55 + Math.sin(nowSec * 24) * 0.22;
-        tentacleSpreadFactor = 0.72;
-        tentacleWaveFreq = 6.2;
+        const dur = Math.max(0.5, enemy.bossLeapDuration ?? 1.0);
+        const prog = Math.min(1.0, Math.max(0, (enemy.bossLeapElapsed ?? 0) / dur));
+        const airborneCurve = Math.sin(prog * Math.PI);
+        chestPitch = 0.24 - airborneCurve * 0.42;
+        neckLiftY = 82 + airborneCurve * 22;
+        headPitch = -0.18 + prog * 0.35;
+        jawOpen = 0.35 + airborneCurve * 0.45;
+        throatScale = 1.15 + airborneCurve * 0.35;
+        tentacleSpreadFactor = 0.72 + airborneCurve * 0.48;
+        tentacleWaveFreq = 9.0;
         tentacleWaveAmp = 18;
         this.chestPivot.rotation.z = 0;
         this.chestPivot.rotation.y = 0;
-        this.leftShoulder.rotation.set(-0.26, -0.15, 0.22);
-        this.rightShoulder.rotation.set(-0.26, 0.15, -0.22);
-        this.leftElbow.rotation.set(-0.18, 0, 0);
-        this.rightElbow.rotation.set(-0.18, 0, 0);
+        const armRaise = -0.75 * airborneCurve + 0.35 * prog;
+        this.leftShoulder.rotation.set(armRaise, 0.25, 0.22);
+        this.rightShoulder.rotation.set(armRaise, -0.25, -0.22);
+        this.leftElbow.rotation.set(-0.45 * airborneCurve, 0, 0);
+        this.rightElbow.rotation.set(-0.45 * airborneCurve, 0, 0);
+        const legTuck = -0.55 * airborneCurve;
+        this.leftHip.rotation.set(legTuck, 0, 0);
+        this.rightHip.rotation.set(legTuck, 0, 0);
+        this.leftKnee.rotation.set(0.65 * airborneCurve, 0, 0);
+        this.rightKnee.rotation.set(0.65 * airborneCurve, 0, 0);
+      } else if (state === 'laser_sweep') {
+        this.lastStepHalfCycle = -1;
+        // Cranes head & neck high, unhinges jaws wide, plants huge scythe gauntlets wide on the ground (boss_laser_front!)
+        chestPitch = 0.10;
+        neckLiftY = 98;
+        headPitch = -0.34;
+        jawOpen = 0.86 + Math.sin(nowSec * 18) * 0.06;
+        throatScale = 1.65 + Math.sin(nowSec * 24) * 0.22;
+        tentacleSpreadFactor = 0.78;
+        tentacleWaveFreq = 6.5;
+        tentacleWaveAmp = 18;
+        this.chestPivot.rotation.z = 0;
+        this.chestPivot.rotation.y = 0;
+        this.leftShoulder.rotation.set(-0.18, -0.18, 0.26);
+        this.rightShoulder.rotation.set(-0.18, 0.18, -0.26);
+        this.leftElbow.rotation.set(-0.12, 0, -0.14);
+        this.rightElbow.rotation.set(-0.12, 0, 0.14);
         this.resetLegsStance();
       } else if (state === 'tentacle_strike') {
         this.lastStepHalfCycle = -1;
-        // Aggressive forward lunge while channeling earth-impaling tentacles
         const isStrike = enemy.titanTentaclePhase === 'strike';
-        chestPitch = isStrike ? 0.34 : 0.22;
-        headPitch = isStrike ? 0.14 : -0.1;
-        jawOpen = isStrike ? 0.56 : 0.32;
-        throatScale = isStrike ? 1.25 : 0.95;
-        tentacleSpreadFactor = isStrike ? 0.85 : 0.65;
+        chestPitch = isStrike ? 0.42 : 0.28;
+        neckLiftY = isStrike ? 84 : 78;
+        headPitch = isStrike ? 0.14 : -0.08;
+        jawOpen = isStrike ? 0.56 : 0.30;
+        throatScale = isStrike ? 1.25 : 0.92;
+        tentacleSpreadFactor = isStrike ? 0.88 : 0.68;
         tentacleWaveFreq = 7.5;
         this.chestPivot.rotation.z = 0;
         this.chestPivot.rotation.y = 0;
-        const armSwing = isStrike ? -0.45 : -0.22;
-        this.leftShoulder.rotation.set(armSwing, 0.2, 0.15);
-        this.rightShoulder.rotation.set(armSwing, -0.2, -0.15);
-        this.leftElbow.rotation.set(-0.3, 0, 0);
-        this.rightElbow.rotation.set(-0.3, 0, 0);
+        const armSwing = isStrike ? -0.42 : -0.18;
+        this.leftShoulder.rotation.set(armSwing, 0.2, 0.18);
+        this.rightShoulder.rotation.set(armSwing, -0.2, -0.18);
+        this.leftElbow.rotation.set(-0.28, 0, 0);
+        this.rightElbow.rotation.set(-0.28, 0, 0);
         this.resetLegsStance();
       } else if (state === 'elemental_barrage') {
         this.lastStepHalfCycle = -1;
         const chargeDur = STAGE1_BOSS_CONFIG.elemental.chargeDuration;
         const prog = Math.min(1.0, Math.max(0, (chargeDur - (enemy.titanTimer ?? 0)) / chargeDur));
-        // Crown fans completely outward to cradle all 10 plasma spheres!
-        chestPitch = 0.08 - prog * 0.14;
-        chestBobY += prog * 14;
+        // Wide-planted roaring stance with all 10 tendrils fanned overhead (boss_elemental_front!)
+        chestPitch = 0.22 - prog * 0.14;
+        chestBobY += prog * 10;
+        neckLiftY = 78 + prog * 14;
         headPitch = -0.18 - prog * 0.12;
-        jawOpen = 0.25 + prog * 0.45;
-        throatScale = 1.0 + prog * 0.5;
-        tentacleSpreadFactor = 0.55 + prog * 0.55;
-        tentacleWaveFreq = 4.5 + prog * 4.5;
+        jawOpen = 0.26 + prog * 0.48;
+        throatScale = 1.0 + prog * 0.55;
+        tentacleSpreadFactor = 0.62 + prog * 0.56;
+        tentacleWaveFreq = 4.6 + prog * 4.5;
         tentacleWaveAmp = 10 + prog * 12;
         this.chestPivot.rotation.z = 0;
         this.chestPivot.rotation.y = 0;
-        this.leftShoulder.rotation.set(-0.2 - prog * 0.35, -0.1, 0.15 + prog * 0.25);
-        this.rightShoulder.rotation.set(-0.2 - prog * 0.35, 0.1, -0.15 - prog * 0.25);
-        this.leftElbow.rotation.set(-0.35, 0, 0);
-        this.rightElbow.rotation.set(-0.35, 0, 0);
+        this.leftShoulder.rotation.set(-0.14 - prog * 0.25, -0.12, 0.18 + prog * 0.24);
+        this.rightShoulder.rotation.set(-0.14 - prog * 0.25, 0.12, -0.18 - prog * 0.24);
+        this.leftElbow.rotation.set(-0.28, 0, 0);
+        this.rightElbow.rotation.set(-0.28, 0, 0);
         this.resetLegsStance();
       } else {
-        // Idle towering stance
+        // Idle wide-planted hunched stance
         this.lastStepHalfCycle = -1;
         this.chestPivot.rotation.z = 0;
         this.chestPivot.rotation.y = Math.sin(this.breathPhase * 0.5) * 0.04;
-        this.leftShoulder.rotation.set(breath * 0.06, 0, 0.05);
-        this.rightShoulder.rotation.set(breath * 0.06, 0, -0.05);
-        this.leftElbow.rotation.set(-0.18, 0, 0);
-        this.rightElbow.rotation.set(-0.18, 0, 0);
+        this.leftShoulder.rotation.set(breath * 0.05, 0, 0.08);
+        this.rightShoulder.rotation.set(breath * 0.05, 0, -0.08);
+        this.leftElbow.rotation.set(-0.16, 0, 0);
+        this.rightElbow.rotation.set(-0.16, 0, 0);
         this.resetLegsStance();
       }
     }
 
-    this.pelvis.position.y = 122 + chestBobY;
+    this.pelvis.position.y = 114 + chestBobY;
     this.chestPivot.rotation.x = chestPitch;
-    this.neckPivot.rotation.x = -chestPitch * 0.45 + headPitch * 0.35;
+    this.neckPivot.position.y = neckLiftY;
+    this.neckPivot.rotation.x = -chestPitch * 0.48 + headPitch * 0.35;
     this.headGroup.rotation.x = headPitch;
     this.lowerJawPivot.rotation.x = jawOpen;
-    this.throatGlowMesh.scale.set(0.85 * throatScale, 1.15 * throatScale, 1.1 * throatScale);
-    this.coreGlowMat.emissiveIntensity = 1.65 + 0.55 * Math.sin(nowSec * 6.0);
+    const activeThroatScale = jawOpen > 0.22 ? throatScale : 0.45;
+    this.throatGlowMesh.scale.set(0.75 * activeThroatScale, 0.95 * activeThroatScale, 0.95 * activeThroatScale);
+    this.coreGlowMat.emissiveIntensity = 1.18 + 0.35 * Math.sin(nowSec * 6.0);
+    this.podGlowMat.emissiveIntensity = 1.12 + 0.30 * Math.sin(nowSec * 4.2 + 1.1);
 
     // Update world matrices once before computing tentacle spine curves & world sockets
     this.group.updateMatrixWorld(true);
 
-    // Animate all 10 smooth tapered 3D dorsal tentacles in chest-local space, then cache world tips
-    const segs = 16;
+    const segs = 18;
     for (let i = 0; i < 10; i++) {
       const t = this.dorsalTentacles[i];
       const root = this.scratchRoot.copy(t.rootLocal);
@@ -1033,19 +1477,19 @@ export class Stage1Boss3DModel {
       const waveB = Math.cos(nowSec * (tentacleWaveFreq * 0.85) + t.phase * 1.4) * (tentacleWaveAmp * 0.7);
 
       const tip = this.scratchTip.set(
-        t.tipSpreadX * (0.72 + 0.35 * tentacleSpreadFactor) + waveA,
+        t.tipSpreadX * (0.76 + 0.36 * tentacleSpreadFactor) + waveA,
         t.tipHeight + waveB * 0.65,
-        t.tipFwdZ * (0.55 + 0.65 * tentacleSpreadFactor) + waveA * 0.35
+        t.tipFwdZ * (0.50 + 0.65 * tentacleSpreadFactor) + waveA * 0.35
       );
       const ctrl1 = this.scratchCtrl1.set(
         t.spreadX * 0.65,
-        t.rootLocal.y + 68 + waveA * 0.3,
+        t.rootLocal.y + 64 + waveA * 0.3,
         t.spreadZ - 26
       );
       const ctrl2 = this.scratchCtrl2.set(
-        t.spreadX * (0.85 + 0.25 * tentacleSpreadFactor) + waveB * 0.6,
-        (t.rootLocal.y + t.tipHeight) * 0.62 + 48,
-        t.spreadZ + 18 + waveA * 0.4
+        t.spreadX * (0.88 + 0.25 * tentacleSpreadFactor) + waveB * 0.65,
+        (t.rootLocal.y + t.tipHeight) * 0.62 + 44,
+        t.spreadZ + 16 + waveA * 0.4
       );
 
       for (let s = 0; s <= segs; s++) {
@@ -1062,10 +1506,10 @@ export class Stage1Boss3DModel {
           b0 * root.y + b1 * ctrl1.y + b2 * ctrl2.y + b3 * tip.y,
           b0 * root.z + b1 * ctrl1.z + b2 * ctrl2.z + b3 * tip.z
         );
-        // Subtle serpentine mid-spine undulation
+        // Sinuous whip-tendril undulation
         const midEnv = Math.sin(u * Math.PI);
-        pt.x += Math.sin(nowSec * 4.5 - u * 4.2 + t.phase) * 9.0 * midEnv;
-        pt.z += Math.cos(nowSec * 3.8 - u * 3.8 + t.phase) * 7.0 * midEnv;
+        pt.x += Math.sin(nowSec * 4.5 - u * 4.4 + t.phase) * 10.5 * midEnv;
+        pt.z += Math.cos(nowSec * 3.8 - u * 4.0 + t.phase) * 7.5 * midEnv;
       }
 
       this.updateTubeGeometry(t.geo, t.spinePoints, t.baseRadius, 8);
@@ -1075,7 +1519,7 @@ export class Stage1Boss3DModel {
       t.stinger.position.copy(lastPt);
       this.scratchDir.subVectors(lastPt, prevPt).normalize();
       if (this.scratchDir.lengthSq() > 0.0001) {
-        t.stinger.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), this.scratchDir);
+        t.stinger.quaternion.setFromUnitVectors(this.scratchForward, this.scratchDir);
       }
 
       // Cache world coordinates for Elemental Orbs & Dorsal Strike Sockets
@@ -1090,9 +1534,9 @@ export class Stage1Boss3DModel {
   }
 
   private resetLegsStance(): void {
-    this.leftHip.rotation.set(-0.08, 0.12, 0.05);
+    this.leftHip.rotation.set(-0.08, 0.14, 0.06);
     this.leftKnee.rotation.set(0.18, 0, 0);
-    this.rightHip.rotation.set(-0.08, -0.12, -0.05);
+    this.rightHip.rotation.set(-0.08, -0.14, -0.06);
     this.rightKnee.rotation.set(0.18, 0, 0);
   }
 
@@ -1111,7 +1555,6 @@ export class Stage1Boss3DModel {
   }
 
   public getCarapaceStrikeSocket(flankIndex: number, out: THREE.Vector3): THREE.Vector3 {
-    // Map the 4 strike tentacles symmetrically across the outer/inner dorsal roots
     const socketIndices = [6, 5, 0, 1];
     const idx = socketIndices[flankIndex % socketIndices.length];
     return out.copy(this.dorsalRootWorldCache[idx]);
@@ -1123,4 +1566,3 @@ export class Stage1Boss3DModel {
     for (const t of this.ownedTexs) t.dispose();
   }
 }
-

@@ -6,10 +6,10 @@ export const DOCTOR_CONFIG = {
   // Base LMB — Rapid Dual Pistols (~2x Commander's 0.65s baseline cadence)
   lmb: {
     cooldown: 0.33,
-    baseDamage: 16,
-    range: 500,
-    projectileSpeed: 840,
-    projectileRadius: 7,
+    baseDamage: 7,
+    range: 960,
+    projectileSpeed: 1350,
+    projectileRadius: 14,
     spreadAngleRad: 0.10
   },
 
@@ -17,15 +17,15 @@ export const DOCTOR_CONFIG = {
   toxicChain: {
     cooldown: 0.36,
     baseDamage: 15,
-    range: 520,
-    projectileSpeed: 820,
-    projectileRadius: 8,
+    range: 980,
+    projectileSpeed: 1320,
+    projectileRadius: 16,
     maxBounces: 3,
-    bounceRadius: 210,
+    bounceRadius: 400,
     bounceDamageFalloff: 0.85,
     stacksToExplode: 3,
     stackExpireDuration: 6.0,
-    explosionRadius: 115,
+    explosionRadius: 220,
     explosionDamage: 48,
     toxicDotDuration: 4.0,
     spreadAngleRad: 0.11
@@ -36,12 +36,12 @@ export const DOCTOR_CONFIG = {
     cooldown: 0.62,
     baseDamage: 32,
     maxScalpels: 7,
-    range: 430,
-    outboundSpeed: 640,
-    returnSpeed: 700,
-    projectileRadius: 20,
-    trailSpawnStepDist: 28,
-    trailRadius: 34,
+    range: 820,
+    outboundSpeed: 1080,
+    returnSpeed: 1180,
+    projectileRadius: 40,
+    trailSpawnStepDist: 56,
+    trailRadius: 68,
     trailDuration: 1.25,
     chillDuration: 2.5,
     maxActiveTrailSegments: 90,
@@ -51,7 +51,7 @@ export const DOCTOR_CONFIG = {
   // LMB Augment 3 — Vital Extraction
   vitalExtraction: {
     baseTetherCount: 3,
-    range: 390,
+    range: 760,
     tickInterval: 0.25,
     damagePerTick: 12,
     healFractionOfDamage: 0.35
@@ -61,9 +61,9 @@ export const DOCTOR_CONFIG = {
   rmb: {
     cooldown: 4.0,
     baseDamage: 32,
-    range: 480,
-    throwSpeed: 420,
-    detonationRadius: 115,
+    range: 920,
+    throwSpeed: 720,
+    detonationRadius: 220,
     puddleDuration: 5.0,
     puddleTickInterval: 0.45,
     puddleDamagePerTick: 11,
@@ -77,12 +77,12 @@ export const DOCTOR_CONFIG = {
     baseDrones: 1,
     maxDrones: 7,
     cooldownVolley: 4.0,
-    orbitRadius: 68,
-    hoverHeight: 38,
-    targetRange: 440,
+    orbitRadius: 142,
+    hoverHeight: 84,
+    targetRange: 860,
     fireInterval: 0.68,
     boltDamage: 16,
-    boltSpeed: 760
+    boltSpeed: 1250
   },
 
   // RMB Augment 2 — Toxic Cluster Bomb
@@ -93,9 +93,9 @@ export const DOCTOR_CONFIG = {
     subBombsPerMainBomb: 5,
     mainDamage: 36,
     subDamage: 24,
-    scatterMinRadius: 72,
-    scatterMaxRadius: 185,
-    subPuddleRadius: 72,
+    scatterMinRadius: 144,
+    scatterMaxRadius: 360,
+    subPuddleRadius: 144,
     subPuddleDuration: 4.0,
     subPuddleTickInterval: 0.5,
     subPuddleDamagePerTick: 8
@@ -105,16 +105,16 @@ export const DOCTOR_CONFIG = {
   holographicDecoy: {
     cooldown: 5.5,
     baseDecoys: 1,
-    spawnOffset: 38,
-    runSpeed: 175,
+    spawnOffset: 76,
+    runSpeed: 380,
     hitsToDestroy: 2,
-    throwRange: 280,
+    throwRange: 520,
     decoyHealth: 180,
     duration: 6.0,
-    tauntRadius: 350,
-    explosionRadius: 125,
+    tauntRadius: 660,
+    explosionRadius: 240,
     explosionDamage: 52,
-    puddleRadius: 110,
+    puddleRadius: 210,
     puddleDuration: 4.5,
     maxActiveDecoys: 12
   },
@@ -122,12 +122,12 @@ export const DOCTOR_CONFIG = {
   // Dash — Therapeutic Pass (1.5x normal Commander distance)
   therapeuticPass: {
     cooldown: 4.0,
-    commanderDistanceFactor: 1.5, // 1.5x Commander dash distance (230*3.2*0.22 = 161.92 -> 242.88)
+    commanderDistanceFactor: 1.5, // 1.5x Commander dash distance (scaled with 2x entity size)
     duration: 0.26,
     enemyDamage: 48,
     allyHeal: 32,
     selfHeal: 24,
-    sweepHitRadius: 34,
+    sweepHitRadius: 72,
     afterimageCount: 6
   },
 
@@ -146,8 +146,8 @@ export const DOCTOR_CONFIG = {
     castAnimDuration: 0.80,
     castAnimFps: 10,
     duration: 5.0,
-    armHalfLength: 230,
-    armHalfWidth: 74,
+    armHalfLength: 440,
+    armHalfWidth: 144,
     healPerSecond: 26,
     pulseDamage: 32,
     pulseInterval: 0.5,
@@ -159,8 +159,8 @@ export const DOCTOR_CONFIG = {
   mobileSanctuary: {
     duration: 5.0,
     rotationSpeedRad: 3.4,
-    armHalfLength: 240,
-    armHalfWidth: 76
+    armHalfLength: 460,
+    armHalfWidth: 148
   },
 
   // Ultimate Augment 2 — Divine Intervention
@@ -168,12 +168,12 @@ export const DOCTOR_CONFIG = {
     crossDuration: 3.0,
     angelDuration: 10.0,
     angelCount: 4,
-    quadrantOffsetDist: 130,
-    hoverHeight: 46,
-    targetRange: 480,
+    quadrantOffsetDist: 250,
+    hoverHeight: 96,
+    targetRange: 920,
     fireInterval: 0.72,
     boltDamage: 28,
-    boltSpeed: 740
+    boltSpeed: 1220
   },
 
   // Ultimate Augment 3 — Rain of Crosses
@@ -181,13 +181,13 @@ export const DOCTOR_CONFIG = {
     duration: 5.0,
     spawnInterval: 0.36,
     baseCrossesPerWave: 2,
-    maxSpawnRadius: 260,
-    fallStartHeight: 240,
-    fallSpeed: 620,
-    impactRadius: 88,
+    maxSpawnRadius: 480,
+    fallStartHeight: 440,
+    fallSpeed: 1050,
+    impactRadius: 172,
     impactDamage: 44,
-    groundCrossHalfLength: 68,
-    groundCrossHalfWidth: 26,
+    groundCrossHalfLength: 136,
+    groundCrossHalfWidth: 52,
     groundFieldPulseDamage: 16,
     groundFieldHealPerSecond: 14,
     groundFieldPulseInterval: 0.5
