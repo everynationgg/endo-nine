@@ -2,72 +2,102 @@ import { EnemyState, Vector2 } from './types';
 
 export class SpatialGrid {
   private cellSize: number;
-  private grid: Map<string, EnemyState[]> = new Map();
+  private invCellSize: number;
+  private grid: Map<number, EnemyState[]> = new Map();
+  private activeBuckets: EnemyState[][] = [];
 
   constructor(cellSize: number = 150) {
     this.cellSize = cellSize;
+    this.invCellSize = 1 / cellSize;
   }
 
   public clear(): void {
-    this.grid.clear();
+    for (let i = 0; i < this.activeBuckets.length; i++) {
+      this.activeBuckets[i].length = 0;
+    }
+    this.activeBuckets.length = 0;
+    if (this.grid.size > 4096) {
+      this.grid.clear();
+    }
   }
 
-  private getKey(cx: number, cy: number): string {
-    return `${cx},${cy}`;
+  private getKey(cx: number, cy: number): number {
+    return (((cx + 32768) & 0xffff) << 16) | ((cy + 32768) & 0xffff);
   }
 
   public insert(enemy: EnemyState): void {
-    const cx = Math.floor(enemy.pos.x / this.cellSize);
-    const cy = Math.floor(enemy.pos.y / this.cellSize);
+    const cx = Math.floor(enemy.pos.x * this.invCellSize);
+    const cy = Math.floor(enemy.pos.y * this.invCellSize);
     const key = this.getKey(cx, cy);
     let list = this.grid.get(key);
     if (!list) {
       list = [];
       this.grid.set(key, list);
     }
+    if (list.length === 0) {
+      this.activeBuckets.push(list);
+    }
     list.push(enemy);
   }
 
-  public getNearby(pos: Vector2, radius: number): EnemyState[] {
-    const minCx = Math.floor((pos.x - radius) / this.cellSize);
-    const maxCx = Math.floor((pos.x + radius) / this.cellSize);
-    const minCy = Math.floor((pos.y - radius) / this.cellSize);
-    const maxCy = Math.floor((pos.y + radius) / this.cellSize);
-
-    const results: EnemyState[] = [];
+  /**
+   * Populates `out` with enemies within `radius` of `pos` and returns `out` (zero-allocation when reused).
+   */
+  public getNearbyInto(pos: Vector2, radius: number, out: EnemyState[]): EnemyState[] {
+    out.length = 0;
+    const minCx = Math.floor((pos.x - radius) * this.invCellSize);
+    const maxCx = Math.floor((pos.x + radius) * this.invCellSize);
+    const minCy = Math.floor((pos.y - radius) * this.invCellSize);
+    const maxCy = Math.floor((pos.y + radius) * this.invCellSize);
     const r2 = radius * radius;
 
     for (let cx = minCx; cx <= maxCx; cx++) {
+      const shiftedX = ((cx + 32768) & 0xffff) << 16;
       for (let cy = minCy; cy <= maxCy; cy++) {
-        const list = this.grid.get(this.getKey(cx, cy));
-        if (!list) continue;
+        const list = this.grid.get(shiftedX | ((cy + 32768) & 0xffff));
+        if (!list || list.length === 0) continue;
         for (let i = 0; i < list.length; i++) {
           const e = list[i];
           const dx = e.pos.x - pos.x;
           const dy = e.pos.y - pos.y;
           if (dx * dx + dy * dy <= r2) {
-            results.push(e);
+            out.push(e);
           }
         }
       }
     }
 
-    return results;
+    return out;
+  }
+
+  public getNearby(pos: Vector2, radius: number): EnemyState[] {
+    return this.getNearbyInto(pos, radius, []);
   }
 
   public findNearest(pos: Vector2, maxRange: number): EnemyState | null {
-    const nearby = this.getNearby(pos, maxRange);
+    const minCx = Math.floor((pos.x - maxRange) * this.invCellSize);
+    const maxCx = Math.floor((pos.x + maxRange) * this.invCellSize);
+    const minCy = Math.floor((pos.y - maxRange) * this.invCellSize);
+    const maxCy = Math.floor((pos.y + maxRange) * this.invCellSize);
+
     let nearest: EnemyState | null = null;
     let minD2 = maxRange * maxRange;
 
-    for (let i = 0; i < nearby.length; i++) {
-      const e = nearby[i];
-      const dx = e.pos.x - pos.x;
-      const dy = e.pos.y - pos.y;
-      const d2 = dx * dx + dy * dy;
-      if (d2 < minD2) {
-        minD2 = d2;
-        nearest = e;
+    for (let cx = minCx; cx <= maxCx; cx++) {
+      const shiftedX = ((cx + 32768) & 0xffff) << 16;
+      for (let cy = minCy; cy <= maxCy; cy++) {
+        const list = this.grid.get(shiftedX | ((cy + 32768) & 0xffff));
+        if (!list || list.length === 0) continue;
+        for (let i = 0; i < list.length; i++) {
+          const e = list[i];
+          const dx = e.pos.x - pos.x;
+          const dy = e.pos.y - pos.y;
+          const d2 = dx * dx + dy * dy;
+          if (d2 < minD2) {
+            minD2 = d2;
+            nearest = e;
+          }
+        }
       }
     }
 

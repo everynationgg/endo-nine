@@ -88,6 +88,8 @@ export class Simulation {
   private stage1EnemySpawningUnlocked: boolean = false;
   private stage1EnemySpawnUnlockReason: string | null = null;
   private essentialDialogueBusyChecker: (() => boolean) | null = null;
+  private crowdNeighborsScratch: EnemyState[] = [];
+  private collisionNeighborsScratch: EnemyState[] = [];
 
   // Development Debugger Toggles (off by default in normal gameplay)
   public devPlayerInvulnerable: boolean = false;
@@ -6788,9 +6790,12 @@ export class Simulation {
       || Math.abs(tZ - e.navGoalPos.z) > 40;
 
     // Eliminate blind 2D distance bypass: only charge directly on matching elevation with clean nav segment
-    const isDirectWalk = heightDiff < 28 && this.state.terrain.isSegmentClearForNav(e.pos, tPos);
+    const isDirectWalk =
+      distToTarget < 180 &&
+      heightDiff < 28 &&
+      this.state.terrain.isSegmentClearForNav(e.pos, tPos);
 
-    if (isDirectWalk && distToTarget < 180) {
+    if (isDirectWalk) {
       e.navWaypoint = { x: tPos.x, y: tPos.y };
       e.navGoalPos = { x: tPos.x, y: tPos.y, z: tZ };
       e.navTimer = 0.25;
@@ -6870,7 +6875,7 @@ export class Simulation {
     let avoidVx = 0;
     let avoidVy = 0;
     const crowdRadius = e.radius * 2.2;
-    const nearbyCrowd = this.spatialGrid.getNearby(e.pos, crowdRadius + 24);
+    const nearbyCrowd = this.spatialGrid.getNearbyInto(e.pos, crowdRadius + 24, this.crowdNeighborsScratch);
     for (let c = 0; c < nearbyCrowd.length; c++) {
       const other = nearbyCrowd[c];
       if (other.id === e.id || other.health <= 0) continue;
@@ -7588,20 +7593,13 @@ export class Simulation {
 
     // 3 relaxation iterations using SpatialGrid neighbor lookup (eliminates O(N^2) loops)
     for (let iter = 0; iter < 3; iter++) {
-      if (iter > 0) {
-        this.spatialGrid.clear();
-        for (let i = 0; i < len; i++) {
-          if (enemies[i].health > 0) this.spatialGrid.insert(enemies[i]);
-        }
-      }
-
       // 1. Enemy vs Enemy Collision
       for (let i = 0; i < len; i++) {
         const e1 = enemies[i];
         if (e1.health <= 0 || e1.isSpawning || e1.isBossLeaping || (e1.isStage1Titan && (e1.titanState === 'emerging' || e1.titanState === 'dying' || e1.titanState === 'leap'))) continue;
 
         const searchR = e1.radius + 160;
-        const neighbors = this.spatialGrid.getNearby(e1.pos, searchR);
+        const neighbors = this.spatialGrid.getNearbyInto(e1.pos, searchR, this.collisionNeighborsScratch);
         for (let ni = 0; ni < neighbors.length; ni++) {
           const e2 = neighbors[ni];
           if (e2.id <= e1.id) continue; // Deduplicate pair checks & self-check

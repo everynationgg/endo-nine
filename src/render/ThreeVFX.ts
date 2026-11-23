@@ -1,6 +1,10 @@
 import * as THREE from 'three';
 import { Vector2 } from '../sim/types';
 
+const THREE_WHITE = new THREE.Color(0xffffff);
+const _tmpCol1 = new THREE.Color();
+const _tmpWhiteGhostTint = new THREE.Color(0xe6fff7);
+
 interface ActiveRing {
   mesh: THREE.Mesh;
   maxRadius: number;
@@ -408,7 +412,17 @@ export class ThreeVFX {
   private sharedSparkGeo!: THREE.BufferGeometry;
   private sharedDebrisGeo!: THREE.BufferGeometry;
   private sharedDustGeo = new THREE.PlaneGeometry(1.0, 1.0);
+  private sharedUnitPlaneGeo = new THREE.PlaneGeometry(1.0, 1.0);
+  private sharedUnitPlaneXZGeo: THREE.BufferGeometry;
   private dustRadialTex: THREE.CanvasTexture | null = null;
+
+  // Persistent compiled shader templates & object pools (prevents synchronous GPU shader recompilation & GC churn)
+  private shaderTemplates: Map<string, THREE.ShaderMaterial> = new Map();
+  private shaderPool: Map<string, THREE.ShaderMaterial[]> = new Map();
+  private basicMatPool: THREE.MeshBasicMaterial[] = [];
+  private damageTexCache: Map<string, THREE.CanvasTexture> = new Map();
+  private damageSpritePool: THREE.Sprite[] = [];
+  private coarseHeightBuf: Float32Array = new Float32Array(13 * 13);
 
   // Single persistent pooled PointLight for orbital strikes & ultimate detonations (avoids shader recompilation)
   public sharedOrbitalLight: THREE.PointLight;
@@ -450,8 +464,110 @@ export class ThreeVFX {
       });
     }
     this.sharedSparkGeo = this.createOrganicSparkQuadGeo();
+    this.sharedSparkGeo.userData.isSharedGeo = true;
     this.sharedDebrisGeo = this.createOrganicRockClusterGeo();
+    this.sharedDebrisGeo.userData.isSharedGeo = true;
+    this.sharedDustGeo.userData.isSharedGeo = true;
+    this.sharedUnitPlaneGeo.userData.isSharedGeo = true;
+    this.sharedUnitPlaneXZGeo = new THREE.PlaneGeometry(1.0, 1.0);
+    this.sharedUnitPlaneXZGeo.rotateX(-Math.PI / 2);
+    this.sharedUnitPlaneXZGeo.userData.isSharedGeo = true;
+    this.bloodPlaneGeo.userData.isSharedGeo = true;
     this.dustRadialTex = this.createSoftSmokeTexture();
+  }
+
+  private getOrCompileShaderTemplate(
+    key: string,
+    buildConfig: () => THREE.ShaderMaterialParameters
+  ): THREE.ShaderMaterial {
+    let tpl = this.shaderTemplates.get(key);
+    if (!tpl) {
+      tpl = new THREE.ShaderMaterial(buildConfig());
+      tpl.userData.isTemplate = true;
+      this.shaderTemplates.set(key, tpl);
+    }
+    return tpl;
+  }
+
+  private acquireShader(
+    key: string,
+    buildConfig: () => THREE.ShaderMaterialParameters,
+    uniformUpdates?: Record<string, unknown>
+  ): THREE.ShaderMaterial {
+    const pool = this.shaderPool.get(key);
+    let mat: THREE.ShaderMaterial;
+    if (pool && pool.length > 0) {
+      mat = pool.pop()!;
+    } else {
+      mat = this.getOrCompileShaderTemplate(key, buildConfig).clone();
+      mat.userData.poolKey = key;
+    }
+    if (uniformUpdates) {
+      for (const uKey in uniformUpdates) {
+        const u = mat.uniforms[uKey];
+        if (!u) continue;
+        const val = uniformUpdates[uKey];
+        if (val instanceof THREE.Color) {
+          if (u.value instanceof THREE.Color) u.value.copy(val);
+          else u.value = val.clone();
+        } else if (val instanceof THREE.Vector4) {
+          if (u.value instanceof THREE.Vector4) u.value.copy(val);
+          else u.value = val.clone();
+        } else {
+          u.value = val;
+        }
+      }
+    }
+    return mat;
+  }
+
+  private releaseMaterial(mat: THREE.Material | undefined | null): void {
+    if (!mat || mat.userData?.isTemplate) return;
+    const poolKey = mat.userData?.poolKey as string | undefined;
+    if (poolKey && (mat as THREE.ShaderMaterial).isShaderMaterial) {
+      let pool = this.shaderPool.get(poolKey);
+      if (!pool) {
+        pool = [];
+        this.shaderPool.set(poolKey, pool);
+      }
+      if (pool.length < 128) {
+        pool.push(mat as THREE.ShaderMaterial);
+        return;
+      }
+    }
+    if (mat.userData?.isPooledBasicMat && (mat as THREE.MeshBasicMaterial).isMeshBasicMaterial) {
+      if (this.basicMatPool.length < 160) {
+        const bm = mat as THREE.MeshBasicMaterial;
+        bm.map = null;
+        this.basicMatPool.push(bm);
+        return;
+      }
+    }
+    mat.dispose();
+  }
+
+  private acquireBasicMat(
+    colorHex: number,
+    opacity: number = 1.0,
+    blending: THREE.Blending = THREE.NormalBlending,
+    side: THREE.Side = THREE.FrontSide,
+    depthWrite: boolean = true,
+    map: THREE.Texture | null = null
+  ): THREE.MeshBasicMaterial {
+    let bm = this.basicMatPool.pop();
+    if (!bm) {
+      bm = new THREE.MeshBasicMaterial({ transparent: true });
+      bm.userData.isPooledBasicMat = true;
+    }
+    bm.color.setHex(colorHex);
+    bm.transparent = true;
+    bm.opacity = opacity;
+    bm.blending = blending;
+    bm.side = side;
+    bm.depthWrite = depthWrite;
+    bm.map = map;
+    bm.needsUpdate = map !== null;
+    return bm;
   }
 
   public getActiveParticleCount(): number {
@@ -495,12 +611,19 @@ export class ThreeVFX {
     });
     toRemove.forEach((child) => {
       this.group.remove(child);
+      if ((child as THREE.Sprite).isSprite && child.userData?.isPooledDamageSprite) {
+        const sp = child as THREE.Sprite;
+        if (this.damageSpritePool.length < 128) {
+          this.damageSpritePool.push(sp);
+          return;
+        }
+      }
       child.traverse((c) => {
         if ((c as THREE.Mesh).isMesh || (c as THREE.Line).isLine) {
           const m = c as THREE.Mesh;
-          if (!m.userData?.isSharedGeo) m.geometry?.dispose();
-          if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
-          else m.material?.dispose();
+          if (!m.userData?.isSharedGeo && !m.geometry?.userData?.isSharedGeo) m.geometry?.dispose();
+          if (Array.isArray(m.material)) m.material.forEach((mat) => this.releaseMaterial(mat));
+          else if (!m.userData?.isSharedMat) this.releaseMaterial(m.material);
         }
       });
     });
@@ -697,26 +820,29 @@ export class ThreeVFX {
     seed: number,
     additive: boolean = false
   ): THREE.ShaderMaterial {
-    return new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
-      uniforms: {
-        uProgress: { value: 0.0 },
-        uSeed: { value: seed },
-        uCoreCol: { value: new THREE.Color(coreHex) },
-        uMidCol: { value: new THREE.Color(midHex) },
-        uSmokeCol: { value: new THREE.Color(smokeHex) }
-      },
-      vertexShader: `
+    const tplKey = additive ? 'explosion_puff_add' : 'explosion_puff_normal';
+    const mat = this.acquireShader(
+      tplKey,
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: additive ? THREE.AdditiveBlending : THREE.NormalBlending,
+        uniforms: {
+          uProgress: { value: 0.0 },
+          uSeed: { value: 0.0 },
+          uCoreCol: { value: new THREE.Color(0xffffff) },
+          uMidCol: { value: new THREE.Color(0xffffff) },
+          uSmokeCol: { value: new THREE.Color(0x000000) }
+        },
+        vertexShader: `
         varying vec2 vUv;
         void main() {
           vUv = uv * 2.0 - 1.0;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: `
+        fragmentShader: `
         uniform float uProgress;
         uniform float uSeed;
         uniform vec3 uCoreCol;
@@ -770,7 +896,13 @@ export class ThreeVFX {
           gl_FragColor = vec4(col, alpha);
         }
       `
-    });
+      }),
+      { uProgress: 0.0, uSeed: seed }
+    );
+    (mat.uniforms.uCoreCol.value as THREE.Color).setHex(coreHex);
+    (mat.uniforms.uMidCol.value as THREE.Color).setHex(midHex);
+    (mat.uniforms.uSmokeCol.value as THREE.Color).setHex(smokeHex);
+    return mat;
   }
 
   /** Ragged visceral alien ichor droplet billboard shader for internal-rupture bursts. */
@@ -779,24 +911,26 @@ export class ThreeVFX {
     edgeHex: number,
     seed: number
   ): THREE.ShaderMaterial {
-    return new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uAlpha: { value: 0.95 },
-        uSeed: { value: seed },
-        uCoreCol: { value: new THREE.Color(coreHex) },
-        uEdgeCol: { value: new THREE.Color(edgeHex) }
-      },
-      vertexShader: `
+    const mat = this.acquireShader(
+      'splatter_droplet',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uAlpha: { value: 0.95 },
+          uSeed: { value: 0.0 },
+          uCoreCol: { value: new THREE.Color(0xffffff) },
+          uEdgeCol: { value: new THREE.Color(0xffffff) }
+        },
+        vertexShader: `
         varying vec2 vUv;
         void main() {
           vUv = uv * 2.0 - 1.0;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: `
+        fragmentShader: `
         uniform float uAlpha;
         uniform float uSeed;
         uniform vec3 uCoreCol;
@@ -829,7 +963,12 @@ export class ThreeVFX {
           gl_FragColor = vec4(col, clamp(coreMask * 1.35 * uAlpha, 0.0, 0.96));
         }
       `
-    });
+      }),
+      { uAlpha: 0.95, uSeed: seed }
+    );
+    (mat.uniforms.uCoreCol.value as THREE.Color).setHex(coreHex);
+    (mat.uniforms.uEdgeCol.value as THREE.Color).setHex(edgeHex);
+    return mat;
   }
 
   /** Organic turbulent shockwave vapor & flame gust shader (zero crisp geometric rings). */
@@ -838,28 +977,28 @@ export class ThreeVFX {
     secondaryHex?: number,
     seed: number = 0
   ): THREE.ShaderMaterial {
-    const pCol = new THREE.Color(primaryHex);
-    const sCol = secondaryHex !== undefined ? new THREE.Color(secondaryHex) : pCol.clone().lerp(new THREE.Color(0xffffff), 0.38);
-    return new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uProgress: { value: 0.08 },
-        uAlpha: { value: 1.0 },
-        uSeed: { value: seed },
-        uPrimary: { value: pCol },
-        uSecondary: { value: sCol }
-      },
-      vertexShader: `
+    const mat = this.acquireShader(
+      'organic_ripple',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uProgress: { value: 0.08 },
+          uAlpha: { value: 1.0 },
+          uSeed: { value: 0.0 },
+          uPrimary: { value: new THREE.Color(0xffffff) },
+          uSecondary: { value: new THREE.Color(0xffffff) }
+        },
+        vertexShader: `
         varying vec2 vUv;
         void main() {
           vUv = uv * 2.0 - 1.0;
           gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
         }
       `,
-      fragmentShader: `
+        fragmentShader: `
         uniform float uProgress;
         uniform float uAlpha;
         uniform float uSeed;
@@ -896,7 +1035,18 @@ export class ThreeVFX {
           gl_FragColor = vec4(col, alpha);
         }
       `
-    });
+      }),
+      { uProgress: 0.08, uAlpha: 1.0, uSeed: seed }
+    );
+    const pCol = mat.uniforms.uPrimary.value as THREE.Color;
+    const sCol = mat.uniforms.uSecondary.value as THREE.Color;
+    pCol.setHex(primaryHex);
+    if (secondaryHex !== undefined) {
+      sCol.setHex(secondaryHex);
+    } else {
+      sCol.copy(pCol).lerp(THREE_WHITE, 0.38);
+    }
+    return mat;
   }
 
   /**
@@ -929,8 +1079,8 @@ export class ThreeVFX {
       const oldest = this.explosionClouds.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
-        oldest.mesh.geometry.dispose();
-        oldest.mat.dispose();
+        if (!oldest.mesh.userData?.isSharedGeo) oldest.mesh.geometry.dispose();
+        this.releaseMaterial(oldest.mat);
       }
     }
 
@@ -940,9 +1090,10 @@ export class ThreeVFX {
       const ang = (i / fireballCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.5;
       const radialDist = (i === 0 ? 0.04 : 0.14 + Math.random() * 0.34) * radius;
       const puffSize = radius * (i === 0 ? 0.85 : 0.45 + Math.random() * 0.40);
-      const geo = new THREE.PlaneGeometry(puffSize, puffSize);
       const mat = this.createExplosionPuffShader(pal.core, pal.mid, pal.smoke, Math.random() * 100, false);
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.setScalar(0.36 * puffSize);
       mesh.position.set(
         pos.x + Math.cos(ang) * radialDist,
         burstY + puffSize * 0.18 + Math.random() * 16,
@@ -960,8 +1111,8 @@ export class ThreeVFX {
         vz: Math.sin(ang) * speedOut,
         drag: 3.4,
         lift: 32,
-        startScale: 0.36,
-        endScale: 1.45 + Math.random() * 0.45,
+        startScale: 0.36 * puffSize,
+        endScale: (1.45 + Math.random() * 0.45) * puffSize,
         elapsed: 0,
         duration
       });
@@ -972,9 +1123,10 @@ export class ThreeVFX {
     for (let i = 0; i < dustRingCount; i++) {
       const ang = (i / dustRingCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
       const puffSize = radius * (0.42 + Math.random() * 0.28);
-      const geo = new THREE.PlaneGeometry(puffSize, puffSize);
       const mat = this.createExplosionPuffShader(pal.mid, pal.dust, pal.smoke, Math.random() * 100, false);
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.setScalar(0.45 * puffSize);
       mesh.position.set(
         pos.x + Math.cos(ang) * (radius * 0.18),
         baseElev + puffSize * 0.12,
@@ -989,8 +1141,8 @@ export class ThreeVFX {
         vz: Math.sin(ang) * (radius * 1.15),
         drag: 3.8,
         lift: 10,
-        startScale: 0.45,
-        endScale: 1.65,
+        startScale: 0.45 * puffSize,
+        endScale: 1.65 * puffSize,
         elapsed: 0,
         duration: 0.65 + Math.random() * 0.30
       });
@@ -1001,14 +1153,13 @@ export class ThreeVFX {
     for (let s = 0; s < sparkCount; s++) {
       const ang = Math.random() * Math.PI * 2;
       const spd = 110 + Math.random() * 230;
-      const mat = new THREE.MeshBasicMaterial({
-        color: s % 3 === 0 ? pal.core : pal.mid,
-        transparent: true,
-        opacity: 0.95,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
+      const mat = this.acquireBasicMat(
+        s % 3 === 0 ? pal.core : pal.mid,
+        0.95,
+        THREE.AdditiveBlending,
+        THREE.DoubleSide,
+        false
+      );
       const spk = new THREE.Mesh(this.sharedSparkGeo, mat);
       spk.userData.isSharedGeo = true;
       spk.position.set(pos.x, burstY + 4, pos.y);
@@ -1073,9 +1224,10 @@ export class ThreeVFX {
     for (let i = 0; i < mistCount; i++) {
       const ang = (i / mistCount) * Math.PI * 2 + Math.random() * 0.6;
       const size = Math.max(46, radius * (isBig ? 1.5 : 1.15)) * (0.65 + Math.random() * 0.5);
-      const geo = new THREE.PlaneGeometry(size, size);
       const mat = this.createExplosionPuffShader(coreHex, ichorHex, mistHex, Math.random() * 100, i === 0);
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.setScalar(0.32 * size);
       mesh.position.set(
         pos.x + Math.cos(ang) * (i === 0 ? 0 : radius * 0.22),
         torsoY + (Math.random() - 0.3) * 14,
@@ -1092,8 +1244,8 @@ export class ThreeVFX {
         vz: Math.sin(ang) * spd,
         drag: 4.0,
         lift: 18,
-        startScale: 0.32,
-        endScale: 1.55,
+        startScale: 0.32 * size,
+        endScale: 1.55 * size,
         elapsed: 0,
         duration: isBig ? 0.72 + Math.random() * 0.35 : 0.42 + Math.random() * 0.22
       });
@@ -1104,8 +1256,8 @@ export class ThreeVFX {
       const oldest = this.splatterDroplets.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
-        oldest.mesh.geometry.dispose();
-        oldest.mat.dispose();
+        if (!oldest.mesh.userData?.isSharedGeo) oldest.mesh.geometry.dispose();
+        this.releaseMaterial(oldest.mat);
       }
     }
 
@@ -1115,9 +1267,10 @@ export class ThreeVFX {
       const ang = (d / dropletCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.45;
       const spd = baseSpeed * (0.45 + Math.random() * 0.95);
       const dropSize = (isBig ? 18 : 11) + Math.random() * (isBig ? 18 : 11);
-      const geo = new THREE.PlaneGeometry(dropSize, dropSize);
       const mat = this.createSplatterDropletShader(coreHex, ichorHex, Math.random() * 60);
-      const mesh = new THREE.Mesh(geo, mat);
+      const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.set(dropSize, dropSize, 1);
       mesh.position.set(
         pos.x + Math.cos(ang) * (radius * 0.25),
         torsoY + (Math.random() - 0.5) * 12,
@@ -1222,17 +1375,53 @@ export class ThreeVFX {
     const posAttr = geo.attributes.position as THREE.BufferAttribute;
     const centerH = this.getTerrainHeight(centerX, centerZ, fallbackElevation);
 
-    for (let i = 0; i < posAttr.count; i++) {
-      const lx = posAttr.getX(i);
-      const lz = posAttr.getZ(i);
-      const wx = centerX + lx;
-      const wz = centerZ + lz;
-      let wy = this.getTerrainHeight(wx, wz, centerH);
-      // Clamp extreme vertical cliff spikes so the decal doesn't stretch up sheer vertical walls
-      if (Math.abs(wy - centerH) > 42) {
-        wy = centerH + Math.sign(wy - centerH) * 42;
+    if (segments > 12 && halfSize > 0.001) {
+      const coarseSegs = 12;
+      const coarseSide = coarseSegs + 1;
+      const fullSize = halfSize * 2;
+      const invSize = coarseSegs / fullSize;
+      for (let gz = 0; gz < coarseSide; gz++) {
+        const wz = centerZ - halfSize + (gz / coarseSegs) * fullSize;
+        const rowBase = gz * coarseSide;
+        for (let gx = 0; gx < coarseSide; gx++) {
+          const wx = centerX - halfSize + (gx / coarseSegs) * fullSize;
+          let wy = this.getTerrainHeight(wx, wz, centerH);
+          if (Math.abs(wy - centerH) > 42) {
+            wy = centerH + Math.sign(wy - centerH) * 42;
+          }
+          this.coarseHeightBuf[rowBase + gx] = wy - centerH + yOffset;
+        }
       }
-      posAttr.setY(i, wy - centerH + yOffset);
+      for (let i = 0; i < posAttr.count; i++) {
+        const u = Math.max(0, Math.min(coarseSegs, (posAttr.getX(i) + halfSize) * invSize));
+        const v = Math.max(0, Math.min(coarseSegs, (posAttr.getZ(i) + halfSize) * invSize));
+        const x0 = Math.min(coarseSegs - 1, Math.floor(u));
+        const z0 = Math.min(coarseSegs - 1, Math.floor(v));
+        const fx = u - x0;
+        const fz = v - z0;
+        const row0 = z0 * coarseSide;
+        const row1 = row0 + coarseSide;
+        const h00 = this.coarseHeightBuf[row0 + x0];
+        const h10 = this.coarseHeightBuf[row0 + x0 + 1];
+        const h01 = this.coarseHeightBuf[row1 + x0];
+        const h11 = this.coarseHeightBuf[row1 + x0 + 1];
+        const h0 = h00 + (h10 - h00) * fx;
+        const h1 = h01 + (h11 - h01) * fx;
+        posAttr.setY(i, h0 + (h1 - h0) * fz);
+      }
+    } else {
+      for (let i = 0; i < posAttr.count; i++) {
+        const lx = posAttr.getX(i);
+        const lz = posAttr.getZ(i);
+        const wx = centerX + lx;
+        const wz = centerZ + lz;
+        let wy = this.getTerrainHeight(wx, wz, centerH);
+        // Clamp extreme vertical cliff spikes so the decal doesn't stretch up sheer vertical walls
+        if (Math.abs(wy - centerH) > 42) {
+          wy = centerH + Math.sign(wy - centerH) * 42;
+        }
+        posAttr.setY(i, wy - centerH + yOffset);
+      }
     }
     posAttr.needsUpdate = true;
     geo.computeVertexNormals();
@@ -1277,90 +1466,94 @@ export class ThreeVFX {
       baseElev
     );
 
-    const reticleMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uTime: { value: 0.0 },
-        uProgress: { value: 0.0 }, // 0 -> 1 during target lock, >1 after impact
-        uAlpha: { value: 1.0 },
-        uPrimaryColor: { value: primaryCol },
-        uAccentColor: { value: accentCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        uniform vec3 uPrimaryColor;
-        uniform vec3 uAccentColor;
+    const reticleMat = this.acquireShader(
+      'orbital_reticle',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0.0 },
+          uProgress: { value: 0.0 }, // 0 -> 1 during target lock, >1 after impact
+          uAlpha: { value: 1.0 },
+          uPrimaryColor: { value: new THREE.Color(0xfacc15) },
+          uAccentColor: { value: new THREE.Color(0xfffbeb) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          uniform vec3 uPrimaryColor;
+          uniform vec3 uAccentColor;
 
-        float lHash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
-        }
-        float lNoise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          return mix(
-            mix(lHash(i), lHash(i + vec2(1.0, 0.0)), f.x),
-            mix(lHash(i + vec2(0.0, 1.0)), lHash(i + vec2(1.0, 1.0)), f.x),
-            f.y
-          );
-        }
-        float lFbm(vec2 p) {
-          return 0.55 * lNoise(p) + 0.30 * lNoise(p * 2.1 + vec2(4.2, 9.1)) + 0.15 * lNoise(p * 4.3 + vec2(1.7, 5.4));
-        }
+          float lHash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+          }
+          float lNoise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            return mix(
+              mix(lHash(i), lHash(i + vec2(1.0, 0.0)), f.x),
+              mix(lHash(i + vec2(0.0, 1.0)), lHash(i + vec2(1.0, 1.0)), f.x),
+              f.y
+            );
+          }
+          float lFbm(vec2 p) {
+            return 0.55 * lNoise(p) + 0.30 * lNoise(p * 2.1 + vec2(4.2, 9.1)) + 0.15 * lNoise(p * 4.3 + vec2(1.7, 5.4));
+          }
 
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          float lockIntensity = clamp(uProgress, 0.0, 1.0);
-          float angle = atan(p.y, p.x);
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            float lockIntensity = clamp(uProgress, 0.0, 1.0);
+            float angle = atan(p.y, p.x);
 
-          // Converging irregular plasma & ember wisps swirling inward (zero concentric circles/chevrons/crosshairs)
-          float swirlA = angle + log(max(0.08, r)) * 2.4 - uTime * (2.6 + lockIntensity * 3.5);
-          vec2 samplePos = vec2(cos(swirlA), sin(swirlA)) * r * 3.2;
-          float n1 = lFbm(samplePos + vec2(uTime * 1.1, -uTime * 0.8));
-          float n2 = lFbm(samplePos * 1.9 - vec2(uTime * 1.8, uTime * 1.2));
-          float warpedR = r + (n1 - 0.5) * 0.42;
-          if (warpedR > 1.0) discard;
+            // Converging irregular plasma & ember wisps swirling inward (zero concentric circles/chevrons/crosshairs)
+            float swirlA = angle + log(max(0.08, r)) * 2.4 - uTime * (2.6 + lockIntensity * 3.5);
+            vec2 samplePos = vec2(cos(swirlA), sin(swirlA)) * r * 3.2;
+            float n1 = lFbm(samplePos + vec2(uTime * 1.1, -uTime * 0.8));
+            float n2 = lFbm(samplePos * 1.9 - vec2(uTime * 1.8, uTime * 1.2));
+            float warpedR = r + (n1 - 0.5) * 0.42;
+            if (warpedR > 1.0) discard;
 
-          float wispTendrils = smoothstep(0.32, 0.88, n1 * 0.65 + n2 * 0.55) * smoothstep(1.0, 0.18, warpedR);
-          float inwardFocus = smoothstep(0.65 - lockIntensity * 0.28, 0.0, warpedR) * (0.45 + 0.85 * lockIntensity);
-          float edgeEmbers = smoothstep(0.08, 0.0, abs(warpedR - mix(0.76, 0.28, lockIntensity))) * n2;
-          float totalIntensity = wispTendrils * 0.85 + inwardFocus + edgeEmbers * 1.35;
+            float wispTendrils = smoothstep(0.32, 0.88, n1 * 0.65 + n2 * 0.55) * smoothstep(1.0, 0.18, warpedR);
+            float inwardFocus = smoothstep(0.65 - lockIntensity * 0.28, 0.0, warpedR) * (0.45 + 0.85 * lockIntensity);
+            float edgeEmbers = smoothstep(0.08, 0.0, abs(warpedR - mix(0.76, 0.28, lockIntensity))) * n2;
+            float totalIntensity = wispTendrils * 0.85 + inwardFocus + edgeEmbers * 1.35;
 
-          vec3 col = mix(uPrimaryColor, uAccentColor, clamp(n2 * 0.6 + inwardFocus * 0.5, 0.0, 1.0));
-          float alpha = clamp(totalIntensity * (0.55 + 0.65 * lockIntensity) * uAlpha, 0.0, 1.0);
-          if (alpha < 0.015) discard;
-          gl_FragColor = vec4(col * (1.2 + lockIntensity * 0.85), alpha);
-        }
-      `
-    });
+            vec3 col = mix(uPrimaryColor, uAccentColor, clamp(n2 * 0.6 + inwardFocus * 0.5, 0.0, 1.0));
+            float alpha = clamp(totalIntensity * (0.55 + 0.65 * lockIntensity) * uAlpha, 0.0, 1.0);
+            if (alpha < 0.015) discard;
+            gl_FragColor = vec4(col * (1.2 + lockIntensity * 0.85), alpha);
+          }
+        `
+      }),
+      { uTime: 0.0, uProgress: 0.0, uAlpha: 1.0, uPrimaryColor: primaryCol, uAccentColor: accentCol }
+    );
 
     const reticleMesh = new THREE.Mesh(reticleGeo, reticleMat);
     lockGroup.add(reticleMesh);
 
     // Thin organic undulating sky-to-ground flame-thread beam during lock-on (zero cylinder)
     const pilotGeo = this.createOrganicPlumeColumnGeo(1.0, 2.4, 1400, 10, 10, 0.35, 1.5);
-    const pilotMat = new THREE.MeshBasicMaterial({
-      color: primaryCol,
-      transparent: true,
-      opacity: 0.25,
-      blending: THREE.AdditiveBlending,
-      depthWrite: false,
-      side: THREE.DoubleSide
-    });
+    const pilotMat = this.acquireBasicMat(
+      primaryCol.getHex(),
+      0.25,
+      THREE.AdditiveBlending,
+      THREE.DoubleSide,
+      false,
+      null
+    );
     const pilotBeam = new THREE.Mesh(pilotGeo, pilotMat);
     pilotBeam.position.y = 700;
     lockGroup.add(pilotBeam);
@@ -1493,48 +1686,52 @@ export class ThreeVFX {
       0.14,
       0.8
     );
-    const coreMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uTime: { value: 0.0 },
-        uIntensity: { value: 1.0 },
-        uCoreColor: { value: coreCol },
-        uMidColor: { value: midCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        void main() {
-          vUv = uv;
-          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          vNormal = normalize(normalMatrix * normal);
-          vViewDir = normalize(-mvPos.xyz);
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        uniform float uTime;
-        uniform float uIntensity;
-        uniform vec3 uCoreColor;
-        uniform vec3 uMidColor;
+    const coreMat = this.acquireShader(
+      'orbital_beam_core',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0.0 },
+          uIntensity: { value: 1.0 },
+          uCoreColor: { value: new THREE.Color(0xffffff) },
+          uMidColor: { value: new THREE.Color(0xfacc15) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          void main() {
+            vUv = uv;
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            vNormal = normalize(normalMatrix * normal);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          uniform float uTime;
+          uniform float uIntensity;
+          uniform vec3 uCoreColor;
+          uniform vec3 uMidColor;
 
-        void main() {
-          float fresnel = abs(dot(vNormal, vViewDir));
-          float coreDensity = pow(clamp(fresnel, 0.0, 1.0), 0.45);
-          float pulse = 0.92 + 0.08 * sin(vUv.y * 45.0 + uTime * 38.0);
-          vec3 col = mix(uMidColor, uCoreColor, pow(coreDensity, 0.65)) * 1.85 * pulse;
-          float alpha = clamp(coreDensity * 1.35 * uIntensity, 0.0, 1.0);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+          void main() {
+            float fresnel = abs(dot(vNormal, vViewDir));
+            float coreDensity = pow(clamp(fresnel, 0.0, 1.0), 0.45);
+            float pulse = 0.92 + 0.08 * sin(vUv.y * 45.0 + uTime * 38.0);
+            vec3 col = mix(uMidColor, uCoreColor, pow(coreDensity, 0.65)) * 1.85 * pulse;
+            float alpha = clamp(coreDensity * 1.35 * uIntensity, 0.0, 1.0);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uTime: 0.0, uIntensity: 1.0, uCoreColor: coreCol, uMidColor: midCol }
+    );
     const coreMesh = new THREE.Mesh(coreGeo, coreMat);
     coreMesh.position.y = beamHeight * 0.5;
     seqGroup.add(coreMesh);
@@ -1551,77 +1748,81 @@ export class ThreeVFX {
       0.20,
       1.1
     );
-    const midMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uTime: { value: 0.0 },
-        uIntensity: { value: 1.0 },
-        uCoreColor: { value: coreCol },
-        uMidColor: { value: midCol },
-        uOuterColor: { value: outerCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        uniform float uTime;
-        void main() {
-          vUv = uv;
-          // Subtle plasma width undulation along the column height
-          vec3 displaced = position;
-          float wave = sin(uv.y * 28.0 + uTime * 24.0) * 0.045 + cos(uv.y * 64.0 + uTime * 42.0) * 0.025;
-          displaced.xz *= (1.0 + wave);
-          vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
-          vNormal = normalize(normalMatrix * normal);
-          vViewDir = normalize(-mvPos.xyz);
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        uniform float uTime;
-        uniform float uIntensity;
-        uniform vec3 uCoreColor;
-        uniform vec3 uMidColor;
-        uniform vec3 uOuterColor;
+    const midMat = this.acquireShader(
+      'orbital_beam_mid',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0.0 },
+          uIntensity: { value: 1.0 },
+          uCoreColor: { value: new THREE.Color(0xffffff) },
+          uMidColor: { value: new THREE.Color(0xfacc15) },
+          uOuterColor: { value: new THREE.Color(0xea580c) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          uniform float uTime;
+          void main() {
+            vUv = uv;
+            // Subtle plasma width undulation along the column height
+            vec3 displaced = position;
+            float wave = sin(uv.y * 28.0 + uTime * 24.0) * 0.045 + cos(uv.y * 64.0 + uTime * 42.0) * 0.025;
+            displaced.xz *= (1.0 + wave);
+            vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
+            vNormal = normalize(normalMatrix * normal);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          uniform float uTime;
+          uniform float uIntensity;
+          uniform vec3 uCoreColor;
+          uniform vec3 uMidColor;
+          uniform vec3 uOuterColor;
 
-        float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-        }
+          float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          }
 
-        float noise(vec2 p) {
-          vec2 i = floor(p);
-          vec2 f = fract(p);
-          f = f * f * (3.0 - 2.0 * f);
-          float a = hash(i);
-          float b = hash(i + vec2(1.0, 0.0));
-          float c = hash(i + vec2(0.0, 1.0));
-          float d = hash(i + vec2(1.0, 1.0));
-          return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
-        }
+          float noise(vec2 p) {
+            vec2 i = floor(p);
+            vec2 f = fract(p);
+            f = f * f * (3.0 - 2.0 * f);
+            float a = hash(i);
+            float b = hash(i + vec2(1.0, 0.0));
+            float c = hash(i + vec2(0.0, 1.0));
+            float d = hash(i + vec2(1.0, 1.0));
+            return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+          }
 
-        void main() {
-          float fresnel = pow(clamp(abs(dot(vNormal, vViewDir)), 0.0, 1.0), 1.15);
-          // Downward-scrolling high-velocity vertical plasma streaks
-          vec2 uv1 = vec2(vUv.x * 10.0, vUv.y * 18.0 + uTime * 16.0);
-          vec2 uv2 = vec2(vUv.x * 20.0 - uTime * 1.5, vUv.y * 36.0 + uTime * 28.0);
-          float n = noise(uv1) * 0.65 + noise(uv2) * 0.35;
+          void main() {
+            float fresnel = pow(clamp(abs(dot(vNormal, vViewDir)), 0.0, 1.0), 1.15);
+            // Downward-scrolling high-velocity vertical plasma streaks
+            vec2 uv1 = vec2(vUv.x * 10.0, vUv.y * 18.0 + uTime * 16.0);
+            vec2 uv2 = vec2(vUv.x * 20.0 - uTime * 1.5, vUv.y * 36.0 + uTime * 28.0);
+            float n = noise(uv1) * 0.65 + noise(uv2) * 0.35;
 
-          // Brighter concentration near the ground impact base (vUv.y near 0)
-          float baseBoost = 1.0 + smoothstep(0.18, 0.0, vUv.y) * 0.85;
-          vec3 col = mix(uOuterColor, uMidColor, n);
-          col = mix(col, uCoreColor, smoothstep(0.68, 0.95, n * fresnel)) * 1.45 * baseBoost;
+            // Brighter concentration near the ground impact base (vUv.y near 0)
+            float baseBoost = 1.0 + smoothstep(0.18, 0.0, vUv.y) * 0.85;
+            vec3 col = mix(uOuterColor, uMidColor, n);
+            col = mix(col, uCoreColor, smoothstep(0.68, 0.95, n * fresnel)) * 1.45 * baseBoost;
 
-          float alpha = clamp(fresnel * (0.55 + 0.65 * n) * uIntensity, 0.0, 1.0);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+            float alpha = clamp(fresnel * (0.55 + 0.65 * n) * uIntensity, 0.0, 1.0);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uTime: 0.0, uIntensity: 1.0, uCoreColor: coreCol, uMidColor: midCol, uOuterColor: outerCol }
+    );
     const midMesh = new THREE.Mesh(midGeo, midMat);
     midMesh.position.y = beamHeight * 0.5;
     seqGroup.add(midMesh);
@@ -1638,45 +1839,49 @@ export class ThreeVFX {
       0.24,
       -0.7
     );
-    const outerMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uIntensity: { value: 1.0 },
-        uOuterColor: { value: outerCol },
-        uMidColor: { value: midCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        void main() {
-          vUv = uv;
-          vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
-          vNormal = normalize(normalMatrix * normal);
-          vViewDir = normalize(-mvPos.xyz);
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        varying vec3 vNormal;
-        varying vec3 vViewDir;
-        uniform float uIntensity;
-        uniform vec3 uOuterColor;
-        uniform vec3 uMidColor;
+    const outerMat = this.acquireShader(
+      'orbital_beam_outer',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uIntensity: { value: 1.0 },
+          uOuterColor: { value: new THREE.Color(0xea580c) },
+          uMidColor: { value: new THREE.Color(0xfacc15) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          void main() {
+            vUv = uv;
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            vNormal = normalize(normalMatrix * normal);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          varying vec3 vNormal;
+          varying vec3 vViewDir;
+          uniform float uIntensity;
+          uniform vec3 uOuterColor;
+          uniform vec3 uMidColor;
 
-        void main() {
-          float fresnel = pow(clamp(abs(dot(vNormal, vViewDir)), 0.0, 1.0), 2.1);
-          float baseFlare = 1.0 + smoothstep(0.15, 0.0, vUv.y) * 0.75;
-          vec3 col = mix(uOuterColor, uMidColor, fresnel * 0.5) * baseFlare;
-          float alpha = clamp(fresnel * 0.48 * uIntensity, 0.0, 0.65);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+          void main() {
+            float fresnel = pow(clamp(abs(dot(vNormal, vViewDir)), 0.0, 1.0), 2.1);
+            float baseFlare = 1.0 + smoothstep(0.15, 0.0, vUv.y) * 0.75;
+            vec3 col = mix(uOuterColor, uMidColor, fresnel * 0.5) * baseFlare;
+            float alpha = clamp(fresnel * 0.48 * uIntensity, 0.0, 0.65);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uIntensity: 1.0, uOuterColor: outerCol, uMidColor: midCol }
+    );
     const outerMesh = new THREE.Mesh(outerGeo, outerMat);
     outerMesh.position.y = beamHeight * 0.5;
     seqGroup.add(outerMesh);
@@ -1689,51 +1894,55 @@ export class ThreeVFX {
     const apertureRadius = radius * 0.68;
     const apertureGeo = new THREE.PlaneGeometry(apertureRadius * 2, apertureRadius * 2);
     apertureGeo.rotateX(-Math.PI / 2);
-    const apertureMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uTime: { value: 0.0 },
-        uIntensity: { value: 1.0 },
-        uMidColor: { value: midCol },
-        uCoreColor: { value: coreCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        uniform float uTime;
-        uniform float uIntensity;
-        uniform vec3 uMidColor;
-        uniform vec3 uCoreColor;
-        float apHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-        float apNoise(vec2 p) {
-          vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
-          return mix(mix(apHash(i), apHash(i + vec2(1.0, 0.0)), f.x), mix(apHash(i + vec2(0.0, 1.0)), apHash(i + vec2(1.0, 1.0)), f.x), f.y);
-        }
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          float a = atan(p.y, p.x);
-          float swirl = apNoise(vec2(cos(a - uTime * 1.8), sin(a - uTime * 1.8)) * r * 3.5 + vec2(uTime * 1.2))
-                      + 0.5 * apNoise(p * 6.0 - vec2(uTime * 2.4));
-          float distortedR = r - (swirl - 0.7) * 0.42;
-          if (distortedR > 1.0) discard;
-          float cloudMask = smoothstep(1.0, 0.12, distortedR) * smoothstep(0.35, 1.15, swirl);
-          float core = smoothstep(0.42, 0.0, distortedR) * 0.85;
-          float mask = cloudMask + core;
-          vec3 col = mix(uMidColor, uCoreColor, clamp(mask * 0.55, 0.0, 1.0)) * 1.35;
-          gl_FragColor = vec4(col, clamp(mask * uIntensity * 0.82, 0.0, 1.0));
-        }
-      `
-    });
+    const apertureMat = this.acquireShader(
+      'orbital_aperture',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0.0 },
+          uIntensity: { value: 1.0 },
+          uMidColor: { value: new THREE.Color(0xfacc15) },
+          uCoreColor: { value: new THREE.Color(0xffffff) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          uniform float uTime;
+          uniform float uIntensity;
+          uniform vec3 uMidColor;
+          uniform vec3 uCoreColor;
+          float apHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+          float apNoise(vec2 p) {
+            vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(apHash(i), apHash(i + vec2(1.0, 0.0)), f.x), mix(apHash(i + vec2(0.0, 1.0)), apHash(i + vec2(1.0, 1.0)), f.x), f.y);
+          }
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            float a = atan(p.y, p.x);
+            float swirl = apNoise(vec2(cos(a - uTime * 1.8), sin(a - uTime * 1.8)) * r * 3.5 + vec2(uTime * 1.2))
+                        + 0.5 * apNoise(p * 6.0 - vec2(uTime * 2.4));
+            float distortedR = r - (swirl - 0.7) * 0.42;
+            if (distortedR > 1.0) discard;
+            float cloudMask = smoothstep(1.0, 0.12, distortedR) * smoothstep(0.35, 1.15, swirl);
+            float core = smoothstep(0.42, 0.0, distortedR) * 0.85;
+            float mask = cloudMask + core;
+            vec3 col = mix(uMidColor, uCoreColor, clamp(mask * 0.55, 0.0, 1.0)) * 1.35;
+            gl_FragColor = vec4(col, clamp(mask * uIntensity * 0.82, 0.0, 1.0));
+          }
+        `
+      }),
+      { uTime: 0.0, uIntensity: 1.0, uMidColor: midCol, uCoreColor: coreCol }
+    );
     const apertureMesh = new THREE.Mesh(apertureGeo, apertureMat);
     apertureMesh.position.y = apertureHeight;
     seqGroup.add(apertureMesh);
@@ -1746,14 +1955,14 @@ export class ThreeVFX {
       const dist = apertureRadius * (0.42 + (i % 2) * 0.26);
       const needleLen = 95 + (i % 3) * 32;
       const nGeo = this.createOrganicPlumeColumnGeo(1.8, 0.25, needleLen, 6, 4, 0.32, 1.2);
-      const nMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? coreCol : midCol,
-        transparent: true,
-        opacity: 0.72,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
+      const nMat = this.acquireBasicMat(
+        (i % 2 === 0 ? coreCol : midCol).getHex(),
+        0.72,
+        THREE.AdditiveBlending,
+        THREE.DoubleSide,
+        false,
+        null
+      );
       const nMesh = new THREE.Mesh(nGeo, nMat);
       nMesh.position.set(
         Math.cos(ang) * dist,
@@ -1801,48 +2010,52 @@ export class ThreeVFX {
       1.1,
       baseElev
     );
-    const impactFlashMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uTime: { value: 0.0 },
-        uIntensity: { value: 1.0 },
-        uCoreColor: { value: coreCol },
-        uMidColor: { value: midCol },
-        uOuterColor: { value: outerCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        uniform float uTime;
-        uniform float uIntensity;
-        uniform vec3 uCoreColor;
-        uniform vec3 uMidColor;
-        uniform vec3 uOuterColor;
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          if (r > 1.0) discard;
-          float a = atan(p.y, p.x);
-          // Intense spiky starburst rays at the base of the beam
-          float rays = pow(abs(sin(a * 12.0 + uTime * 8.0)), 3.0) * (1.0 - r);
-          float rays2 = pow(abs(cos(a * 7.0 - uTime * 5.0)), 4.0) * (1.0 - r * 0.85);
-          float coreBall = pow(max(0.0, 1.0 - r), 2.2) * 1.8;
-          float total = coreBall + (rays * 0.75 + rays2 * 0.55) * smoothstep(1.0, 0.1, r);
-          vec3 col = mix(uOuterColor, uMidColor, clamp(total * 0.6, 0.0, 1.0));
-          col = mix(col, uCoreColor, clamp(coreBall * 0.85, 0.0, 1.0)) * 2.0;
-          gl_FragColor = vec4(col, clamp(total * uIntensity, 0.0, 1.0));
-        }
-      `
-    });
+    const impactFlashMat = this.acquireShader(
+      'orbital_impact_flash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0.0 },
+          uIntensity: { value: 1.0 },
+          uCoreColor: { value: new THREE.Color(0xffffff) },
+          uMidColor: { value: new THREE.Color(0xfacc15) },
+          uOuterColor: { value: new THREE.Color(0xea580c) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          uniform float uTime;
+          uniform float uIntensity;
+          uniform vec3 uCoreColor;
+          uniform vec3 uMidColor;
+          uniform vec3 uOuterColor;
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            if (r > 1.0) discard;
+            float a = atan(p.y, p.x);
+            // Intense spiky starburst rays at the base of the beam
+            float rays = pow(abs(sin(a * 12.0 + uTime * 8.0)), 3.0) * (1.0 - r);
+            float rays2 = pow(abs(cos(a * 7.0 - uTime * 5.0)), 4.0) * (1.0 - r * 0.85);
+            float coreBall = pow(max(0.0, 1.0 - r), 2.2) * 1.8;
+            float total = coreBall + (rays * 0.75 + rays2 * 0.55) * smoothstep(1.0, 0.1, r);
+            vec3 col = mix(uOuterColor, uMidColor, clamp(total * 0.6, 0.0, 1.0));
+            col = mix(col, uCoreColor, clamp(coreBall * 0.85, 0.0, 1.0)) * 2.0;
+            gl_FragColor = vec4(col, clamp(total * uIntensity, 0.0, 1.0));
+          }
+        `
+      }),
+      { uTime: 0.0, uIntensity: 1.0, uCoreColor: coreCol, uMidColor: midCol, uOuterColor: outerCol }
+    );
     const impactFlashMesh = new THREE.Mesh(impactFlashGeo, impactFlashMat);
     seqGroup.add(impactFlashMesh);
 
@@ -1856,56 +2069,60 @@ export class ThreeVFX {
       0.85,
       baseElev
     );
-    const shockwaveMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      blending: THREE.AdditiveBlending,
-      uniforms: {
-        uProgress: { value: 0.05 }, // 0 -> 1 as wave expands to AoE radius
-        uAlpha: { value: 1.0 },
-        uCoreColor: { value: coreCol },
-        uMidColor: { value: midCol },
-        uOuterColor: { value: outerCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        varying vec2 vUv;
-        uniform float uProgress;
-        uniform float uAlpha;
-        uniform vec3 uCoreColor;
-        uniform vec3 uMidColor;
-        uniform vec3 uOuterColor;
+    const shockwaveMat = this.acquireShader(
+      'orbital_shockwave',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uProgress: { value: 0.05 }, // 0 -> 1 as wave expands to AoE radius
+          uAlpha: { value: 1.0 },
+          uCoreColor: { value: new THREE.Color(0xffffff) },
+          uMidColor: { value: new THREE.Color(0xfacc15) },
+          uOuterColor: { value: new THREE.Color(0xea580c) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          varying vec2 vUv;
+          uniform float uProgress;
+          uniform float uAlpha;
+          uniform vec3 uCoreColor;
+          uniform vec3 uMidColor;
+          uniform vec3 uOuterColor;
 
-        float swHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-        float swNoise(vec2 p) {
-          vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
-          return mix(mix(swHash(i), swHash(i + vec2(1.0, 0.0)), f.x), mix(swHash(i + vec2(0.0, 1.0)), swHash(i + vec2(1.0, 1.0)), f.x), f.y);
-        }
+          float swHash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+          float swNoise(vec2 p) {
+            vec2 i = floor(p); vec2 f = fract(p); f = f * f * (3.0 - 2.0 * f);
+            return mix(mix(swHash(i), swHash(i + vec2(1.0, 0.0)), f.x), mix(swHash(i + vec2(0.0, 1.0)), swHash(i + vec2(1.0, 1.0)), f.x), f.y);
+          }
 
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          if (r > 1.0) discard;
-          float n = swNoise(p * 4.5 + vec2(uProgress * 3.0)) * 0.6 + swNoise(p * 9.0) * 0.4;
-          float waveR = clamp(uProgress, 0.08, 0.88) + (n - 0.5) * 0.32;
-          float fireFront = exp(-pow((r - waveR) / 0.14, 2.0)) * smoothstep(0.15, 0.85, n);
-          float emberWake = smoothstep(waveR - 0.35, waveR, r) * step(r, waveR) * n * 0.45;
-          float outerMask = 1.0 - smoothstep(0.65, 1.0, r + (0.5 - n) * 0.3);
-          float intensity = (fireFront * 1.45 + emberWake) * outerMask;
-          if (intensity < 0.015) discard;
-          vec3 col = mix(uOuterColor, uMidColor, clamp(fireFront + emberWake, 0.0, 1.0));
-          col = mix(col, uCoreColor, pow(clamp(fireFront, 0.0, 1.0), 1.8) * 0.8);
-          gl_FragColor = vec4(col * 1.45, clamp(intensity * uAlpha, 0.0, 1.0));
-        }
-      `
-    });
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            if (r > 1.0) discard;
+            float n = swNoise(p * 4.5 + vec2(uProgress * 3.0)) * 0.6 + swNoise(p * 9.0) * 0.4;
+            float waveR = clamp(uProgress, 0.08, 0.88) + (n - 0.5) * 0.32;
+            float fireFront = exp(-pow((r - waveR) / 0.14, 2.0)) * smoothstep(0.15, 0.85, n);
+            float emberWake = smoothstep(waveR - 0.35, waveR, r) * step(r, waveR) * n * 0.45;
+            float outerMask = 1.0 - smoothstep(0.65, 1.0, r + (0.5 - n) * 0.3);
+            float intensity = (fireFront * 1.45 + emberWake) * outerMask;
+            if (intensity < 0.015) discard;
+            vec3 col = mix(uOuterColor, uMidColor, clamp(fireFront + emberWake, 0.0, 1.0));
+            col = mix(col, uCoreColor, pow(clamp(fireFront, 0.0, 1.0), 1.8) * 0.8);
+            gl_FragColor = vec4(col * 1.45, clamp(intensity * uAlpha, 0.0, 1.0));
+          }
+        `
+      }),
+      { uProgress: 0.05, uAlpha: 1.0, uCoreColor: coreCol, uMidColor: midCol, uOuterColor: outerCol }
+    );
     const shockwaveMesh = new THREE.Mesh(shockwaveGeo, shockwaveMat);
     seqGroup.add(shockwaveMesh);
 
@@ -2044,26 +2261,30 @@ export class ThreeVFX {
         }
       `;
 
-    const scorchMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uAge: { value: 0.0 },        // 0 -> 1 over total 2.6s lifetime
-        uHeat: { value: 1.0 },       // 1 -> 0 as molten cracks cool
-        uCoreColor: { value: coreCol },
-        uMidColor: { value: midCol },
-        uOuterColor: { value: outerCol }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: scorchFragShader
-    });
+    const scorchMat = this.acquireShader(
+      isSubStrike ? 'orbital_scorch_sub' : 'orbital_scorch_full',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uAge: { value: 0.0 },        // 0 -> 1 over total 2.6s lifetime
+          uHeat: { value: 1.0 },       // 1 -> 0 as molten cracks cool
+          uCoreColor: { value: new THREE.Color(0xffffff) },
+          uMidColor: { value: new THREE.Color(0xfacc15) },
+          uOuterColor: { value: new THREE.Color(0xea580c) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: scorchFragShader
+      }),
+      { uAge: 0.0, uHeat: 1.0, uCoreColor: coreCol, uMidColor: midCol, uOuterColor: outerCol }
+    );
     const scorchMesh = new THREE.Mesh(scorchGeo, scorchMat);
     // Render scorched decal underneath additive shockwaves and beams
     scorchMesh.renderOrder = -1;
@@ -2171,12 +2392,14 @@ export class ThreeVFX {
       const ang = Math.random() * Math.PI * 2;
       const speed = 95 + Math.random() * 240;
       const vy = 85 + Math.random() * 220;
-      const mat = new THREE.MeshBasicMaterial({
-        color: i % 3 === 0 ? coreCol : i % 2 === 0 ? midCol : outerCol,
-        transparent: true,
-        opacity: 0.98,
-        blending: THREE.AdditiveBlending
-      });
+      const mat = this.acquireBasicMat(
+        (i % 3 === 0 ? coreCol : i % 2 === 0 ? midCol : outerCol).getHex(),
+        0.98,
+        THREE.AdditiveBlending,
+        THREE.FrontSide,
+        true,
+        null
+      );
       const mesh = new THREE.Mesh(this.sharedSparkGeo, mat);
       const startR = 6 + Math.random() * 24;
       mesh.position.set(
@@ -2213,11 +2436,7 @@ export class ThreeVFX {
       const vy = 105 + Math.random() * 185;
       // Dark charred rock with warm golden-amber under-lit rim tint
       const rockColor = i % 3 === 0 ? 0x3f362e : i % 2 === 0 ? 0x292524 : 0x1c1917;
-      const mat = new THREE.MeshBasicMaterial({
-        color: rockColor,
-        transparent: true,
-        opacity: 0.96
-      });
+      const mat = this.acquireBasicMat(rockColor, 0.96, THREE.NormalBlending, THREE.FrontSide, true, null);
       const mesh = new THREE.Mesh(this.sharedDebrisGeo, mat);
       const startR = 12 + Math.random() * 34;
       mesh.position.set(
@@ -2251,17 +2470,14 @@ export class ThreeVFX {
     for (let i = 0; i < dustCount; i++) {
       const ang = (i / dustCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.22;
       const speed = (radius * 0.55) + Math.random() * (radius * 0.45);
-      const matParams: THREE.MeshBasicMaterialParameters = {
-        color: i % 2 === 0 ? 0xd6c7b2 : 0xfbbf24,
-        transparent: true,
-        opacity: 0.52,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      };
-      if (this.dustRadialTex) {
-        matParams.map = this.dustRadialTex;
-      }
-      const mat = new THREE.MeshBasicMaterial(matParams);
+      const mat = this.acquireBasicMat(
+        i % 2 === 0 ? 0xd6c7b2 : 0xfbbf24,
+        0.52,
+        THREE.NormalBlending,
+        THREE.DoubleSide,
+        false,
+        this.dustRadialTex || null
+      );
       const mesh = new THREE.Mesh(this.sharedDustGeo, mat);
       const startR = 18 + Math.random() * 28;
       mesh.position.set(
@@ -2295,26 +2511,26 @@ export class ThreeVFX {
   private disposeOrbitalSequence(seq: ActiveOrbitalSequence): void {
     this.group.remove(seq.group);
     seq.coreMesh.geometry.dispose();
-    seq.coreMat.dispose();
+    this.releaseMaterial(seq.coreMat);
     seq.midMesh.geometry.dispose();
-    seq.midMat.dispose();
+    this.releaseMaterial(seq.midMat);
     seq.outerMesh.geometry.dispose();
-    seq.outerMat.dispose();
+    this.releaseMaterial(seq.outerMat);
     seq.apertureMesh.geometry.dispose();
-    seq.apertureMat.dispose();
+    this.releaseMaterial(seq.apertureMat);
     seq.needlesGroup.traverse((child) => {
       if ((child as THREE.Mesh).isMesh) {
         const m = child as THREE.Mesh;
         m.geometry.dispose();
-        (m.material as THREE.Material).dispose();
+        this.releaseMaterial(m.material as THREE.Material);
       }
     });
     seq.impactFlashMesh.geometry.dispose();
-    seq.impactFlashMat.dispose();
+    this.releaseMaterial(seq.impactFlashMat);
     seq.shockwaveMesh.geometry.dispose();
-    seq.shockwaveMat.dispose();
+    this.releaseMaterial(seq.shockwaveMat);
     seq.scorchMesh.geometry.dispose();
-    seq.scorchMat.dispose();
+    this.releaseMaterial(seq.scorchMat);
     for (let i = 0; i < seq.lightningLines.length; i++) {
       seq.lightningLines[i].line.geometry.dispose();
       seq.lightningLines[i].mat.dispose();
@@ -2332,24 +2548,24 @@ export class ThreeVFX {
       const oldest = this.bloodDecals.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
-        oldest.mesh.geometry.dispose();
-        (oldest.mesh.material as THREE.Material).dispose();
+        if (!oldest.mesh.userData?.isSharedGeo) oldest.mesh.geometry.dispose();
+        this.releaseMaterial(oldest.mesh.material as THREE.Material);
       }
     }
 
     const scale = (0.85 + Math.random() * 0.75) * scaleMult;
     const mat = this.createSplatterDropletShader(
-      new THREE.Color(colorHex).lerp(new THREE.Color(0xffffff), 0.25).getHex(),
+      _tmpCol1.setHex(colorHex).lerp(THREE_WHITE, 0.25).getHex(),
       colorHex,
       Math.random() * 80
     );
 
-    const geo = new THREE.PlaneGeometry(34, 34);
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+    mesh.userData.isSharedGeo = true;
     mesh.rotation.x = -Math.PI / 2;
     mesh.rotation.z = Math.random() * Math.PI * 2;
     mesh.position.set(pos.x + (Math.random() - 0.5) * 14, elevation + 0.5, pos.y + (Math.random() - 0.5) * 14);
-    mesh.scale.set(scale, scale, 1);
+    mesh.scale.set(34 * scale, 34 * scale, 1);
     this.group.add(mesh);
 
     this.bloodDecals.push({
@@ -2373,7 +2589,7 @@ export class ThreeVFX {
       const oldest = this.orbitalParticles.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
-        (oldest.mesh.material as THREE.Material).dispose();
+        this.releaseMaterial(oldest.mesh.material as THREE.Material);
       }
     }
 
@@ -2381,18 +2597,16 @@ export class ThreeVFX {
     for (let i = 0; i < puffCount; i++) {
       const ang = (i / puffCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
       const speed = 38 + Math.random() * 44;
-      const matParams: THREE.MeshBasicMaterialParameters = {
-        color: i % 2 === 0 ? 0xcbd5e1 : 0x7dd3fc,
-        transparent: true,
-        opacity: 0.45,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      };
-      if (this.dustRadialTex) {
-        matParams.map = this.dustRadialTex;
-      }
-      const mat = new THREE.MeshBasicMaterial(matParams);
+      const mat = this.acquireBasicMat(
+        i % 2 === 0 ? 0xcbd5e1 : 0x7dd3fc,
+        0.45,
+        THREE.NormalBlending,
+        THREE.DoubleSide,
+        false,
+        this.dustRadialTex || null
+      );
       const mesh = new THREE.Mesh(this.sharedDustGeo, mat);
+      mesh.userData.isSharedGeo = true;
       const startR = 26 + Math.random() * 26;
       mesh.position.set(
         pos.x + Math.cos(ang) * startR,
@@ -3536,41 +3750,45 @@ export class ThreeVFX {
     const burstSize = Math.min(250, radius * 1.05);
     const flashGeo = new THREE.PlaneGeometry(burstSize, burstSize);
     flashGeo.rotateX(-Math.PI * 0.35); // Tilted towards isometric camera
-    const flashMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uProgress: { value: 0.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uProgress;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          if (r > 1.0) discard;
-          float a = atan(vUv.y, vUv.x);
-          float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
-          float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
-          float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
-          float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
-          float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
-          float fade = pow(1.0 - uProgress, 1.35);
-          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
-          if (alpha < 0.01) discard;
-          vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+    const flashMat = this.acquireShader(
+      'slash_convergence_flash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uProgress: { value: 0.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uProgress;
+          varying vec2 vUv;
+          void main() {
+            float r = length(vUv);
+            if (r > 1.0) discard;
+            float a = atan(vUv.y, vUv.x);
+            float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
+            float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
+            float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
+            float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
+            float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
+            float fade = pow(1.0 - uProgress, 1.35);
+            float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
+            if (alpha < 0.01) discard;
+            vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uProgress: 0.0 }
+    );
     const flashMesh = new THREE.Mesh(flashGeo, flashMat);
     flashMesh.position.set(0, 1.0, forwardDist);
     flashMesh.visible = false;
@@ -3854,9 +4072,10 @@ export class ThreeVFX {
     duration: number = 0.55
   ): void {
     if (!pos || typeof pos.x !== 'number' || typeof pos.y !== 'number') return;
-    const geo = new THREE.PlaneGeometry(2.2, 2.2);
     const mat = this.createOrganicRippleShader(colorHex, undefined, Math.random() * 40);
-    const mesh = new THREE.Mesh(geo, mat);
+    const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+    mesh.userData.isSharedGeo = true;
+    mesh.scale.set(2.2, 2.2, 1);
     mesh.rotation.x = -Math.PI / 2;
     mesh.position.set(pos.x, elevation + 0.9, pos.y);
     this.group.add(mesh);
@@ -3878,29 +4097,53 @@ export class ThreeVFX {
     elevation: number = 0,
     isCrit: boolean = false
   ): void {
-    const canvas = document.createElement('canvas');
-    canvas.width = 160;
-    canvas.height = 80;
-    const ctx = canvas.getContext('2d');
-    if (ctx) {
-      ctx.font = isCrit ? '900 44px "Orbitron", sans-serif' : 'bold 34px "Orbitron", sans-serif';
-      ctx.textAlign = 'center';
-      ctx.textBaseline = 'middle';
-      ctx.lineWidth = isCrit ? 6 : 4;
-      ctx.strokeStyle = 'rgba(0,0,0,0.9)';
-      const text = isCrit ? `${Math.round(amount)}!` : `${Math.round(amount)}`;
-      ctx.strokeText(text, 80, 40);
-      ctx.fillStyle = color;
-      ctx.fillText(text, 80, 40);
+    const rounded = Math.round(amount);
+    const cacheKey = `${isCrit ? 'c' : 'n'}:${color}:${rounded}`;
+    let texture = this.damageTexCache.get(cacheKey);
+    if (!texture) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 160;
+      canvas.height = 80;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.font = isCrit ? '900 44px "Orbitron", sans-serif' : 'bold 34px "Orbitron", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = isCrit ? 6 : 4;
+        ctx.strokeStyle = 'rgba(0,0,0,0.9)';
+        const text = isCrit ? `${rounded}!` : `${rounded}`;
+        ctx.strokeText(text, 80, 40);
+        ctx.fillStyle = color;
+        ctx.fillText(text, 80, 40);
+      }
+
+      texture = new THREE.CanvasTexture(canvas);
+      if (this.damageTexCache.size >= 512) {
+        const firstKey = this.damageTexCache.keys().next().value;
+        if (firstKey !== undefined) {
+          const oldestTex = this.damageTexCache.get(firstKey);
+          this.damageTexCache.delete(firstKey);
+          oldestTex?.dispose();
+        }
+      }
+      this.damageTexCache.set(cacheKey, texture);
     }
 
-    const texture = new THREE.CanvasTexture(canvas);
-    const mat = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      depthTest: false
-    });
-    const sprite = new THREE.Sprite(mat);
+    let sprite = this.damageSpritePool.pop();
+    if (sprite) {
+      const sm = sprite.material as THREE.SpriteMaterial;
+      sm.map = texture;
+      sm.opacity = 1.0;
+    } else {
+      const mat = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        depthTest: false
+      });
+      sprite = new THREE.Sprite(mat);
+      sprite.userData.isPooledDamageSprite = true;
+      sprite.userData.isSharedMat = true;
+    }
     const scaleX = isCrit ? 52 : 34;
     const scaleY = isCrit ? 26 : 17;
     sprite.scale.set(scaleX, scaleY, 1);
@@ -3917,14 +4160,10 @@ export class ThreeVFX {
 
   // 4. Dash Afterimage Ghost (2x hero sprite scale)
   public spawnDashGhost(pos: Vector2, mapTexture: THREE.Texture, elevation: number = 0): void {
-    const geo = new THREE.PlaneGeometry(104, 104);
-    const mat = new THREE.MeshBasicMaterial({
-      map: mapTexture,
-      transparent: true,
-      opacity: 0.5,
-      depthWrite: false
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+    const mat = this.acquireBasicMat(0xffffff, 0.5, THREE.NormalBlending, THREE.FrontSide, false, mapTexture);
+    const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+    mesh.userData.isSharedGeo = true;
+    mesh.scale.set(104, 104, 1);
     mesh.position.set(pos.x, elevation + 52, pos.y);
     this.group.add(mesh);
 
@@ -3948,44 +4187,55 @@ export class ThreeVFX {
       const oldest = this.whiteGhosts.shift();
       if (oldest) {
         this.group.remove(oldest.mesh);
-        oldest.mesh.geometry.dispose();
-        oldest.mat.dispose();
+        if (!oldest.mesh.userData?.isSharedGeo) oldest.mesh.geometry.dispose();
+        this.releaseMaterial(oldest.mat);
       }
     }
 
-    const geo = new THREE.PlaneGeometry(104, 104);
-    const mat = new THREE.ShaderMaterial({
-      uniforms: {
-        uMap: { value: mapTexture },
-        uUvRect: { value: new THREE.Vector4(uvRect.ox, uvRect.oy, uvRect.rx, uvRect.ry) },
-        uOpacity: { value: initialOpacity },
-        uTint: { value: new THREE.Color(0xe6fff7) }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform sampler2D uMap;
-        uniform vec4 uUvRect;
-        uniform float uOpacity;
-        uniform vec3 uTint;
-        varying vec2 vUv;
-        void main() {
-          vec2 sampleUv = vUv * uUvRect.zw + uUvRect.xy;
-          vec4 texel = texture2D(uMap, sampleUv);
-          if (texel.a < 0.12) discard;
-          gl_FragColor = vec4(uTint, texel.a * uOpacity);
-        }
-      `,
-      transparent: true,
-      depthWrite: false,
-      side: THREE.DoubleSide
-    });
-    const mesh = new THREE.Mesh(geo, mat);
+    const mat = this.acquireShader(
+      'white_silhouette_ghost',
+      () => ({
+        uniforms: {
+          uMap: { value: null },
+          uUvRect: { value: new THREE.Vector4(0, 0, 1, 1) },
+          uOpacity: { value: 0.72 },
+          uTint: { value: new THREE.Color(0xe6fff7) }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D uMap;
+          uniform vec4 uUvRect;
+          uniform float uOpacity;
+          uniform vec3 uTint;
+          varying vec2 vUv;
+          void main() {
+            vec2 sampleUv = vUv * uUvRect.zw + uUvRect.xy;
+            vec4 texel = texture2D(uMap, sampleUv);
+            if (texel.a < 0.12) discard;
+            gl_FragColor = vec4(uTint, texel.a * uOpacity);
+          }
+        `,
+        transparent: true,
+        depthWrite: false,
+        side: THREE.DoubleSide
+      }),
+      {
+        uMap: mapTexture,
+        uOpacity: initialOpacity,
+        uTint: _tmpWhiteGhostTint
+      }
+    );
+    (mat.uniforms.uUvRect.value as THREE.Vector4).set(uvRect.ox, uvRect.oy, uvRect.rx, uvRect.ry);
+
+    const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+    mesh.userData.isSharedGeo = true;
+    mesh.scale.set(104, 104, 1);
     mesh.position.set(pos.x, elevation + 52, pos.y);
     mesh.renderOrder = 4;
     this.group.add(mesh);
@@ -4015,13 +4265,7 @@ export class ThreeVFX {
     }
     const curve = new THREE.CatmullRomCurve3(points);
     const tubeGeo = new THREE.TubeGeometry(curve, 10, 4.2, 5, false);
-    const tubeMat = new THREE.MeshBasicMaterial({
-      color: 0x4ade80,
-      transparent: true,
-      blending: THREE.AdditiveBlending,
-      opacity: 0.92,
-      depthWrite: false
-    });
+    const tubeMat = this.acquireBasicMat(0x4ade80, 0.92, THREE.AdditiveBlending, THREE.FrontSide, false, null);
     const mesh = new THREE.Mesh(tubeGeo, tubeMat);
     this.group.add(mesh);
     this.beams.push({ mesh, lifetime: 0.22, maxLifetime: 0.22 });
@@ -4035,14 +4279,7 @@ export class ThreeVFX {
   // 4E. Doctor Heavenly Light Curtain (Divine Intervention Aurora Column — zero cylinder)
   public spawnHeavenlyLightBeam(pos: Vector2, elevation: number, duration: number = 0.85, colorHex: number = 0x6ee7b7): void {
     const colGeo = this.createOrganicPlumeColumnGeo(18, 44, 460, 12, 8, 0.34, 1.3);
-    const colMat = new THREE.MeshBasicMaterial({
-      color: colorHex,
-      transparent: true,
-      opacity: 0.68,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const colMat = this.acquireBasicMat(colorHex, 0.68, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const colMesh = new THREE.Mesh(colGeo, colMat);
     colMesh.position.set(pos.x, elevation + 230, pos.y);
     this.group.add(colMesh);
@@ -4055,17 +4292,17 @@ export class ThreeVFX {
     const n = Math.min(count, 6);
     for (let i = 0; i < n; i++) {
       if (this.healMotes.length >= 28) break;
-      const geo = new THREE.PlaneGeometry(12, 12);
-      const mat = new THREE.MeshBasicMaterial({
-        map: this.dustRadialTex || null,
-        color: i % 2 === 0 ? 0x34d399 : 0xecfdf5,
-        transparent: true,
-        opacity: 0.9,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      });
-      const mesh = new THREE.Mesh(geo, mat);
+      const mat = this.acquireBasicMat(
+        i % 2 === 0 ? 0x34d399 : 0xecfdf5,
+        0.9,
+        THREE.AdditiveBlending,
+        THREE.DoubleSide,
+        false,
+        this.dustRadialTex || null
+      );
+      const mesh = new THREE.Mesh(this.sharedUnitPlaneGeo, mat);
+      mesh.userData.isSharedGeo = true;
+      mesh.scale.set(12, 12, 1);
       const ang = Math.random() * Math.PI * 2;
       const r = 16 + Math.random() * 26;
       mesh.position.set(pos.x + Math.cos(ang) * r, elevation + 24 + Math.random() * 36, pos.y + Math.sin(ang) * r);
@@ -4088,15 +4325,14 @@ export class ThreeVFX {
     const radialDist = Math.max(80, radius);
     for (let i = 0; i < n; i++) {
       if (this.regionalFrostMotes.length >= 36) break;
-      const mat = new THREE.MeshBasicMaterial({
-        map: this.dustRadialTex || null,
-        color: i % 2 === 0 ? 0xbae6fd : 0xe0f2fe,
-        transparent: true,
-        opacity: 0.72,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      });
+      const mat = this.acquireBasicMat(
+        i % 2 === 0 ? 0xbae6fd : 0xe0f2fe,
+        0.72,
+        THREE.AdditiveBlending,
+        THREE.DoubleSide,
+        false,
+        this.dustRadialTex || null
+      );
       const mesh = new THREE.Mesh(this.sharedDustGeo, mat);
       mesh.userData.isSharedGeo = true;
       mesh.scale.setScalar(18 + Math.random() * 14);
@@ -4123,34 +4359,38 @@ export class ThreeVFX {
   // 4G. Experimental Drone Bio-Bolt Target Impact Burst
   public spawnDroneImpactBurst(pos: Vector2, elevation: number = 18): void {
     this.initSharedBlasterBoltResources();
-    const sparkMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: { uSeed: { value: Math.random() * 6.28 } },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uSeed;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          if (r > 1.0) discard;
-          float a = atan(vUv.y, vUv.x) + uSeed;
-          float rays = pow(abs(cos(a * 4.0)), 6.0) * smoothstep(1.0, 0.05, r);
-          float core = smoothstep(0.42, 0.0, r);
-          float alpha = clamp(core + rays * 0.9, 0.0, 1.0);
-          vec3 col = mix(vec3(0.06, 0.78, 0.52), vec3(0.86, 1.0, 0.92), core);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+    const sparkMat = this.acquireShader(
+      'drone_impact_spark',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: { uSeed: { value: 0 } },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uSeed;
+          varying vec2 vUv;
+          void main() {
+            float r = length(vUv);
+            if (r > 1.0) discard;
+            float a = atan(vUv.y, vUv.x) + uSeed;
+            float rays = pow(abs(cos(a * 4.0)), 6.0) * smoothstep(1.0, 0.05, r);
+            float core = smoothstep(0.42, 0.0, r);
+            float alpha = clamp(core + rays * 0.9, 0.0, 1.0);
+            vec3 col = mix(vec3(0.06, 0.78, 0.52), vec3(0.86, 1.0, 0.92), core);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uSeed: Math.random() * 6.28 }
+    );
     const flash = new THREE.Mesh(this.sharedImpactSparkGeo!, sparkMat);
     flash.userData.isSharedGeo = true;
     flash.position.set(pos.x, elevation, pos.y);
@@ -4388,8 +4628,19 @@ export class ThreeVFX {
     this.initSharedBlasterBoltResources();
     const angle = Math.atan2(vx, vy);
 
-    const flashMat = this.sharedMuzzleFlashMat!.clone();
-    flashMat.uniforms.uAngle.value = angle;
+    const flashMat = this.acquireShader(
+      'blaster_muzzle_flash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: { uAngle: { value: 0 } },
+        vertexShader: this.sharedMuzzleFlashMat!.vertexShader,
+        fragmentShader: this.sharedMuzzleFlashMat!.fragmentShader
+      }),
+      { uAngle: angle }
+    );
 
     const flashMesh = new THREE.Mesh(this.sharedMuzzleFlashGeo!, flashMat);
     flashMesh.userData.isSharedGeo = true;
@@ -4401,8 +4652,19 @@ export class ThreeVFX {
   public spawnBlasterImpactSpark(pos: Vector2, elevation: number = 20): void {
     this.initSharedBlasterBoltResources();
 
-    const sparkMat = this.sharedImpactSparkMat!.clone();
-    sparkMat.uniforms.uSeed.value = Math.random() * 6.28;
+    const sparkMat = this.acquireShader(
+      'blaster_impact_spark',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: { uSeed: { value: 0 } },
+        vertexShader: this.sharedImpactSparkMat!.vertexShader,
+        fragmentShader: this.sharedImpactSparkMat!.fragmentShader
+      }),
+      { uSeed: Math.random() * 6.28 }
+    );
 
     const sparkMesh = new THREE.Mesh(this.sharedImpactSparkGeo!, sparkMat);
     sparkMesh.userData.isSharedGeo = true;
@@ -4415,8 +4677,9 @@ export class ThreeVFX {
     for (let i = 0; i < 6; i++) {
       const ang = (i / 6) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
       const spd = 95 + Math.random() * 85;
-      const mat = (i % 2 === 0 ? this.sharedSparkMatYellow! : this.sharedSparkMatOrange!).clone();
+      const mat = this.acquireBasicMat(i % 2 === 0 ? 0xfef08a : 0xf59e0b, 1.0, THREE.AdditiveBlending, THREE.DoubleSide, true, null);
       const m = new THREE.Mesh(this.sharedSparkGeo, mat);
+      m.userData.isSharedGeo = true;
       m.position.set(pos.x, elevation + 4, pos.y);
       m.scale.set(1.2, 1.2, 2.8);
       this.group.add(m);
@@ -4443,75 +4706,79 @@ export class ThreeVFX {
   // ==========================================================================
 
   private createCrescentSlashMaterial(mirrorSide: number): THREE.ShaderMaterial {
-    return new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uMirror: { value: mirrorSide },
-        uTime: { value: 0 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uMirror;
-        uniform float uTime;
-        uniform float uAlpha;
-        varying vec2 vUv;
-
-        void main() {
-          // Map UV into local crescent space
-          vec2 p = vUv * 2.0 - 1.0;
-          p.x *= uMirror;
-
-          // Curved crescent spine: x curves inward along y (-1..1)
-          float spineX = 0.28 - 0.52 * (p.y * p.y);
-          float distFromSpine = p.x - spineX;
-
-          // Lengthwise tip taper at both ends of the crescent blade
-          float tipFade = smoothstep(1.0, 0.25, abs(p.y));
-          if (tipFade <= 0.001) discard;
-
-          // Sharp leading outer edge (distFromSpine > 0) and softer inner wake (distFromSpine < 0)
-          float outerWidth = 0.14 * tipFade;
-          float innerWakeWidth = 0.48 * tipFade;
-
-          float alpha = 0.0;
-          float edgeFactor = 0.0;
-          if (distFromSpine >= 0.0) {
-            alpha = smoothstep(outerWidth, 0.0, distFromSpine);
-            edgeFactor = smoothstep(outerWidth * 0.65, 0.0, distFromSpine);
-          } else {
-            float dIn = -distFromSpine;
-            alpha = smoothstep(innerWakeWidth, 0.0, dIn) * 0.82;
-            edgeFactor = smoothstep(innerWakeWidth * 0.18, 0.0, dIn);
+    return this.acquireShader(
+      'crescent_slash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uMirror: { value: 1.0 },
+          uTime: { value: 0 },
+          uAlpha: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
           }
+        `,
+        fragmentShader: `
+          uniform float uMirror;
+          uniform float uTime;
+          uniform float uAlpha;
+          varying vec2 vUv;
 
-          // Flowing organic solar-flame plasma ripples in wake (zero geometric grid/hex pattern)
-          float flameFlow = 0.5 + 0.5 * sin(p.y * 8.5 - uTime * 7.0 + sin(p.x * 11.0 + uTime * 4.5) * 1.4);
-          float wispMask = flameFlow * smoothstep(innerWakeWidth, 0.04, -distFromSpine) * 0.42;
+          void main() {
+            // Map UV into local crescent space
+            vec2 p = vUv * 2.0 - 1.0;
+            p.x *= uMirror;
 
-          alpha = clamp((alpha + wispMask) * tipFade * uAlpha, 0.0, 1.0);
-          if (alpha < 0.02) discard;
+            // Curved crescent spine: x curves inward along y (-1..1)
+            float spineX = 0.28 - 0.52 * (p.y * p.y);
+            float distFromSpine = p.x - spineX;
 
-          vec3 amberWake = vec3(0.96, 0.48, 0.08);
-          vec3 goldMid = vec3(0.99, 0.78, 0.18);
-          vec3 whiteGoldEdge = vec3(1.0, 0.98, 0.86);
+            // Lengthwise tip taper at both ends of the crescent blade
+            float tipFade = smoothstep(1.0, 0.25, abs(p.y));
+            if (tipFade <= 0.001) discard;
 
-          vec3 col = mix(amberWake, goldMid, clamp(alpha * 1.2, 0.0, 1.0));
-          col = mix(col, whiteGoldEdge, edgeFactor);
+            // Sharp leading outer edge (distFromSpine > 0) and softer inner wake (distFromSpine < 0)
+            float outerWidth = 0.14 * tipFade;
+            float innerWakeWidth = 0.48 * tipFade;
 
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+            float alpha = 0.0;
+            float edgeFactor = 0.0;
+            if (distFromSpine >= 0.0) {
+              alpha = smoothstep(outerWidth, 0.0, distFromSpine);
+              edgeFactor = smoothstep(outerWidth * 0.65, 0.0, distFromSpine);
+            } else {
+              float dIn = -distFromSpine;
+              alpha = smoothstep(innerWakeWidth, 0.0, dIn) * 0.82;
+              edgeFactor = smoothstep(innerWakeWidth * 0.18, 0.0, dIn);
+            }
+
+            // Flowing organic solar-flame plasma ripples in wake (zero geometric grid/hex pattern)
+            float flameFlow = 0.5 + 0.5 * sin(p.y * 8.5 - uTime * 7.0 + sin(p.x * 11.0 + uTime * 4.5) * 1.4);
+            float wispMask = flameFlow * smoothstep(innerWakeWidth, 0.04, -distFromSpine) * 0.42;
+
+            alpha = clamp((alpha + wispMask) * tipFade * uAlpha, 0.0, 1.0);
+            if (alpha < 0.02) discard;
+
+            vec3 amberWake = vec3(0.96, 0.48, 0.08);
+            vec3 goldMid = vec3(0.99, 0.78, 0.18);
+            vec3 whiteGoldEdge = vec3(1.0, 0.98, 0.86);
+
+            vec3 col = mix(amberWake, goldMid, clamp(alpha * 1.2, 0.0, 1.0));
+            col = mix(col, whiteGoldEdge, edgeFactor);
+
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uMirror: mirrorSide, uTime: 0, uAlpha: 1.0 }
+    );
   }
 
   public createTwinSlashProjectileGroup(extraLayers: number = 0): THREE.Group {
@@ -4572,32 +4839,36 @@ export class ThreeVFX {
     const chevGeo = new THREE.PlaneGeometry(24, 14);
     chevGeo.rotateX(-Math.PI / 2);
     const createChevronMat = (dirSign: number) =>
-      new THREE.ShaderMaterial({
-        transparent: true,
-        depthWrite: false,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        uniforms: { uDir: { value: dirSign }, uTime: { value: 0 } },
-        vertexShader: `
-          varying vec2 vUv;
-          void main() {
-            vUv = uv * 2.0 - 1.0;
-            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-          }
-        `,
-        fragmentShader: `
-          uniform float uDir;
-          uniform float uTime;
-          varying vec2 vUv;
-          void main() {
-            float x = vUv.x * uDir;
-            float stream = sin(x * 7.0 - uTime * 11.0 + vUv.y * 4.0) * 0.5 + 0.5;
-            float fade = exp(-dot(vUv, vUv) * 2.2) * smoothstep(0.25, 0.9, stream);
-            if (fade < 0.02) discard;
-            gl_FragColor = vec4(1.0, 0.86, 0.34, fade * 0.78);
-          }
-        `
-      });
+      this.acquireShader(
+        'twin_slash_chevron',
+        () => ({
+          transparent: true,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          side: THREE.DoubleSide,
+          uniforms: { uDir: { value: 1.0 }, uTime: { value: 0 } },
+          vertexShader: `
+            varying vec2 vUv;
+            void main() {
+              vUv = uv * 2.0 - 1.0;
+              gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+            }
+          `,
+          fragmentShader: `
+            uniform float uDir;
+            uniform float uTime;
+            varying vec2 vUv;
+            void main() {
+              float x = vUv.x * uDir;
+              float stream = sin(x * 7.0 - uTime * 11.0 + vUv.y * 4.0) * 0.5 + 0.5;
+              float fade = exp(-dot(vUv, vUv) * 2.2) * smoothstep(0.25, 0.9, stream);
+              if (fade < 0.02) discard;
+              gl_FragColor = vec4(1.0, 0.86, 0.34, fade * 0.78);
+            }
+          `
+        }),
+        { uDir: dirSign, uTime: 0 }
+      );
 
     const leftChev = new THREE.Mesh(chevGeo, createChevronMat(1.0));
     leftChev.name = 'leftChevrons';
@@ -4669,13 +4940,9 @@ export class ThreeVFX {
       ud.trailTimer = 0;
       const groundY = this.getTerrainHeight(worldPos.x, worldPos.y, elevation);
       for (let side = -1; side <= 1; side += 2) {
-        const mat = new THREE.MeshBasicMaterial({
-          color: side < 0 ? 0xfef08a : 0xf59e0b,
-          transparent: true,
-          opacity: 0.85,
-          blending: THREE.AdditiveBlending
-        });
+        const mat = this.acquireBasicMat(side < 0 ? 0xfef08a : 0xf59e0b, 0.85, THREE.AdditiveBlending, THREE.FrontSide, true, null);
         const spark = new THREE.Mesh(this.sharedSparkGeo, mat);
+        spark.userData.isSharedGeo = true;
         spark.position.set(
           worldPos.x + (Math.random() - 0.5) * 24,
           groundY + 14 + Math.random() * 10,
@@ -4803,42 +5070,46 @@ export class ThreeVFX {
     const burstSize = Math.min(115, radius * 0.92);
     const flashGeo = new THREE.PlaneGeometry(burstSize, burstSize);
     flashGeo.rotateX(-Math.PI / 2);
-    const flashMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uProgress: { value: 0.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uProgress;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          if (r > 1.0) discard;
-          float a = atan(vUv.y, vUv.x);
-          // Cross-slash X-starburst + compact compression ring
-          float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
-          float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
-          float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
-          float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
-          float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
-          float fade = pow(1.0 - uProgress, 1.35);
-          float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
-          if (alpha < 0.01) discard;
-          vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+    const flashMat = this.acquireShader(
+      'slash_convergence_flash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uProgress: { value: 0.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uProgress;
+          varying vec2 vUv;
+          void main() {
+            float r = length(vUv);
+            if (r > 1.0) discard;
+            float a = atan(vUv.y, vUv.x);
+            // Cross-slash X-starburst + compact compression ring
+            float crossSpikes = pow(abs(cos(a * 2.0)), 10.0) * smoothstep(1.0, 0.05, r);
+            float minorSpikes = pow(abs(sin(a * 4.0)), 12.0) * smoothstep(0.75, 0.05, r);
+            float core = smoothstep(0.38 * (1.0 - uProgress * 0.5), 0.0, r);
+            float wispNoise = sin(a * 5.0 + r * 8.0 - uProgress * 6.0) * 0.5 + 0.5;
+            float emberGlow = smoothstep(0.75, 0.15, r) * wispNoise * 0.48;
+            float fade = pow(1.0 - uProgress, 1.35);
+            float alpha = clamp((core + crossSpikes * 0.95 + minorSpikes * 0.6 + emberGlow) * fade, 0.0, 1.0);
+            if (alpha < 0.01) discard;
+            vec3 col = mix(vec3(0.98, 0.58, 0.10), vec3(1.0, 0.98, 0.85), core + crossSpikes * 0.5);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uProgress: 0.0 }
+    );
     const flashMesh = new THREE.Mesh(flashGeo, flashMat);
     group.add(flashMesh);
 
@@ -4894,13 +5165,9 @@ export class ThreeVFX {
     for (let i = 0; i < 12; i++) {
       const a = (i / 12) * Math.PI * 2 + (Math.random() - 0.5) * 0.3;
       const spd = 75 + Math.random() * 95;
-      const mat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0xffffff : 0xfacc15,
-        transparent: true,
-        opacity: 1.0,
-        blending: THREE.AdditiveBlending
-      });
+      const mat = this.acquireBasicMat(i % 2 === 0 ? 0xffffff : 0xfacc15, 1.0, THREE.AdditiveBlending, THREE.FrontSide, true, null);
       const m = new THREE.Mesh(this.sharedSparkGeo, mat);
+      m.userData.isSharedGeo = true;
       m.position.set(pos.x, baseElev + 12, pos.y);
       m.scale.set(1.5, 1.5, 3.2);
       this.group.add(m);
@@ -4943,31 +5210,35 @@ export class ThreeVFX {
     const noseGeo = this.createOrganicPlumeColumnGeo(2, 22, 38, 12, 6, 0.28, 1.2);
     noseGeo.rotateX(Math.PI / 2);
     noseGeo.translate(0, 18, 10);
-    const noseConeMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uAlpha: { value: 0.85 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uAlpha;
-        varying vec2 vUv;
-        void main() {
-          float fade = pow(vUv.y, 1.4) * uAlpha;
-          vec3 col = mix(vec3(0.96, 0.58, 0.08), vec3(1.0, 0.98, 0.82), vUv.y);
-          gl_FragColor = vec4(col, fade * 0.72);
-        }
-      `
-    });
+    const noseConeMat = this.acquireShader(
+      'dash_nose_cone',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uAlpha: { value: 0.85 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uAlpha;
+          varying vec2 vUv;
+          void main() {
+            float fade = pow(vUv.y, 1.4) * uAlpha;
+            vec3 col = mix(vec3(0.96, 0.58, 0.08), vec3(1.0, 0.98, 0.82), vUv.y);
+            gl_FragColor = vec4(col, fade * 0.72);
+          }
+        `
+      }),
+      { uAlpha: 0.85 }
+    );
     const noseConeMesh = new THREE.Mesh(noseGeo, noseConeMat);
     group.add(noseConeMesh);
 
@@ -4988,14 +5259,7 @@ export class ThreeVFX {
       const cfg = streakOffsets[i];
       const sGeo = new THREE.PlaneGeometry(cfg.w, cfg.len);
       sGeo.rotateX(-Math.PI / 2);
-      const sMat = new THREE.MeshBasicMaterial({
-        color: cfg.col,
-        transparent: true,
-        opacity: 0.88,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide,
-        depthWrite: false
-      });
+      const sMat = this.acquireBasicMat(cfg.col, 0.88, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
       const sMesh = new THREE.Mesh(sGeo, sMat);
       sMesh.position.set(cfg.x, cfg.y, cfg.z);
       group.add(sMesh);
@@ -5036,17 +5300,9 @@ export class ThreeVFX {
     active.dustTimer += dt;
     if (active.dustTimer >= 0.045) {
       active.dustTimer = 0;
-      const matParams: THREE.MeshBasicMaterialParameters = {
-        color: 0xd6d3d1,
-        transparent: true,
-        opacity: 0.38,
-        depthWrite: false
-      };
-      if (this.dustRadialTex) {
-        matParams.map = this.dustRadialTex;
-      }
-      const dustMat = new THREE.MeshBasicMaterial(matParams);
+      const dustMat = this.acquireBasicMat(0xd6d3d1, 0.38, THREE.NormalBlending, THREE.FrontSide, false, this.dustRadialTex || null);
       const dustMesh = new THREE.Mesh(this.sharedDustGeo, dustMat);
+      dustMesh.userData.isSharedGeo = true;
       dustMesh.position.set(
         pos.x - active.dir.x * 16 + (Math.random() - 0.5) * 14,
         baseElev + 6,
@@ -5088,43 +5344,47 @@ export class ThreeVFX {
     const flashSize = Math.min(130, radius * 1.1);
     const flashGeo = new THREE.PlaneGeometry(flashSize, flashSize);
     flashGeo.rotateX(-Math.PI / 2);
-    const flashMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uProgress: { value: 0.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uProgress;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          if (r > 1.0) discard;
-          float a = atan(vUv.y, vUv.x);
-          float rays = pow(abs(cos(a * 6.0)), 8.0) * smoothstep(1.0, 0.12, r);
-          float subRays = pow(abs(sin(a * 10.0)), 12.0) * smoothstep(0.85, 0.15, r);
-          float wisp = 0.5 + 0.5 * sin(a * 5.0 + r * 9.0);
-          float core = smoothstep(0.36, 0.0, r);
-          float fade = pow(1.0 - uProgress, 1.3);
-          float alpha = clamp((core + rays * 0.95 + subRays * 0.65 + wisp * smoothstep(0.75, 0.15, r) * 0.35) * fade, 0.0, 1.0);
-          if (alpha < 0.01) discard;
-          vec3 gold = vec3(1.0, 0.78, 0.18);
-          vec3 violetAccent = vec3(0.78, 0.45, 0.98);
-          vec3 col = mix(gold, violetAccent, subRays * 0.45);
-          col = mix(col, vec3(1.0, 0.99, 0.90), core);
-          gl_FragColor = vec4(col, alpha);
-        }
-      `
-    });
+    const flashMat = this.acquireShader(
+      'dash_kinetic_flash',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uProgress: { value: 0.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uProgress;
+          varying vec2 vUv;
+          void main() {
+            float r = length(vUv);
+            if (r > 1.0) discard;
+            float a = atan(vUv.y, vUv.x);
+            float rays = pow(abs(cos(a * 6.0)), 8.0) * smoothstep(1.0, 0.12, r);
+            float subRays = pow(abs(sin(a * 10.0)), 12.0) * smoothstep(0.85, 0.15, r);
+            float wisp = 0.5 + 0.5 * sin(a * 5.0 + r * 9.0);
+            float core = smoothstep(0.36, 0.0, r);
+            float fade = pow(1.0 - uProgress, 1.3);
+            float alpha = clamp((core + rays * 0.95 + subRays * 0.65 + wisp * smoothstep(0.75, 0.15, r) * 0.35) * fade, 0.0, 1.0);
+            if (alpha < 0.01) discard;
+            vec3 gold = vec3(1.0, 0.78, 0.18);
+            vec3 violetAccent = vec3(0.78, 0.45, 0.98);
+            vec3 col = mix(gold, violetAccent, subRays * 0.45);
+            col = mix(col, vec3(1.0, 0.99, 0.90), core);
+            gl_FragColor = vec4(col, alpha);
+          }
+        `
+      }),
+      { uProgress: 0.0 }
+    );
     const flashMesh = new THREE.Mesh(flashGeo, flashMat);
     group.add(flashMesh);
 
@@ -5301,70 +5561,74 @@ export class ThreeVFX {
       baseElev
     );
 
-    const vortexDiscMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uTime: { value: 0 },
-        uProgress: { value: 0 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        varying vec2 vUv;
+    const vortexDiscMat = this.acquireShader(
+      'singularity_vortex_disc',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          varying vec2 vUv;
 
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          if (r > 1.0) discard;
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            if (r > 1.0) discard;
 
-          float a = atan(p.y, p.x);
+            float a = atan(p.y, p.x);
 
-          // Swirling logarithmic spiral arms pulling inward (accelerates late-stage)
-          float swirlSpeed = uTime * (uProgress > 0.73 ? 6.8 : 3.8);
-          float swirlAngle = a + swirlSpeed + log(max(r, 0.04)) * 4.2;
-          float spiral1 = pow(0.5 + 0.5 * sin(swirlAngle * 3.0), 2.2);
-          float spiral2 = pow(0.5 + 0.5 * cos(swirlAngle * 5.0 - uTime * 2.5), 3.0);
+            // Swirling logarithmic spiral arms pulling inward (accelerates late-stage)
+            float swirlSpeed = uTime * (uProgress > 0.73 ? 6.8 : 3.8);
+            float swirlAngle = a + swirlSpeed + log(max(r, 0.04)) * 4.2;
+            float spiral1 = pow(0.5 + 0.5 * sin(swirlAngle * 3.0), 2.2);
+            float spiral2 = pow(0.5 + 0.5 * cos(swirlAngle * 5.0 - uTime * 2.5), 3.0);
 
-          // Domain-warped organic void nebula & spiraling rift wisps (zero chevrons or geometric tech rings)
-          float n1 = 0.5 + 0.5 * sin(p.x * 7.5 + sin(p.y * 6.0 + uTime * 3.0) * 1.4);
-          float n2 = 0.5 + 0.5 * cos(p.y * 9.0 - cos(p.x * 8.0 - uTime * 2.4) * 1.3);
-          float wisp = n1 * 0.6 + n2 * 0.4;
-          float warpedR = r + (wisp - 0.5) * 0.36;
-          if (warpedR > 1.0) discard;
+            // Domain-warped organic void nebula & spiraling rift wisps (zero chevrons or geometric tech rings)
+            float n1 = 0.5 + 0.5 * sin(p.x * 7.5 + sin(p.y * 6.0 + uTime * 3.0) * 1.4);
+            float n2 = 0.5 + 0.5 * cos(p.y * 9.0 - cos(p.x * 8.0 - uTime * 2.4) * 1.3);
+            float wisp = n1 * 0.6 + n2 * 0.4;
+            float warpedR = r + (wisp - 0.5) * 0.36;
+            if (warpedR > 1.0) discard;
 
-          float innerHorizon = exp(-pow((warpedR - 0.22) / 0.08, 2.0)) * (1.2 + 0.7 * sin(a * 4.0 - uTime * 7.0));
-          float vortexSmoke = smoothstep(0.95, 0.14, warpedR) * smoothstep(0.25, 0.88, wisp);
+            float innerHorizon = exp(-pow((warpedR - 0.22) / 0.08, 2.0)) * (1.2 + 0.7 * sin(a * 4.0 - uTime * 7.0));
+            float vortexSmoke = smoothstep(0.95, 0.14, warpedR) * smoothstep(0.25, 0.88, wisp);
 
-          vec3 deepVoid = vec3(0.18, 0.03, 0.38);
-          vec3 electricPurple = vec3(0.68, 0.22, 0.98);
-          vec3 magentaGlow = vec3(0.95, 0.45, 1.0);
-          vec3 orbitalGold = vec3(1.0, 0.82, 0.28);
+            vec3 deepVoid = vec3(0.18, 0.03, 0.38);
+            vec3 electricPurple = vec3(0.68, 0.22, 0.98);
+            vec3 magentaGlow = vec3(0.95, 0.45, 1.0);
+            vec3 orbitalGold = vec3(1.0, 0.82, 0.28);
 
-          float energy = spiral1 * 0.78 + spiral2 * 0.60 + vortexSmoke * 0.85 + innerHorizon;
-          vec3 col = mix(deepVoid, electricPurple, clamp(energy, 0.0, 1.0));
-          col = mix(col, magentaGlow, clamp(spiral2 * 0.7 + vortexSmoke * 0.45, 0.0, 1.0));
-          col += orbitalGold * (innerHorizon * 0.95 + smoothstep(0.26, 0.04, warpedR) * 0.55);
+            float energy = spiral1 * 0.78 + spiral2 * 0.60 + vortexSmoke * 0.85 + innerHorizon;
+            vec3 col = mix(deepVoid, electricPurple, clamp(energy, 0.0, 1.0));
+            col = mix(col, magentaGlow, clamp(spiral2 * 0.7 + vortexSmoke * 0.45, 0.0, 1.0));
+            col += orbitalGold * (innerHorizon * 0.95 + smoothstep(0.26, 0.04, warpedR) * 0.55);
 
-          float radialEnvelope = smoothstep(1.0, 0.70, warpedR) * (0.28 + 0.72 * (1.0 - warpedR * 0.55));
-          float collapseBoost = 1.0 + smoothstep(0.70, 1.0, uProgress) * 0.85;
+            float radialEnvelope = smoothstep(1.0, 0.70, warpedR) * (0.28 + 0.72 * (1.0 - warpedR * 0.55));
+            float collapseBoost = 1.0 + smoothstep(0.70, 1.0, uProgress) * 0.85;
 
-          float alpha = clamp((energy * 0.82 + 0.18) * radialEnvelope * uAlpha, 0.0, 1.0);
-          gl_FragColor = vec4(col * collapseBoost, alpha);
-        }
-      `
-    });
+            float alpha = clamp((energy * 0.82 + 0.18) * radialEnvelope * uAlpha, 0.0, 1.0);
+            gl_FragColor = vec4(col * collapseBoost, alpha);
+          }
+        `
+      }),
+      { uTime: 0, uProgress: 0, uAlpha: 1.0 }
+    );
 
     const vortexDiscMesh = new THREE.Mesh(discGeo, vortexDiscMat);
     vortexDiscMesh.position.set(pos.x, baseElev, pos.y);
@@ -5372,12 +5636,7 @@ export class ThreeVFX {
 
     // Dark swirling void event-horizon funnel (zero TorusGeometry)
     const coreGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.04, 14, 14, 5, 0.36, 1.8);
-    const coreSphereMat = new THREE.MeshBasicMaterial({
-      color: 0x090214,
-      transparent: true,
-      opacity: 0.92,
-      side: THREE.DoubleSide
-    });
+    const coreSphereMat = this.acquireBasicMat(0x090214, 0.92, THREE.NormalBlending, THREE.DoubleSide, true, null);
     const coreSphereMesh = new THREE.Mesh(coreGeo, coreSphereMat);
     coreSphereMesh.position.set(pos.x, baseElev + 4, pos.y);
     group.add(coreSphereMesh);
@@ -5385,14 +5644,7 @@ export class ThreeVFX {
     // Swirling violet-magenta plasma tendril ribbons (zero TorusGeometry)
     const accGeo = this.createOrganicPlumeColumnGeo(radius * 0.24, radius * 0.16, 10, 14, 5, 0.42, 2.2);
     accGeo.rotateX(Math.PI * 0.38);
-    const accretionRingMat = new THREE.MeshBasicMaterial({
-      color: 0xd946ef,
-      transparent: true,
-      opacity: 0.78,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const accretionRingMat = this.acquireBasicMat(0xd946ef, 0.78, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const accretionRingMesh = new THREE.Mesh(accGeo, accretionRingMat);
     accretionRingMesh.position.set(pos.x, baseElev + 6, pos.y);
     group.add(accretionRingMesh);
@@ -5400,12 +5652,9 @@ export class ThreeVFX {
     // 16 3D rock/debris chunks pulled inward in a spiral orbit
     const debrisMeshes: ActiveSingularityVFX['debrisMeshes'] = [];
     for (let i = 0; i < 16; i++) {
-      const dMat = new THREE.MeshBasicMaterial({
-        color: i % 3 === 0 ? 0xa855f7 : 0x2e1a47,
-        transparent: true,
-        opacity: 0.92
-      });
+      const dMat = this.acquireBasicMat(i % 3 === 0 ? 0xa855f7 : 0x2e1a47, 0.92, THREE.NormalBlending, THREE.FrontSide, true, null);
       const dMesh = new THREE.Mesh(this.sharedDebrisGeo, dMat);
+      dMesh.userData.isSharedGeo = true;
       const scale = 5.5 + (i % 4) * 2.4;
       dMesh.scale.set(scale, scale * 0.75, scale * 0.9);
       group.add(dMesh);
@@ -5483,62 +5732,66 @@ export class ThreeVFX {
       baseElev
     );
 
-    const spiralMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uTime: { value: 0 },
-        uProgress: { value: 0 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        varying vec2 vUv;
+    const spiralMat = this.acquireShader(
+      'convergence_spiral',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          varying vec2 vUv;
 
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          if (r > 1.0) discard;
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            if (r > 1.0) discard;
 
-          float a = atan(p.y, p.x);
+            float a = atan(p.y, p.x);
 
-          // 4 prominent golden energy streams spiraling inward from the 4 outer strike sites
-          float streamPhase = a - log(max(r, 0.05)) * 2.6 + uTime * 4.5;
-          float fourStreams = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 2.8);
-          float streamCore = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 7.0);
+            // 4 prominent golden energy streams spiraling inward from the 4 outer strike sites
+            float streamPhase = a - log(max(r, 0.05)) * 2.6 + uTime * 4.5;
+            float fourStreams = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 2.8);
+            float streamCore = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 7.0);
 
-          float flameWisp = 0.5 + 0.5 * sin(p.x * 8.5 + cos(p.y * 7.5 - uTime * 4.5) * 1.6);
-          float warpedR = r + (flameWisp - 0.5) * 0.34;
-          if (warpedR > 1.0) discard;
+            float flameWisp = 0.5 + 0.5 * sin(p.x * 8.5 + cos(p.y * 7.5 - uTime * 4.5) * 1.6);
+            float warpedR = r + (flameWisp - 0.5) * 0.34;
+            if (warpedR > 1.0) discard;
 
-          float maxReach = mix(0.95, 0.32, pow(uProgress, 1.35));
-          float reachMask = smoothstep(maxReach + 0.16, maxReach - 0.20, warpedR) * smoothstep(0.03, 0.18, warpedR);
-          float fireCore = smoothstep(0.45, 0.0, warpedR) * (0.65 + uProgress * 0.9) * (0.65 + 0.35 * flameWisp);
+            float maxReach = mix(0.95, 0.32, pow(uProgress, 1.35));
+            float reachMask = smoothstep(maxReach + 0.16, maxReach - 0.20, warpedR) * smoothstep(0.03, 0.18, warpedR);
+            float fireCore = smoothstep(0.45, 0.0, warpedR) * (0.65 + uProgress * 0.9) * (0.65 + 0.35 * flameWisp);
 
-          vec3 amberEdge = vec3(0.98, 0.48, 0.08);
-          vec3 goldMid = vec3(1.0, 0.82, 0.18);
-          vec3 whiteCore = vec3(1.0, 0.98, 0.88);
+            vec3 amberEdge = vec3(0.98, 0.48, 0.08);
+            vec3 goldMid = vec3(1.0, 0.82, 0.18);
+            vec3 whiteCore = vec3(1.0, 0.98, 0.88);
 
-          float intensity = (fourStreams * (0.75 + 0.65 * flameWisp)) * reachMask + fireCore;
-          vec3 col = mix(amberEdge, goldMid, clamp(intensity * 0.85, 0.0, 1.0));
-          col = mix(col, whiteCore, clamp(streamCore * reachMask + fireCore * 0.75, 0.0, 1.0));
+            float intensity = (fourStreams * (0.75 + 0.65 * flameWisp)) * reachMask + fireCore;
+            vec3 col = mix(amberEdge, goldMid, clamp(intensity * 0.85, 0.0, 1.0));
+            col = mix(col, whiteCore, clamp(streamCore * reachMask + fireCore * 0.75, 0.0, 1.0));
 
-          float alpha = clamp(intensity * uAlpha, 0.0, 1.0);
-          gl_FragColor = vec4(col * (1.25 + uProgress * 0.75), alpha);
-        }
-      `
-    });
+            float alpha = clamp(intensity * uAlpha, 0.0, 1.0);
+            gl_FragColor = vec4(col * (1.25 + uProgress * 0.75), alpha);
+          }
+        `
+      }),
+      { uTime: 0, uProgress: 0, uAlpha: 1.0 }
+    );
 
     const spiralMesh = new THREE.Mesh(spiralGeo, spiralMat);
     spiralMesh.position.set(pos.x, baseElev, pos.y);
@@ -5546,42 +5799,21 @@ export class ThreeVFX {
 
     // Central Swirling Solar Flame Vortex Core (zero Sphere / Icosahedron / Torus geometry)
     const coreSphereGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.26, radius * 0.36, 14, 6, 0.36, 1.8);
-    const coreSphereMat = new THREE.MeshBasicMaterial({
-      color: 0xfef08a,
-      transparent: true,
-      opacity: 0.85,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const coreSphereMat = this.acquireBasicMat(0xfef08a, 0.85, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const coreSphereMesh = new THREE.Mesh(coreSphereGeo, coreSphereMat);
     coreSphereMesh.position.set(pos.x, baseElev + 24, pos.y);
     coreSphereMesh.scale.setScalar(0.25);
     group.add(coreSphereMesh);
 
     const coreCageGeo = this.createOrganicPlumeColumnGeo(radius * 0.24, radius * 0.10, radius * 0.42, 10, 6, 0.44, -2.0);
-    const coreCageMat = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.65,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const coreCageMat = this.acquireBasicMat(0xffffff, 0.65, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const coreCageMesh = new THREE.Mesh(coreCageGeo, coreCageMat);
     coreCageMesh.position.set(pos.x, baseElev + 24, pos.y);
     coreCageMesh.scale.setScalar(0.25);
     group.add(coreCageMesh);
 
     const coreHaloGeo = this.createOrganicPlumeColumnGeo(radius * 0.32, radius * 0.22, 12, 14, 4, 0.40, 2.2);
-    const coreHaloMat = new THREE.MeshBasicMaterial({
-      color: 0xfbbf24,
-      transparent: true,
-      opacity: 0.78,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const coreHaloMat = this.acquireBasicMat(0xfbbf24, 0.78, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const coreHaloMesh = new THREE.Mesh(coreHaloGeo, coreHaloMat);
     coreHaloMesh.position.set(pos.x, baseElev + 24, pos.y);
     coreHaloMesh.scale.setScalar(0.25);
@@ -5590,12 +5822,9 @@ export class ThreeVFX {
     // 10 levitating dark-gold debris fragments drawn upward around the building core
     const debrisMeshes: ActiveConvergenceBarrageVFX['debrisMeshes'] = [];
     for (let i = 0; i < 10; i++) {
-      const dMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0xf59e0b : 0x3b2f1e,
-        transparent: true,
-        opacity: 0.9
-      });
+      const dMat = this.acquireBasicMat(i % 2 === 0 ? 0xf59e0b : 0x3b2f1e, 0.9, THREE.NormalBlending, THREE.FrontSide, true, null);
       const dMesh = new THREE.Mesh(this.sharedDebrisGeo, dMat);
+      dMesh.userData.isSharedGeo = true;
       const s = 5.0 + (i % 3) * 2.5;
       dMesh.scale.set(s, s * 1.2, s * 0.8);
       group.add(dMesh);
@@ -5664,96 +5893,100 @@ export class ThreeVFX {
       baseElev
     );
 
-    const frostDiscMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uTime: { value: 0 },
-        uProgress: { value: 0 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        varying vec2 vUv;
+    const frostDiscMat = this.acquireShader(
+      'cryo_frost_disc',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          varying vec2 vUv;
 
-        float hash(vec2 p) {
-          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
-        }
+          float hash(vec2 p) {
+            return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+          }
 
-        // Voronoi cellular distance for crystalline ice fracture network
-        float voronoiCracks(vec2 x) {
-          vec2 n = floor(x);
-          vec2 f = fract(x);
-          float md = 8.0;
-          vec2 mr = vec2(0.0);
-          for (int j = -1; j <= 1; j++) {
-            for (int i = -1; i <= 1; i++) {
-              vec2 g = vec2(float(i), float(j));
-              vec2 o = vec2(hash(n + g), hash(n + g + vec2(17.0, 31.0)));
-              vec2 r = g + o - f;
-              float d = dot(r, r);
-              if (d < md) {
-                md = d;
-                mr = r;
+          // Voronoi cellular distance for crystalline ice fracture network
+          float voronoiCracks(vec2 x) {
+            vec2 n = floor(x);
+            vec2 f = fract(x);
+            float md = 8.0;
+            vec2 mr = vec2(0.0);
+            for (int j = -1; j <= 1; j++) {
+              for (int i = -1; i <= 1; i++) {
+                vec2 g = vec2(float(i), float(j));
+                vec2 o = vec2(hash(n + g), hash(n + g + vec2(17.0, 31.0)));
+                vec2 r = g + o - f;
+                float d = dot(r, r);
+                if (d < md) {
+                  md = d;
+                  mr = r;
+                }
               }
             }
+            return sqrt(md);
           }
-          return sqrt(md);
-        }
 
-        void main() {
-          vec2 p = (vUv - 0.5) * 2.0;
-          float r = length(p);
-          if (r > 1.0) discard;
+          void main() {
+            vec2 p = (vUv - 0.5) * 2.0;
+            float r = length(p);
+            if (r > 1.0) discard;
 
-          // Rapid outward freeze expansion over the first 0.25s
-          float expandR = smoothstep(0.0, 0.08, uProgress);
-          if (r > expandR) discard;
+            // Rapid outward freeze expansion over the first 0.25s
+            float expandR = smoothstep(0.0, 0.08, uProgress);
+            if (r > expandR) discard;
 
-          float a = atan(p.y, p.x);
+            float a = atan(p.y, p.x);
 
-          // Crystalline ice fracture lines & radial frost veins
-          float cell = voronoiCracks(p * 6.5);
-          float iceCracks = exp(-pow((cell - 0.48) / 0.045, 2.0)) * 1.25;
-          float fineCracks = exp(-pow((voronoiCracks(p * 13.0) - 0.46) / 0.05, 2.0)) * 0.65;
-          float radialVeins = pow(0.5 + 0.5 * cos(a * 16.0 + sin(r * 10.0) * 1.5), 6.0) * smoothstep(0.15, 0.85, r);
+            // Crystalline ice fracture lines & radial frost veins
+            float cell = voronoiCracks(p * 6.5);
+            float iceCracks = exp(-pow((cell - 0.48) / 0.045, 2.0)) * 1.25;
+            float fineCracks = exp(-pow((voronoiCracks(p * 13.0) - 0.46) / 0.05, 2.0)) * 0.65;
+            float radialVeins = pow(0.5 + 0.5 * cos(a * 16.0 + sin(r * 10.0) * 1.5), 6.0) * smoothstep(0.15, 0.85, r);
 
-          // Organic fractured ice glaze (zero crisp concentric circles or tick marks)
-          float innerMix = smoothstep(0.32, 0.0, r + (cell - 0.5) * 0.3) * 0.7;
-          float outerRime = exp(-pow((r - 0.84 - (cell - 0.5) * 0.16) / 0.08, 2.0)) * 0.85;
+            // Organic fractured ice glaze (zero crisp concentric circles or tick marks)
+            float innerMix = smoothstep(0.32, 0.0, r + (cell - 0.5) * 0.3) * 0.7;
+            float outerRime = exp(-pow((r - 0.84 - (cell - 0.5) * 0.16) / 0.08, 2.0)) * 0.85;
 
-          // Shimmering cold mist wave
-          float mistPulse = 0.5 + 0.5 * sin(r * 14.0 - uTime * 2.4 + a * 2.0);
+            // Shimmering cold mist wave
+            float mistPulse = 0.5 + 0.5 * sin(r * 14.0 - uTime * 2.4 + a * 2.0);
 
-          vec3 deepGlacier = vec3(0.04, 0.32, 0.68);
-          vec3 brightCyan = vec3(0.22, 0.78, 0.98);
-          vec3 frostWhite = vec3(0.88, 0.97, 1.0);
-          vec3 orbitalGold = vec3(1.0, 0.84, 0.32);
+            vec3 deepGlacier = vec3(0.04, 0.32, 0.68);
+            vec3 brightCyan = vec3(0.22, 0.78, 0.98);
+            vec3 frostWhite = vec3(0.88, 0.97, 1.0);
+            vec3 orbitalGold = vec3(1.0, 0.84, 0.32);
 
-          float frostPattern = iceCracks + fineCracks + radialVeins * 0.65 + outerRime;
-          vec3 col = mix(deepGlacier, brightCyan, clamp(frostPattern * 0.65 + mistPulse * 0.35, 0.0, 1.0));
-          col = mix(col, frostWhite, clamp(iceCracks * 0.75 + outerRime * 0.6, 0.0, 1.0));
-          col = mix(col, orbitalGold, clamp(innerMix * 0.45, 0.0, 1.0));
+            float frostPattern = iceCracks + fineCracks + radialVeins * 0.65 + outerRime;
+            vec3 col = mix(deepGlacier, brightCyan, clamp(frostPattern * 0.65 + mistPulse * 0.35, 0.0, 1.0));
+            col = mix(col, frostWhite, clamp(iceCracks * 0.75 + outerRime * 0.6, 0.0, 1.0));
+            col = mix(col, orbitalGold, clamp(innerMix * 0.45, 0.0, 1.0));
 
-          float baseSheet = 0.28 * (1.0 - r * 0.42);
-          float edgeSoft = smoothstep(1.0, 0.72, r + (cell - 0.5) * 0.25);
-          float alpha = clamp((baseSheet + frostPattern * 0.68) * edgeSoft * uAlpha, 0.0, 1.0);
+            float baseSheet = 0.28 * (1.0 - r * 0.42);
+            float edgeSoft = smoothstep(1.0, 0.72, r + (cell - 0.5) * 0.25);
+            float alpha = clamp((baseSheet + frostPattern * 0.68) * edgeSoft * uAlpha, 0.0, 1.0);
 
-          gl_FragColor = vec4(col * 1.18, alpha);
-        }
-      `
-    });
+            gl_FragColor = vec4(col * 1.18, alpha);
+          }
+        `
+      }),
+      { uTime: 0, uProgress: 0, uAlpha: 1.0 }
+    );
 
     const frostDiscMesh = new THREE.Mesh(frostGeo, frostDiscMat);
     frostDiscMesh.position.set(pos.x, baseElev, pos.y);
@@ -5773,14 +6006,7 @@ export class ThreeVFX {
       const cz = pos.y + Math.sin(ringAngle) * ringDist;
       const cElev = this.getTerrainHeight(cx, cz, baseElev);
 
-      const cMat = new THREE.MeshBasicMaterial({
-        color: i % 2 === 0 ? 0x7dd3fc : 0xbae6fd,
-        transparent: true,
-        opacity: 0.92,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false,
-        side: THREE.DoubleSide
-      });
+      const cMat = this.acquireBasicMat(i % 2 === 0 ? 0x7dd3fc : 0xbae6fd, 0.92, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
       const cMesh = new THREE.Mesh(crystalGeo, cMat);
       cMesh.position.set(cx, cElev, cz);
 
@@ -5805,14 +6031,9 @@ export class ThreeVFX {
     // 20 drifting frost/snowflake diamond particles hovering above the frozen field
     const snowParticles: ActiveCryogenicFieldVFX['snowParticles'] = [];
     for (let i = 0; i < 20; i++) {
-      const sMat = new THREE.MeshBasicMaterial({
-        color: 0xe0f2fe,
-        transparent: true,
-        opacity: 0.85,
-        blending: THREE.AdditiveBlending,
-        depthWrite: false
-      });
+      const sMat = this.acquireBasicMat(0xe0f2fe, 0.85, THREE.AdditiveBlending, THREE.FrontSide, false, null);
       const sMesh = new THREE.Mesh(this.sharedSparkGeo, sMat);
+      sMesh.userData.isSharedGeo = true;
       const sScale = 2.8 + (i % 3) * 1.4;
       sMesh.scale.set(sScale, sScale, sScale);
       group.add(sMesh);
@@ -5866,52 +6087,56 @@ export class ThreeVFX {
       1.5,
       baseElev
     );
-    const waveMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uProgress: { value: 0.05 },
-        uAlpha: { value: 1.0 }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uProgress;
-        uniform float uAlpha;
-        varying vec2 vUv;
-        void main() {
-          float r = length(vUv);
-          float a = atan(vUv.y, vUv.x);
-          float wisp = 0.5 + 0.5 * sin(vUv.x * 8.0 + cos(vUv.y * 7.0 + uProgress * 5.0) * 1.4);
-          float warpedR = r - (wisp - 0.5) * 0.36;
-          if (warpedR > 1.0) discard;
+    const waveMat = this.acquireShader(
+      'tentacle_impact_wave',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uProgress: { value: 0.05 },
+          uAlpha: { value: 1.0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uProgress;
+          uniform float uAlpha;
+          varying vec2 vUv;
+          void main() {
+            float r = length(vUv);
+            float a = atan(vUv.y, vUv.x);
+            float wisp = 0.5 + 0.5 * sin(vUv.x * 8.0 + cos(vUv.y * 7.0 + uProgress * 5.0) * 1.4);
+            float warpedR = r - (wisp - 0.5) * 0.36;
+            if (warpedR > 1.0) discard;
 
-          float wavePos = mix(0.15, 0.78, uProgress) + (wisp - 0.5) * 0.25;
-          float bioGust = exp(-pow((warpedR - wavePos) / 0.14, 2.0)) * smoothstep(0.2, 0.85, wisp);
-          float rays = pow(abs(cos(a * 6.0 + r * 4.5 + wisp * 2.0)), 8.0) * smoothstep(0.90, 0.08, warpedR) * (1.0 - uProgress);
-          float outerMask = 1.0 - smoothstep(0.72, 1.0, warpedR);
+            float wavePos = mix(0.15, 0.78, uProgress) + (wisp - 0.5) * 0.25;
+            float bioGust = exp(-pow((warpedR - wavePos) / 0.14, 2.0)) * smoothstep(0.2, 0.85, wisp);
+            float rays = pow(abs(cos(a * 6.0 + r * 4.5 + wisp * 2.0)), 8.0) * smoothstep(0.90, 0.08, warpedR) * (1.0 - uProgress);
+            float outerMask = 1.0 - smoothstep(0.72, 1.0, warpedR);
 
-          float intensity = (bioGust * 1.15 + rays * 0.85) * outerMask;
-          if (intensity < 0.015) discard;
+            float intensity = (bioGust * 1.15 + rays * 0.85) * outerMask;
+            if (intensity < 0.015) discard;
 
-          vec3 magenta = vec3(0.85, 0.27, 0.94);
-          vec3 crimson = vec3(0.98, 0.14, 0.38);
-          vec3 coreWhite = vec3(1.0, 0.85, 0.92);
+            vec3 magenta = vec3(0.85, 0.27, 0.94);
+            vec3 crimson = vec3(0.98, 0.14, 0.38);
+            vec3 coreWhite = vec3(1.0, 0.85, 0.92);
 
-          vec3 col = mix(magenta, crimson, clamp(rays + bioGust * 0.5, 0.0, 1.0));
-          col = mix(col, coreWhite, clamp(bioGust * 0.55, 0.0, 1.0));
+            vec3 col = mix(magenta, crimson, clamp(rays + bioGust * 0.5, 0.0, 1.0));
+            col = mix(col, coreWhite, clamp(bioGust * 0.55, 0.0, 1.0));
 
-          gl_FragColor = vec4(col * 1.1, clamp(intensity * uAlpha, 0.0, 1.0));
-        }
-      `
-    });
+            gl_FragColor = vec4(col * 1.1, clamp(intensity * uAlpha, 0.0, 1.0));
+          }
+        `
+      }),
+      { uProgress: 0.05, uAlpha: 1.0 }
+    );
     const waveMesh = new THREE.Mesh(waveGeo, waveMat);
     waveMesh.position.set(pos.x, baseElev, pos.y);
     this.group.add(waveMesh);
@@ -5928,13 +6153,9 @@ export class ThreeVFX {
       const spd = 120 + Math.random() * 170;
       const m = new THREE.Mesh(
         this.sharedSparkGeo,
-        new THREE.MeshBasicMaterial({
-          color: s % 3 === 0 ? 0xffccd5 : s % 3 === 1 ? 0xf43f5e : 0xd946ef,
-          transparent: true,
-          opacity: 0.95,
-          blending: THREE.AdditiveBlending
-        })
+        this.acquireBasicMat(s % 3 === 0 ? 0xffccd5 : s % 3 === 1 ? 0xf43f5e : 0xd946ef, 0.95, THREE.AdditiveBlending, THREE.FrontSide, true, null)
       );
+      m.userData.isSharedGeo = true;
       m.position.set(pos.x, baseElev + 6, pos.y);
       const sc = 2.0 + Math.random() * 1.4;
       m.scale.setScalar(sc);
@@ -6015,78 +6236,82 @@ export class ThreeVFX {
 
     // 1. Undulating Rising Molten Magma Plume Flame Column (zero SphereGeometry)
     const domeGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.42, radius * 0.72, 16, 8, 0.34, 1.6);
-    const domeMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.NormalBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uTime: { value: 0 },
-        uProgress: { value: 0 },
-        uAlpha: { value: 1.0 },
-        uSpin: { value: spinSign }
-      },
-      vertexShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        varying vec3 vLocalPos;
-        varying vec3 vViewNormal;
-        varying vec3 vViewDir;
+    const domeMat = this.acquireShader(
+      'lava_swirl_dome',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1.0 },
+          uSpin: { value: 1 }
+        },
+        vertexShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          varying vec3 vLocalPos;
+          varying vec3 vViewNormal;
+          varying vec3 vViewDir;
 
-        void main() {
-          // Boiling convective surface displacement
-          float boil = sin(position.x * 0.16 + uTime * 11.0)
-                     * cos(position.y * 0.18 - uTime * 9.5)
-                     * sin(position.z * 0.16 + uTime * 10.2);
-          vec3 displaced = position + normal * (boil * 3.2 * (1.0 - uProgress * 0.6));
-          vLocalPos = normalize(position);
-          vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
-          vViewNormal = normalize(normalMatrix * normal);
-          vViewDir = normalize(-mvPos.xyz);
-          gl_Position = projectionMatrix * mvPos;
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        uniform float uSpin;
-        varying vec3 vLocalPos;
-        varying vec3 vViewNormal;
-        varying vec3 vViewDir;
+          void main() {
+            // Boiling convective surface displacement
+            float boil = sin(position.x * 0.16 + uTime * 11.0)
+                       * cos(position.y * 0.18 - uTime * 9.5)
+                       * sin(position.z * 0.16 + uTime * 10.2);
+            vec3 displaced = position + normal * (boil * 3.2 * (1.0 - uProgress * 0.6));
+            vLocalPos = normalize(position);
+            vec4 mvPos = modelViewMatrix * vec4(displaced, 1.0);
+            vViewNormal = normalize(normalMatrix * normal);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          uniform float uSpin;
+          varying vec3 vLocalPos;
+          varying vec3 vViewNormal;
+          varying vec3 vViewDir;
 
-        void main() {
-          float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
-          float angle = atan(vLocalPos.z, vLocalPos.x);
-          float lat = vLocalPos.y;
+          void main() {
+            float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
+            float angle = atan(vLocalPos.z, vLocalPos.x);
+            float lat = vLocalPos.y;
 
-          // Helical swirling magma currents wrapping around the fireball
-          float swirlCoord = angle * 3.0 * uSpin + lat * 7.5 - uTime * 8.5;
-          float wave1 = sin(swirlCoord + sin(lat * 9.0 + uTime * 6.0) * 1.4);
-          float wave2 = cos(angle * 5.0 * uSpin - lat * 11.0 + uTime * 7.2 + wave1 * 1.2);
-          float magma = clamp(0.5 + 0.38 * wave1 + 0.28 * wave2, 0.0, 1.0);
+            // Helical swirling magma currents wrapping around the fireball
+            float swirlCoord = angle * 3.0 * uSpin + lat * 7.5 - uTime * 8.5;
+            float wave1 = sin(swirlCoord + sin(lat * 9.0 + uTime * 6.0) * 1.4);
+            float wave2 = cos(angle * 5.0 * uSpin - lat * 11.0 + uTime * 7.2 + wave1 * 1.2);
+            float magma = clamp(0.5 + 0.38 * wave1 + 0.28 * wave2, 0.0, 1.0);
 
-          // High-contrast molten lava bands: dark volcanic crust -> deep crimson-red -> incandescent orange -> white-gold core
-          vec3 darkCrust = vec3(0.04, 0.01, 0.02);
-          vec3 deepLava = vec3(0.68, 0.08, 0.02);
-          vec3 hotLava = vec3(0.96, 0.36, 0.03);
-          vec3 coreWhite = vec3(1.0, 0.85, 0.28);
+            // High-contrast molten lava bands: dark volcanic crust -> deep crimson-red -> incandescent orange -> white-gold core
+            vec3 darkCrust = vec3(0.04, 0.01, 0.02);
+            vec3 deepLava = vec3(0.68, 0.08, 0.02);
+            vec3 hotLava = vec3(0.96, 0.36, 0.03);
+            vec3 coreWhite = vec3(1.0, 0.85, 0.28);
 
-          float coolShift = uProgress * 0.35;
-          float m = clamp(magma - coolShift * 0.45, 0.0, 1.0);
-          vec3 col = mix(darkCrust, deepLava, smoothstep(0.24, 0.54, m));
-          col = mix(col, hotLava, smoothstep(0.52, 0.80, m));
-          col = mix(col, coreWhite, smoothstep(0.78, 0.96, m) * (1.0 - uProgress * 0.5));
+            float coolShift = uProgress * 0.35;
+            float m = clamp(magma - coolShift * 0.45, 0.0, 1.0);
+            vec3 col = mix(darkCrust, deepLava, smoothstep(0.24, 0.54, m));
+            col = mix(col, hotLava, smoothstep(0.52, 0.80, m));
+            col = mix(col, coreWhite, smoothstep(0.78, 0.96, m) * (1.0 - uProgress * 0.5));
 
-          // Subtle dark-orange rim
-          float rim = pow(1.0 - ndotv, 2.2);
-          col = mix(col, darkCrust, rim * 0.55);
+            // Subtle dark-orange rim
+            float rim = pow(1.0 - ndotv, 2.2);
+            col = mix(col, darkCrust, rim * 0.55);
 
-          float alpha = smoothstep(0.05, 0.35, ndotv) * (0.78 + 0.22 * m) * uAlpha;
-          gl_FragColor = vec4(col * 0.92, clamp(alpha, 0.0, 1.0));
-        }
-      `
-    });
+            float alpha = smoothstep(0.05, 0.35, ndotv) * (0.78 + 0.22 * m) * uAlpha;
+            gl_FragColor = vec4(col * 0.92, clamp(alpha, 0.0, 1.0));
+          }
+        `
+      }),
+      { uTime: 0, uProgress: 0, uAlpha: 1.0, uSpin: spinSign }
+    );
     const domeMesh = new THREE.Mesh(domeGeo, domeMat);
     domeMesh.position.set(0, burstY - 4, 0);
     domeMesh.scale.setScalar(0.25);
@@ -6101,70 +6326,74 @@ export class ThreeVFX {
       1.6,
       baseElev
     );
-    const poolMat = new THREE.ShaderMaterial({
-      transparent: true,
-      depthWrite: false,
-      blending: THREE.NormalBlending,
-      side: THREE.DoubleSide,
-      uniforms: {
-        uTime: { value: 0 },
-        uProgress: { value: 0 },
-        uAlpha: { value: 1.0 },
-        uSpin: { value: spinSign }
-      },
-      vertexShader: `
-        varying vec2 vUv;
-        void main() {
-          vUv = uv * 2.0 - 1.0;
-          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-        }
-      `,
-      fragmentShader: `
-        uniform float uTime;
-        uniform float uProgress;
-        uniform float uAlpha;
-        uniform float uSpin;
-        varying vec2 vUv;
+    const poolMat = this.acquireShader(
+      'lava_swirl_pool',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.NormalBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1.0 },
+          uSpin: { value: 1 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv * 2.0 - 1.0;
+            gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          uniform float uSpin;
+          varying vec2 vUv;
 
-        void main() {
-          float r = length(vUv);
-          float a = atan(vUv.y, vUv.x);
+          void main() {
+            float r = length(vUv);
+            float a = atan(vUv.y, vUv.x);
 
-          // Jagged organic volcanic crater edge
-          float edgeJagged = 0.07 * sin(a * 9.0 + 1.3) + 0.04 * cos(a * 15.0 - 0.8);
-          float rw = r + edgeJagged * smoothstep(0.35, 0.95, r);
-          if (rw > 0.98) discard;
+            // Jagged organic volcanic crater edge
+            float edgeJagged = 0.07 * sin(a * 9.0 + 1.3) + 0.04 * cos(a * 15.0 - 0.8);
+            float rw = r + edgeJagged * smoothstep(0.35, 0.95, r);
+            if (rw > 0.98) discard;
 
-          // Logarithmic spiral lava vortex arms rotating around the blast crater
-          float spiralA = sin(a * 4.0 * uSpin - r * 12.5 + uTime * 8.5 + sin(r * 9.5 - uTime * 5.5) * 1.2);
-          float spiralB = cos(a * 7.0 * uSpin - r * 18.0 + uTime * 11.0);
-          float swirl = clamp(0.5 + 0.36 * spiralA + 0.24 * spiralB, 0.0, 1.0);
+            // Logarithmic spiral lava vortex arms rotating around the blast crater
+            float spiralA = sin(a * 4.0 * uSpin - r * 12.5 + uTime * 8.5 + sin(r * 9.5 - uTime * 5.5) * 1.2);
+            float spiralB = cos(a * 7.0 * uSpin - r * 18.0 + uTime * 11.0);
+            float swirl = clamp(0.5 + 0.36 * spiralA + 0.24 * spiralB, 0.0, 1.0);
 
-          // Expanding outer crater radius
-          float expandR = mix(0.28, 0.92, 1.0 - pow(1.0 - min(1.0, uProgress * 2.2), 2.0));
-          if (rw > expandR + 0.06) discard;
+            // Expanding outer crater radius
+            float expandR = mix(0.28, 0.92, 1.0 - pow(1.0 - min(1.0, uProgress * 2.2), 2.0));
+            if (rw > expandR + 0.06) discard;
 
-          // Dark obsidian volcanic rock crust rim + glowing spiral magma channels
-          vec3 obsidianCrust = vec3(0.05, 0.03, 0.04);
-          vec3 deepMagma = vec3(0.75, 0.10, 0.03);
-          vec3 orangeLava = vec3(1.0, 0.46, 0.06);
-          vec3 whiteGold = vec3(1.0, 0.94, 0.52);
+            // Dark obsidian volcanic rock crust rim + glowing spiral magma channels
+            vec3 obsidianCrust = vec3(0.05, 0.03, 0.04);
+            vec3 deepMagma = vec3(0.75, 0.10, 0.03);
+            vec3 orangeLava = vec3(1.0, 0.46, 0.06);
+            vec3 whiteGold = vec3(1.0, 0.94, 0.52);
 
-          // Center is hot boiling magma; outer ring (rw > 0.58) cools into dark volcanic rock with glowing cracks
-          float coreHeat = smoothstep(expandR * 0.95, 0.08, rw);
-          float lavaFactor = clamp(swirl * (0.45 + 0.85 * coreHeat) - uProgress * 0.28, 0.0, 1.0);
+            // Center is hot boiling magma; outer ring (rw > 0.58) cools into dark volcanic rock with glowing cracks
+            float coreHeat = smoothstep(expandR * 0.95, 0.08, rw);
+            float lavaFactor = clamp(swirl * (0.45 + 0.85 * coreHeat) - uProgress * 0.28, 0.0, 1.0);
 
-          vec3 col = mix(obsidianCrust, deepMagma, smoothstep(0.26, 0.52, lavaFactor));
-          col = mix(col, orangeLava, smoothstep(0.50, 0.78, lavaFactor));
-          col = mix(col, whiteGold, smoothstep(0.76, 0.96, lavaFactor) * coreHeat);
+            vec3 col = mix(obsidianCrust, deepMagma, smoothstep(0.26, 0.52, lavaFactor));
+            col = mix(col, orangeLava, smoothstep(0.50, 0.78, lavaFactor));
+            col = mix(col, whiteGold, smoothstep(0.76, 0.96, lavaFactor) * coreHeat);
 
-          float hdrBoost = 0.78 + 0.42 * smoothstep(0.58, 0.92, lavaFactor);
-          float outerFade = smoothstep(expandR + 0.05, expandR - 0.14, rw);
-          float alpha = clamp((0.92 * outerFade) * uAlpha, 0.0, 1.0);
-          gl_FragColor = vec4(col * hdrBoost, alpha);
-        }
-      `
-    });
+            float hdrBoost = 0.78 + 0.42 * smoothstep(0.58, 0.92, lavaFactor);
+            float outerFade = smoothstep(expandR + 0.05, expandR - 0.14, rw);
+            float alpha = clamp((0.92 * outerFade) * uAlpha, 0.0, 1.0);
+            gl_FragColor = vec4(col * hdrBoost, alpha);
+          }
+        `
+      }),
+      { uTime: 0, uProgress: 0, uAlpha: 1.0, uSpin: spinSign }
+    );
     const poolMesh = new THREE.Mesh(poolGeo, poolMat);
     poolMesh.position.set(0, baseElev, 0);
     grp.add(poolMesh);
@@ -6180,27 +6409,13 @@ export class ThreeVFX {
       ribbonPtsB.push(new THREE.Vector3(Math.cos(-a) * rB, k * 3.0, Math.sin(-a) * rB));
     }
     const ringGeoA = this.createJaggedRibbonGeometry(ribbonPtsA, 6.5);
-    const ringAMat = new THREE.MeshBasicMaterial({
-      color: 0xff9e2c,
-      transparent: true,
-      opacity: 0.48,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const ringAMat = this.acquireBasicMat(0xff9e2c, 0.48, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const ringA = new THREE.Mesh(ringGeoA, ringAMat);
     ringA.position.set(0, burstY + 2, 0);
     grp.add(ringA);
 
     const ringGeoB = this.createJaggedRibbonGeometry(ribbonPtsB, 5.2);
-    const ringBMat = new THREE.MeshBasicMaterial({
-      color: 0xfef08a,
-      transparent: true,
-      opacity: 0.45,
-      blending: THREE.AdditiveBlending,
-      side: THREE.DoubleSide,
-      depthWrite: false
-    });
+    const ringBMat = this.acquireBasicMat(0xfef08a, 0.45, THREE.AdditiveBlending, THREE.DoubleSide, false, null);
     const ringB = new THREE.Mesh(ringGeoB, ringBMat);
     ringB.position.set(0, burstY + 5, 0);
     grp.add(ringB);
@@ -6226,13 +6441,16 @@ export class ThreeVFX {
       const spd = 95 + Math.random() * 145;
       const m = new THREE.Mesh(
         this.sharedSparkGeo,
-        new THREE.MeshBasicMaterial({
-          color: s % 3 === 0 ? 0xfef08a : s % 3 === 1 ? 0xf43f5e : 0xe879f9,
-          transparent: true,
-          opacity: 0.95,
-          blending: THREE.AdditiveBlending
-        })
+        this.acquireBasicMat(
+          s % 3 === 0 ? 0xfef08a : s % 3 === 1 ? 0xf43f5e : 0xe879f9,
+          0.95,
+          THREE.AdditiveBlending,
+          THREE.FrontSide,
+          true,
+          null
+        )
       );
+      m.userData.isSharedGeo = true;
       m.position.set(pos.x, burstY, pos.y);
       const sc = 2.4 + Math.random() * 1.8;
       m.scale.setScalar(sc);
@@ -6272,9 +6490,9 @@ export class ThreeVFX {
       if (lock.elapsed >= lock.totalLifetime) {
         this.group.remove(lock.group);
         lock.reticleMesh.geometry.dispose();
-        lock.reticleMat.dispose();
+        this.releaseMaterial(lock.reticleMat);
         lock.pilotBeam.geometry.dispose();
-        lock.pilotMat.dispose();
+        this.releaseMaterial(lock.pilotMat);
         this.targetLocks.splice(i, 1);
         continue;
       }
@@ -6398,7 +6616,7 @@ export class ThreeVFX {
       p.lifetime -= dt;
       if (p.lifetime <= 0) {
         this.group.remove(p.mesh);
-        (p.mesh.material as THREE.Material).dispose();
+        this.releaseMaterial(p.mesh.material as THREE.Material);
         this.orbitalParticles.splice(i, 1);
         continue;
       }
@@ -6443,8 +6661,8 @@ export class ThreeVFX {
       r.lifetime -= dt;
       if (r.lifetime <= 0) {
         this.group.remove(r.mesh);
-        r.mesh.geometry.dispose();
-        (r.mesh.material as THREE.Material).dispose();
+        if (!r.mesh.userData?.isSharedGeo) r.mesh.geometry.dispose();
+        this.releaseMaterial(r.mesh.material as THREE.Material);
         this.rings.splice(i, 1);
         continue;
       }
@@ -6454,10 +6672,10 @@ export class ThreeVFX {
         const sm = mat as THREE.ShaderMaterial;
         sm.uniforms.uProgress.value = t;
         sm.uniforms.uAlpha.value = Math.pow(1 - t, 1.15);
-        const s = r.maxRadius * (0.45 + 0.65 * Math.pow(t, 0.72));
+        const s = r.maxRadius * (0.45 + 0.65 * Math.pow(t, 0.72)) * (r.mesh.userData?.isSharedGeo ? 2.2 : 1.0);
         r.mesh.scale.set(s, s, 1);
       } else {
-        const s = 1 + t * (r.maxRadius / r.currentRadius);
+        const s = (1 + t * (r.maxRadius / r.currentRadius)) * (r.mesh.userData?.isSharedGeo ? 2.2 : 1.0);
         r.mesh.scale.set(s, s, s);
         (mat as THREE.MeshBasicMaterial).opacity = (1 - t) * 0.9;
       }
@@ -6469,8 +6687,8 @@ export class ThreeVFX {
       cl.elapsed += dt;
       if (cl.elapsed >= cl.duration) {
         this.group.remove(cl.mesh);
-        cl.mesh.geometry.dispose();
-        cl.mat.dispose();
+        if (!cl.mesh.userData?.isSharedGeo) cl.mesh.geometry.dispose();
+        this.releaseMaterial(cl.mat);
         this.explosionClouds.splice(i, 1);
         continue;
       }
@@ -6494,8 +6712,8 @@ export class ThreeVFX {
       dr.elapsed += dt;
       if (dr.elapsed >= dr.duration) {
         this.group.remove(dr.mesh);
-        dr.mesh.geometry.dispose();
-        dr.mat.dispose();
+        if (!dr.mesh.userData?.isSharedGeo) dr.mesh.geometry.dispose();
+        this.releaseMaterial(dr.mat);
         this.splatterDroplets.splice(i, 1);
         continue;
       }
@@ -6523,7 +6741,7 @@ export class ThreeVFX {
       const p = dr.elapsed / dr.duration;
       const speed2 = Math.hypot(dr.vx, dr.vy, dr.vz);
       const stretchY = Math.min(2.2, 1.0 + speed2 * 0.003);
-      dr.mesh.scale.set(1.0 / Math.sqrt(stretchY), stretchY, 1);
+      dr.mesh.scale.set(dr.scale / Math.sqrt(stretchY), dr.scale * stretchY, 1);
       dr.mat.uniforms.uAlpha.value = Math.max(0, 0.95 * (1 - Math.pow(p, 1.8)));
     }
 
@@ -6534,7 +6752,7 @@ export class ThreeVFX {
       if (b.lifetime <= 0) {
         this.group.remove(b.mesh);
         b.mesh.geometry.dispose();
-        (b.mesh.material as THREE.Material).dispose();
+        this.releaseMaterial(b.mesh.material as THREE.Material);
         this.beams.splice(i, 1);
         continue;
       }
@@ -6553,8 +6771,11 @@ export class ThreeVFX {
       d.lifetime -= dt;
       if (d.lifetime <= 0) {
         this.group.remove(d.sprite);
-        d.sprite.material.map?.dispose();
-        d.sprite.material.dispose();
+        if (this.damageSpritePool.length < 128) {
+          this.damageSpritePool.push(d.sprite);
+        } else {
+          d.sprite.material.dispose();
+        }
         this.damageTexts.splice(i, 1);
         continue;
       }
@@ -6569,8 +6790,8 @@ export class ThreeVFX {
       g.lifetime -= dt;
       if (g.lifetime <= 0) {
         this.group.remove(g.mesh);
-        g.mesh.geometry.dispose();
-        (g.mesh.material as THREE.Material).dispose();
+        if (!g.mesh.userData?.isSharedGeo) g.mesh.geometry.dispose();
+        this.releaseMaterial(g.mesh.material as THREE.Material);
         this.ghosts.splice(i, 1);
         continue;
       }
@@ -6585,8 +6806,8 @@ export class ThreeVFX {
       b.lifetime -= dt;
       if (b.lifetime <= 0) {
         this.group.remove(b.mesh);
-        b.mesh.geometry.dispose();
-        (b.mesh.material as THREE.Material).dispose();
+        if (!b.mesh.userData?.isSharedGeo) b.mesh.geometry.dispose();
+        this.releaseMaterial(b.mesh.material as THREE.Material);
         this.bloodDecals.splice(i, 1);
         continue;
       }
@@ -6607,10 +6828,10 @@ export class ThreeVFX {
       f.lifetime -= dt;
       if (f.lifetime <= 0) {
         this.group.remove(f.mesh);
-        if (!f.mesh.userData.isSharedGeo) {
+        if (!f.mesh.userData?.isSharedGeo) {
           f.mesh.geometry.dispose();
         }
-        (f.mesh.material as THREE.Material).dispose();
+        this.releaseMaterial(f.mesh.material as THREE.Material);
         this.blasterFlashes.splice(i, 1);
         continue;
       }
@@ -6625,20 +6846,20 @@ export class ThreeVFX {
       if (sc.elapsed >= sc.maxLifetime) {
         this.group.remove(sc.group);
         sc.flashMesh.geometry.dispose();
-        sc.flashMat.dispose();
+        this.releaseMaterial(sc.flashMat);
         sc.leftBladeMesh.geometry.dispose();
-        sc.leftBladeMat.dispose();
+        this.releaseMaterial(sc.leftBladeMat);
         sc.rightBladeMesh.geometry.dispose();
-        sc.rightBladeMat.dispose();
+        this.releaseMaterial(sc.rightBladeMat);
         sc.compressionLines.geometry.dispose();
         sc.compressionMat.dispose();
         if (sc.leftCoreMesh) {
           sc.leftCoreMesh.geometry.dispose();
-          sc.leftCoreMat?.dispose();
+          this.releaseMaterial(sc.leftCoreMat);
         }
         if (sc.rightCoreMesh) {
           sc.rightCoreMesh.geometry.dispose();
-          sc.rightCoreMat?.dispose();
+          this.releaseMaterial(sc.rightCoreMat);
         }
         this.slashConvergences.splice(i, 1);
         continue;
@@ -6666,12 +6887,11 @@ export class ThreeVFX {
           // Trailing golden sparks along cutting edges
           if (Math.random() < 0.45) {
             for (let side = -1; side <= 1; side += 2) {
-              const spkMesh = new THREE.Mesh(this.sharedSparkGeo, new THREE.MeshBasicMaterial({
-                color: Math.random() < 0.5 ? 0xfffbeb : 0xfbbf24,
-                transparent: true,
-                opacity: 0.95,
-                blending: THREE.AdditiveBlending
-              }));
+              const spkMesh = new THREE.Mesh(
+                this.sharedSparkGeo,
+                this.acquireBasicMat(Math.random() < 0.5 ? 0xfffbeb : 0xfbbf24, 0.95, THREE.AdditiveBlending, THREE.FrontSide, true, null)
+              );
+              spkMesh.userData.isSharedGeo = true;
               const sideX = side < 0 ? curXLeft : curXRight;
               spkMesh.position.set(sc.group.position.x + sideX, sc.group.position.y + 2, sc.group.position.z + 40);
               spkMesh.scale.setScalar(2.0);
@@ -6767,10 +6987,10 @@ export class ThreeVFX {
       if (dtTrail.elapsed >= dtTrail.totalLifetime) {
         this.group.remove(dtTrail.group);
         dtTrail.noseConeMesh.geometry.dispose();
-        dtTrail.noseConeMat.dispose();
+        this.releaseMaterial(dtTrail.noseConeMat);
         for (let s = 0; s < dtTrail.streakMeshes.length; s++) {
           dtTrail.streakMeshes[s].geometry.dispose();
-          dtTrail.streakMats[s].dispose();
+          this.releaseMaterial(dtTrail.streakMats[s]);
         }
         this.dashTrails.splice(i, 1);
         continue;
@@ -6794,9 +7014,9 @@ export class ThreeVFX {
       if (imp.elapsed >= imp.maxLifetime) {
         this.group.remove(imp.group);
         imp.flashMesh.geometry.dispose();
-        imp.flashMat.dispose();
+        this.releaseMaterial(imp.flashMat);
         imp.ringMesh.geometry.dispose();
-        imp.ringMat.dispose();
+        this.releaseMaterial(imp.ringMat);
         imp.spikesLine.geometry.dispose();
         imp.spikesMat.dispose();
         if (imp.cracksLine) {
@@ -6831,13 +7051,13 @@ export class ThreeVFX {
       if (sing.elapsed >= sing.duration) {
         this.group.remove(sing.group);
         sing.vortexDiscMesh.geometry.dispose();
-        sing.vortexDiscMat.dispose();
+        this.releaseMaterial(sing.vortexDiscMat);
         sing.coreSphereMesh.geometry.dispose();
-        sing.coreSphereMat.dispose();
+        this.releaseMaterial(sing.coreSphereMat);
         sing.accretionRingMesh.geometry.dispose();
-        sing.accretionRingMat.dispose();
+        this.releaseMaterial(sing.accretionRingMat);
         for (let d = 0; d < sing.debrisMeshes.length; d++) {
-          sing.debrisMeshes[d].mat.dispose();
+          this.releaseMaterial(sing.debrisMeshes[d].mat);
         }
         this.activeSingularities.splice(i, 1);
         continue;
@@ -6883,15 +7103,15 @@ export class ThreeVFX {
       if (conv.elapsed >= conv.duration) {
         this.group.remove(conv.group);
         conv.spiralMesh.geometry.dispose();
-        conv.spiralMat.dispose();
+        this.releaseMaterial(conv.spiralMat);
         conv.coreSphereMesh.geometry.dispose();
-        conv.coreSphereMat.dispose();
+        this.releaseMaterial(conv.coreSphereMat);
         conv.coreCageMesh.geometry.dispose();
-        conv.coreCageMat.dispose();
+        this.releaseMaterial(conv.coreCageMat);
         conv.coreHaloMesh.geometry.dispose();
-        conv.coreHaloMat.dispose();
+        this.releaseMaterial(conv.coreHaloMat);
         for (let d = 0; d < conv.debrisMeshes.length; d++) {
-          conv.debrisMeshes[d].mat.dispose();
+          this.releaseMaterial(conv.debrisMeshes[d].mat);
         }
         this.activeConvergences.splice(i, 1);
         continue;
@@ -6936,13 +7156,13 @@ export class ThreeVFX {
           cryo.crystalMeshes[0].mesh.geometry.dispose();
         }
         for (let c = 0; c < cryo.crystalMeshes.length; c++) {
-          cryo.crystalMeshes[c].mat.dispose();
+          this.releaseMaterial(cryo.crystalMeshes[c].mat);
         }
         for (let s = 0; s < cryo.snowParticles.length; s++) {
-          cryo.snowParticles[s].mat.dispose();
+          this.releaseMaterial(cryo.snowParticles[s].mat);
         }
         cryo.frostDiscMesh.geometry.dispose();
-        cryo.frostDiscMat.dispose();
+        this.releaseMaterial(cryo.frostDiscMat);
         this.activeCryoFields.splice(i, 1);
         continue;
       }
@@ -7084,12 +7304,11 @@ export class ThreeVFX {
 
           // Emit small floating frost particles along trail
           if (Math.random() < 0.35) {
-            const m = new THREE.Mesh(this.sharedSparkGeo, new THREE.MeshBasicMaterial({
-              color: Math.random() < 0.5 ? 0xffffff : 0x7dd3fc,
-              transparent: true,
-              opacity: 0.85,
-              blending: THREE.AdditiveBlending
-            }));
+            const m = new THREE.Mesh(
+              this.sharedSparkGeo,
+              this.acquireBasicMat(Math.random() < 0.5 ? 0xffffff : 0x7dd3fc, 0.85, THREE.AdditiveBlending, THREE.FrontSide, true, null)
+            );
+            m.userData.isSharedGeo = true;
             m.position.copy(bolt.group.position);
             m.position.x += (Math.random() - 0.5) * 6;
             m.position.y += (Math.random() - 0.5) * 6;
@@ -7128,12 +7347,11 @@ export class ThreeVFX {
 
             // Impact sparks
             for (let s = 0; s < 5; s++) {
-              const m = new THREE.Mesh(this.sharedSparkGeo, new THREE.MeshBasicMaterial({
-                color: s % 2 === 0 ? 0xffffff : 0x38bdf8,
-                transparent: true,
-                opacity: 0.92,
-                blending: THREE.AdditiveBlending
-              }));
+              const m = new THREE.Mesh(
+                this.sharedSparkGeo,
+                this.acquireBasicMat(s % 2 === 0 ? 0xffffff : 0x38bdf8, 0.92, THREE.AdditiveBlending, THREE.FrontSide, true, null)
+              );
+              m.userData.isSharedGeo = true;
               m.position.set(beam.to.x, beam.toElevation + 16, beam.to.z);
               m.scale.setScalar(1.8);
               this.group.add(m);
@@ -7163,12 +7381,7 @@ export class ThreeVFX {
                 const cz = beam.to.z + Math.sin(cAngle) * cDist;
                 const cHeight = this.getTerrainHeight(cx, cz, beam.elevation);
                 const crystalGeo = this.createJaggedShardGeo(5.5 + Math.random() * 4.0, 26 + Math.random() * 12, 5, 300 + c);
-                const crystalMat = new THREE.MeshBasicMaterial({
-                  color: 0x38bdf8,
-                  transparent: true,
-                  opacity: 0.82,
-                  blending: THREE.AdditiveBlending
-                });
+                const crystalMat = this.acquireBasicMat(0x38bdf8, 0.82, THREE.AdditiveBlending, THREE.FrontSide, true, null);
                 const crystalMesh = new THREE.Mesh(crystalGeo, crystalMat);
                 crystalMesh.position.set(cx, cHeight - 1, cz);
                 crystalMesh.rotation.set((Math.random() - 0.5) * 0.4, Math.random() * Math.PI, (Math.random() - 0.5) * 0.4);
@@ -7209,7 +7422,7 @@ export class ThreeVFX {
       if (spire.elapsed >= spire.maxLifetime) {
         this.group.remove(spire.mesh);
         spire.mesh.geometry.dispose();
-        spire.mat.dispose();
+        this.releaseMaterial(spire.mat);
         this.activeGroundSpikes.splice(i, 1);
         continue;
       }
@@ -7253,7 +7466,7 @@ export class ThreeVFX {
       if (imp.elapsed >= imp.maxLifetime) {
         this.group.remove(imp.mesh);
         imp.mesh.geometry.dispose();
-        imp.mat.dispose();
+        this.releaseMaterial(imp.mat);
         this.activeTentacleImpacts.splice(i, 1);
         continue;
       }
@@ -7269,8 +7482,8 @@ export class ThreeVFX {
       wg.lifetime -= dt;
       if (wg.lifetime <= 0) {
         this.group.remove(wg.mesh);
-        wg.mesh.geometry.dispose();
-        wg.mat.dispose();
+        if (!wg.mesh.userData?.isSharedGeo) wg.mesh.geometry.dispose();
+        this.releaseMaterial(wg.mat);
         this.whiteGhosts.splice(i, 1);
         continue;
       }
@@ -7285,8 +7498,8 @@ export class ThreeVFX {
       hm.lifetime -= dt;
       if (hm.lifetime <= 0) {
         this.group.remove(hm.mesh);
-        hm.mesh.geometry.dispose();
-        hm.mat.dispose();
+        if (!hm.mesh.userData?.isSharedGeo) hm.mesh.geometry.dispose();
+        this.releaseMaterial(hm.mat);
         this.healMotes.splice(i, 1);
         continue;
       }
@@ -7303,7 +7516,7 @@ export class ThreeVFX {
       fm.lifetime -= dt;
       if (fm.lifetime <= 0) {
         this.group.remove(fm.mesh);
-        fm.mat.dispose();
+        this.releaseMaterial(fm.mat);
         this.regionalFrostMotes.splice(i, 1);
         continue;
       }
@@ -7321,13 +7534,13 @@ export class ThreeVFX {
       if (fx.elapsed >= fx.maxLifetime) {
         this.group.remove(fx.group);
         fx.domeMesh.geometry.dispose();
-        fx.domeMat.dispose();
+        this.releaseMaterial(fx.domeMat);
         fx.poolMesh.geometry.dispose();
-        fx.poolMat.dispose();
+        this.releaseMaterial(fx.poolMat);
         fx.ringA.geometry.dispose();
-        fx.ringAMat.dispose();
+        this.releaseMaterial(fx.ringAMat);
         fx.ringB.geometry.dispose();
-        fx.ringBMat.dispose();
+        this.releaseMaterial(fx.ringBMat);
         this.activeLavaSwirls.splice(i, 1);
         continue;
       }

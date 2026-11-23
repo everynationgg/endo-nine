@@ -73,6 +73,41 @@ function formatCommsTimestamp(sec: number): string {
   return `${mm}:${ss}`;
 }
 
+const PRIMARY_ENH_BADGES: Record<string, { label: string; color: string }> = {
+  chill_beam: { label: 'CHILL BEAM', color: '#38bdf8' },
+  piercing_laser: { label: 'PIERCING LASER', color: '#c084fc' },
+  extended_slash: { label: 'EXT. SLASH', color: '#f59e0b' },
+  toxic_chain: { label: 'TOXIC CHAIN', color: '#84cc16' },
+  cryogenic_scalpel: { label: 'CRYO SCALPEL', color: '#38bdf8' },
+  vital_extraction: { label: 'VITAL EXTRACT', color: '#10b981' }
+};
+
+const SECONDARY_ENH_BADGES: Record<string, { label: string; color: string }> = {
+  scissor_slash: { label: 'SCISSOR', color: '#f59e0b' },
+  frost_burst: { label: 'FROST BURST', color: '#00e5ff' },
+  orbiting_blade: { label: 'SWORDS', color: '#c084fc' },
+  experimental_drones: { label: 'DRONES', color: '#34d399' },
+  toxic_cluster_bomb: { label: 'CLUSTER', color: '#a3e635' },
+  holographic_decoy: { label: 'DECOY', color: '#2dd4bf' }
+};
+
+const UTILITY_ENH_BADGES: Record<string, { label: string; color: string }> = {
+  shock_dash: { label: 'SHOCK', color: '#f59e0b' },
+  extended_dash: { label: 'EXTENDED', color: '#38bdf8' },
+  teleport: { label: 'TELEPORT', color: '#c084fc' },
+  phase_barrier: { label: 'BARRIER', color: '#6ee7b7' },
+  adrenaline_rush: { label: 'ADRENALINE', color: '#22c55e' }
+};
+
+const ULTIMATE_ENH_BADGES: Record<string, { label: string; color: string }> = {
+  singularity: { label: 'SINGULARITY', color: '#a855f7' },
+  convergence_barrage: { label: '5-STRIKE', color: '#fbbf24' },
+  cryogenic_impact: { label: 'CRYO', color: '#38bdf8' },
+  mobile_sanctuary: { label: 'MOBILE', color: '#10b981' },
+  divine_intervention: { label: 'CELESTIAL', color: '#fef08a' },
+  rain_of_crosses: { label: 'RAIN', color: '#34d399' }
+};
+
 export class UIManager {
   private container: HTMLElement;
   private simulation: Simulation | null = null;
@@ -255,6 +290,8 @@ export class UIManager {
   // Items
   private elItemsTray!: HTMLElement;
   private lastItemsHtml: string = '';
+  private lastItemsTraySig: string = '';
+  private radarPtScratch = { x: 0, y: 0, inRange: false };
 
   // Modals stats
   private elClearStats!: HTMLElement;
@@ -580,21 +617,32 @@ export class UIManager {
     });
   }
 
+  private setText(el: HTMLElement | null | undefined, val: string): void {
+    if (el && el.textContent !== val) el.textContent = val;
+  }
+
+  private setWidthPct(el: HTMLElement | null | undefined, val: string): void {
+    if (el && el.style.width !== val) el.style.width = val;
+  }
+
   private updateSkillEnhBadge(
     el: HTMLElement | null,
     enhId: string | undefined,
     defs: Record<string, { label: string; color: string }>
   ): void {
     if (!el) return;
-    if (enhId && defs[enhId]) {
+    const nextKey = enhId && defs[enhId] ? enhId : '';
+    if (el.dataset.lastEnh === nextKey) return;
+    el.dataset.lastEnh = nextKey;
+    if (nextKey) {
       el.classList.remove('hidden');
-      el.textContent = defs[enhId].label;
-      el.style.color = defs[enhId].color;
-      el.style.borderColor = defs[enhId].color;
-      el.style.boxShadow = `0 0 6px ${defs[enhId].color}66`;
+      this.setText(el, defs[nextKey].label);
+      el.style.color = defs[nextKey].color;
+      el.style.borderColor = defs[nextKey].color;
+      el.style.boxShadow = `0 0 6px ${defs[nextKey].color}66`;
     } else {
       el.classList.add('hidden');
-      el.textContent = '';
+      this.setText(el, '');
     }
   }
 
@@ -2556,48 +2604,52 @@ export class UIManager {
   public update(state: GameState): void {
     // If run has not been initiated yet, lock clock at 00:00
     if (!state.isGameStarted) {
-      if (this.elDiffClockText) this.elDiffClockText.textContent = '00:00';
-      if (this.elDiffBarFill) this.elDiffBarFill.style.width = '0%';
+      this.setText(this.elDiffClockText, '00:00');
+      this.setWidthPct(this.elDiffBarFill, '0%');
       return;
     }
 
     if (!state.isStageCleared && !state.isGameOver && this.elSettingsModal.classList.contains('hidden')) {
-      this.elHudContainer.classList.remove('hidden');
+      if (this.elHudContainer.classList.contains('hidden')) {
+        this.elHudContainer.classList.remove('hidden');
+      }
     }
 
     const p = state.player;
 
     // 1. Level, Portrait, Health, Energy Shield & XP Hairline
-    this.elLevelPill.textContent = `Lv. ${p.level}`;
+    this.setText(this.elLevelPill, `Lv. ${p.level}`);
     const hpPct = Math.max(0, Math.min(100, (p.health / Math.max(1, p.maxHealth)) * 100));
-    this.elHpFill.style.width = `${hpPct}%`;
-    this.elHpText.textContent = `${Math.ceil(p.health)} / ${p.maxHealth}`;
+    this.setWidthPct(this.elHpFill, `${hpPct}%`);
+    this.setText(this.elHpText, `${Math.ceil(p.health)} / ${p.maxHealth}`);
 
     // Conditional Purple Energy Shield Bar (shown strictly when maxEnergyShield > 0)
     if (this.elShieldRow) {
       if (p.maxEnergyShield > 0) {
-        this.elShieldRow.classList.remove('hidden');
+        if (this.elShieldRow.classList.contains('hidden')) {
+          this.elShieldRow.classList.remove('hidden');
+        }
         const shPct = Math.max(0, Math.min(100, (p.energyShield / p.maxEnergyShield) * 100));
-        this.elShieldFill.style.width = `${shPct}%`;
-        this.elShieldText.textContent = `${Math.ceil(p.energyShield)} / ${p.maxEnergyShield}`;
-      } else {
+        this.setWidthPct(this.elShieldFill, `${shPct}%`);
+        this.setText(this.elShieldText, `${Math.ceil(p.energyShield)} / ${p.maxEnergyShield}`);
+      } else if (!this.elShieldRow.classList.contains('hidden')) {
         this.elShieldRow.classList.add('hidden');
       }
     }
 
     const xpPct = Math.max(0, Math.min(100, (p.xp / Math.max(1, p.xpNeeded)) * 100));
-    this.elXpFill.style.width = `${xpPct}%`;
+    this.setWidthPct(this.elXpFill, `${xpPct}%`);
 
     if (p.heroId === 'doctor') {
       if (this.elPortraitImg && !this.elPortraitImg.src.endsWith('doctor_portrait.png')) {
         this.elPortraitImg.src = '/assets/doctor/doctor_portrait.png';
       }
-      if (this.elHeroName) this.elHeroName.textContent = 'DOCTOR';
+      this.setText(this.elHeroName, 'DOCTOR');
     } else {
       if (this.elPortraitImg && !this.elPortraitImg.src.includes('commander_portrait.png')) {
         this.elPortraitImg.src = '/assets/commander/commander_portrait.png?v=2.0';
       }
-      if (this.elHeroName) this.elHeroName.textContent = 'COMMANDER';
+      this.setText(this.elHeroName, 'COMMANDER');
     }
 
     // 2. Stage Strip Metadata (Stage, Clock, Kills, Discreet Genes)
@@ -2609,60 +2661,60 @@ export class UIManager {
         this.elStageLabel.innerHTML = nextHtml;
       }
     }
-    this.elCurrencyText.textContent = `${p.currency}`;
-    this.elKillsText.textContent = `${p.killCount}`;
+    this.setText(this.elCurrencyText, `${p.currency}`);
+    this.setText(this.elKillsText, `${p.killCount}`);
 
     // 3. Stage Artifact Status (Stage 1: 4-module concealment policy, no charge bar; Future stages: optional charging bar)
     const art = state.artifact;
     const artPolicy = getStageArtifactPolicy(stNum);
     if (!artPolicy.usesCharging) {
-      if (this.elArtifactBar) this.elArtifactBar.style.display = 'none';
+      if (this.elArtifactBar && this.elArtifactBar.style.display !== 'none') this.elArtifactBar.style.display = 'none';
       const recovered = state.completedEnhancementCategories.size;
       const required = artPolicy.requiredEnhancementCategories.length || 4;
       const phase = art.phase || (recovered >= required ? 'unlocked_ready' : 'locked_missing_modules');
       if (phase === 'locked_missing_modules') {
-        this.elArtifactStatus.textContent = `Safeguards Offline (${recovered}/${required})`;
+        this.setText(this.elArtifactStatus, `Safeguards Offline (${recovered}/${required})`);
         this.elArtifactStatus.classList.remove('ready');
       } else if (phase === 'unlocked_ready' && art.isTeleporterReady && !art.isBossSpawned) {
-        this.elArtifactStatus.textContent = 'Tower Unlocked — Press [E]';
+        this.setText(this.elArtifactStatus, 'Tower Unlocked — Press [E]');
         this.elArtifactStatus.classList.add('ready');
       } else if (phase === 'boss_summoning' || art.isSummoning) {
-        this.elArtifactStatus.textContent = 'Seismic Anomaly — Stage 1 Boss Emerging';
+        this.setText(this.elArtifactStatus, 'Seismic Anomaly — Stage 1 Boss Emerging');
         this.elArtifactStatus.classList.remove('ready');
       } else if (phase === 'boss_active' || !art.isBossDefeated) {
-        this.elArtifactStatus.textContent = 'Defeat Stage 1 Boss to Restore Tower';
+        this.setText(this.elArtifactStatus, 'Defeat Stage 1 Boss to Restore Tower');
         this.elArtifactStatus.classList.remove('ready');
       } else if (phase === 'restoring') {
-        this.elArtifactStatus.textContent = 'Restoring Tower Stasis...';
+        this.setText(this.elArtifactStatus, 'Restoring Tower Stasis...');
         this.elArtifactStatus.classList.remove('ready');
       } else if (phase === 'teleport_preparing') {
-        if (this.elArtifactBar) this.elArtifactBar.style.display = 'none';
-        this.elArtifactStatus.textContent = 'AWAITING TELEPORT SYNCHRONIZATION...';
+        if (this.elArtifactBar && this.elArtifactBar.style.display !== 'none') this.elArtifactBar.style.display = 'none';
+        this.setText(this.elArtifactStatus, 'AWAITING TELEPORT SYNCHRONIZATION...');
         this.elArtifactStatus.classList.remove('ready');
       } else {
-        this.elArtifactStatus.textContent = 'Portal Ready — Press [E]';
+        this.setText(this.elArtifactStatus, 'Portal Ready — Press [E]');
         this.elArtifactStatus.classList.add('ready');
       }
     } else {
-      if (this.elArtifactBar) this.elArtifactBar.style.display = '';
+      if (this.elArtifactBar && this.elArtifactBar.style.display !== '') this.elArtifactBar.style.display = '';
       const tpPct = Math.max(0, Math.min(100, Math.floor(art.chargeProgress)));
-      this.elArtifactFill.style.width = `${Math.max(0, Math.min(100, art.chargeProgress))}%`;
+      this.setWidthPct(this.elArtifactFill, `${Math.max(0, Math.min(100, art.chargeProgress))}%`);
       if (art.isCharged) {
         if (art.isTeleporterReady && !art.isBossSpawned) {
-          this.elArtifactStatus.textContent = 'Teleporter Ready — Press [E]';
+          this.setText(this.elArtifactStatus, 'Teleporter Ready — Press [E]');
           this.elArtifactStatus.classList.add('ready');
         } else if (art.isSummoning) {
-          this.elArtifactStatus.textContent = 'Teleporter Awakening — Guardian Emerging';
+          this.setText(this.elArtifactStatus, 'Teleporter Awakening — Guardian Emerging');
           this.elArtifactStatus.classList.remove('ready');
         } else if (!art.isBossDefeated) {
-          this.elArtifactStatus.textContent = 'Defeat Guardian to Activate Teleporter';
+          this.setText(this.elArtifactStatus, 'Defeat Guardian to Activate Teleporter');
           this.elArtifactStatus.classList.remove('ready');
         } else {
-          this.elArtifactStatus.textContent = 'Teleporter Unlocked — Press [E]';
+          this.setText(this.elArtifactStatus, 'Teleporter Unlocked — Press [E]');
           this.elArtifactStatus.classList.add('ready');
         }
       } else {
-        this.elArtifactStatus.textContent = `Teleporter Charging: ${tpPct}%`;
+        this.setText(this.elArtifactStatus, `Teleporter Charging: ${tpPct}%`);
         this.elArtifactStatus.classList.remove('ready');
       }
     }
@@ -2670,12 +2722,14 @@ export class UIManager {
     // 3b. Active Boss Health Bar
     const activeBoss = state.enemies.find(e => (e.isBoss || e.type === 'boss') && e.health > 0 && !e.isSpawning && e.titanState !== 'emerging');
     if (activeBoss && this.elBossBarWrap) {
-      this.elBossBarWrap.classList.remove('hidden');
+      if (this.elBossBarWrap.classList.contains('hidden')) {
+        this.elBossBarWrap.classList.remove('hidden');
+      }
       const bossHpPct = Math.max(0, Math.min(100, (activeBoss.health / activeBoss.maxHealth) * 100));
-      this.elBossBarFill.style.width = `${bossHpPct}%`;
-      this.elBossHpText.textContent = `${Math.ceil(activeBoss.health)} / ${activeBoss.maxHealth}`;
-      this.elBossTitle.textContent = activeBoss.isStage1Titan ? 'STAGE 1 BOSS' : 'BROOD QUEEN';
-    } else if (this.elBossBarWrap) {
+      this.setWidthPct(this.elBossBarFill, `${bossHpPct}%`);
+      this.setText(this.elBossHpText, `${Math.ceil(activeBoss.health)} / ${activeBoss.maxHealth}`);
+      this.setText(this.elBossTitle, activeBoss.isStage1Titan ? 'STAGE 1 BOSS' : 'BROOD QUEEN');
+    } else if (this.elBossBarWrap && !this.elBossBarWrap.classList.contains('hidden')) {
       this.elBossBarWrap.classList.add('hidden');
     }
 
@@ -2714,53 +2768,32 @@ export class UIManager {
 
     // 4b. Active Skill Enhancement Badges (Commander & Doctor)
     const enhs = p.skillEnhancements || {};
-    this.updateSkillEnhBadge(this.elEnhBadgePrimary, enhs.primary, {
-      chill_beam: { label: 'CHILL BEAM', color: '#38bdf8' },
-      piercing_laser: { label: 'PIERCING LASER', color: '#c084fc' },
-      extended_slash: { label: 'EXT. SLASH', color: '#f59e0b' },
-      toxic_chain: { label: 'TOXIC CHAIN', color: '#84cc16' },
-      cryogenic_scalpel: { label: 'CRYO SCALPEL', color: '#38bdf8' },
-      vital_extraction: { label: 'VITAL EXTRACT', color: '#10b981' }
-    });
-    this.updateSkillEnhBadge(this.elEnhBadgeSecondary, enhs.secondary, {
-      scissor_slash: { label: 'SCISSOR', color: '#f59e0b' },
-      frost_burst: { label: 'FROST BURST', color: '#00e5ff' },
-      orbiting_blade: { label: 'SWORDS', color: '#c084fc' },
-      experimental_drones: { label: 'DRONES', color: '#34d399' },
-      toxic_cluster_bomb: { label: 'CLUSTER', color: '#a3e635' },
-      holographic_decoy: { label: 'DECOY', color: '#2dd4bf' }
-    });
-    this.updateSkillEnhBadge(this.elEnhBadgeUtility, enhs.utility, {
-      shock_dash: { label: 'SHOCK', color: '#f59e0b' },
-      extended_dash: { label: 'EXTENDED', color: '#38bdf8' },
-      teleport: { label: 'TELEPORT', color: '#c084fc' },
-      phase_barrier: { label: 'BARRIER', color: '#6ee7b7' },
-      adrenaline_rush: { label: 'ADRENALINE', color: '#22c55e' }
-    });
-    this.updateSkillEnhBadge(this.elEnhBadgeUltimate, enhs.ultimate, {
-      singularity: { label: 'SINGULARITY', color: '#a855f7' },
-      convergence_barrage: { label: '5-STRIKE', color: '#fbbf24' },
-      cryogenic_impact: { label: 'CRYO', color: '#38bdf8' },
-      mobile_sanctuary: { label: 'MOBILE', color: '#10b981' },
-      divine_intervention: { label: 'CELESTIAL', color: '#fef08a' },
-      rain_of_crosses: { label: 'RAIN', color: '#34d399' }
-    });
+    this.updateSkillEnhBadge(this.elEnhBadgePrimary, enhs.primary, PRIMARY_ENH_BADGES);
+    this.updateSkillEnhBadge(this.elEnhBadgeSecondary, enhs.secondary, SECONDARY_ENH_BADGES);
+    this.updateSkillEnhBadge(this.elEnhBadgeUtility, enhs.utility, UTILITY_ENH_BADGES);
+    this.updateSkillEnhBadge(this.elEnhBadgeUltimate, enhs.ultimate, ULTIMATE_ENH_BADGES);
 
     // Jetpack Fuel Gauge (Remains integrated in Skill UI)
     const fuelPct = Math.max(0, Math.min(100, (p.jetpackFuel / Math.max(1, p.maxJetpackFuel)) * 100));
-    this.elJetpackFill.style.height = `${fuelPct}%`;
+    const nextFuelH = `${fuelPct}%`;
+    if (this.elJetpackFill.style.height !== nextFuelH) {
+      this.elJetpackFill.style.height = nextFuelH;
+    }
+    let jetText = 'RDY';
+    let jetColor = '#a5b4fc';
     if (p.isGliding) {
-      this.elJetpackStatus.textContent = 'GLD';
-      this.elJetpackStatus.style.color = '#7dd3fc';
+      jetText = 'GLD';
+      jetColor = '#7dd3fc';
     } else if (!p.isGrounded) {
-      this.elJetpackStatus.textContent = 'AIR';
-      this.elJetpackStatus.style.color = '#93c5fd';
+      jetText = 'AIR';
+      jetColor = '#93c5fd';
     } else if (fuelPct < 96) {
-      this.elJetpackStatus.textContent = 'CHG';
-      this.elJetpackStatus.style.color = '#c4b5fd';
-    } else {
-      this.elJetpackStatus.textContent = 'RDY';
-      this.elJetpackStatus.style.color = '#a5b4fc';
+      jetText = 'CHG';
+      jetColor = '#c4b5fd';
+    }
+    this.setText(this.elJetpackStatus, jetText);
+    if (this.elJetpackStatus.style.color !== jetColor) {
+      this.elJetpackStatus.style.color = jetColor;
     }
 
     // 4c. Active Temporary Buffs & Debuffs (directly below Skill Bar)
@@ -2777,23 +2810,25 @@ export class UIManager {
       const { progressInTier } = getDifficultyTier(state.gameTime);
       const mins = Math.floor(state.gameTime / 60);
       const secs = Math.floor(state.gameTime % 60);
-      this.elDiffClockText.textContent = `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
-      this.elDiffBarFill.style.width = `${(progressInTier * 100).toFixed(1)}%`;
+      this.setText(this.elDiffClockText, `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`);
+      this.setWidthPct(this.elDiffBarFill, `${(progressInTier * 100).toFixed(1)}%`);
     }
 
     // 6c. In-World Interaction Context Prompt [E]
     if (this.simulation && this.elInteractPrompt) {
       const prompt = this.simulation.getInteractionPrompt();
       if (prompt && !state.isPausedForBuffChoice && !state.isGameOver && !state.isStageCleared) {
-        this.elInteractPrompt.classList.remove('hidden');
-        this.elInteractKey.textContent = `[${prompt.key}]`;
-        this.elInteractLabel.textContent = prompt.label;
+        if (this.elInteractPrompt.classList.contains('hidden')) {
+          this.elInteractPrompt.classList.remove('hidden');
+        }
+        this.setText(this.elInteractKey, `[${prompt.key}]`);
+        this.setText(this.elInteractLabel, prompt.label);
         if (prompt.canAfford !== false) {
           this.elInteractPrompt.classList.remove('unaffordable');
         } else {
           this.elInteractPrompt.classList.add('unaffordable');
         }
-      } else {
+      } else if (!this.elInteractPrompt.classList.contains('hidden')) {
         this.elInteractPrompt.classList.add('hidden');
       }
     }
@@ -2802,53 +2837,58 @@ export class UIManager {
     if (this.elEventBanner && state.worldEvents) {
       const activeEv = state.worldEvents.find(e => e.isActive && !e.isCompleted);
       if (activeEv && !state.isPausedForBuffChoice && !state.isGameOver && !state.isStageCleared) {
-        this.elEventBanner.classList.remove('hidden');
-        this.eventBannerTitle.textContent = activeEv.name.toUpperCase();
+        if (this.elEventBanner.classList.contains('hidden')) {
+          this.elEventBanner.classList.remove('hidden');
+        }
+        this.setText(this.eventBannerTitle, activeEv.name.toUpperCase());
 
         if (activeEv.type === 'void_corruption') {
           const kills = activeEv.killCount || 0;
           const target = activeEv.killTarget || 12;
           const pct = Math.min(100, (kills / target) * 100);
-          this.eventProgressBar.style.width = `${pct}%`;
-          this.eventProgressBar.style.backgroundColor = '#c084fc';
-          this.eventBannerTitle.style.color = '#c084fc';
-          this.eventBannerDesc.textContent = `Trial of Corruption: ${kills}/${target} Void Foes Purged! (${Math.ceil(activeEv.durationTimer || 0)}s left)`;
+          this.setWidthPct(this.eventProgressBar, `${pct}%`);
+          if (this.eventProgressBar.style.backgroundColor !== '#c084fc') this.eventProgressBar.style.backgroundColor = '#c084fc';
+          if (this.eventBannerTitle.style.color !== '#c084fc') this.eventBannerTitle.style.color = '#c084fc';
+          this.setText(this.eventBannerDesc, `Trial of Corruption: ${kills}/${target} Void Foes Purged! (${Math.ceil(activeEv.durationTimer || 0)}s left)`);
         } else if (activeEv.type === 'primal_totem') {
-          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
-          this.eventProgressBar.style.backgroundColor = '#38bdf8';
-          this.eventBannerTitle.style.color = '#38bdf8';
+          this.setWidthPct(this.eventProgressBar, `${activeEv.chargeProgress.toFixed(0)}%`);
+          if (this.eventProgressBar.style.backgroundColor !== '#38bdf8') this.eventProgressBar.style.backgroundColor = '#38bdf8';
+          if (this.eventBannerTitle.style.color !== '#38bdf8') this.eventBannerTitle.style.color = '#38bdf8';
           const pDist = Math.hypot(p.pos.x - activeEv.pos.x, p.pos.y - activeEv.pos.y);
-          this.eventBannerDesc.textContent = pDist <= activeEv.radius
-            ? `Fight Within Range! Synchronizing Resonance... ${activeEv.chargeProgress.toFixed(0)}%`
-            : `Resonance Decaying! Return to Totem Range! (${activeEv.chargeProgress.toFixed(0)}%)`;
+          this.setText(
+            this.eventBannerDesc,
+            pDist <= activeEv.radius
+              ? `Fight Within Range! Synchronizing Resonance... ${activeEv.chargeProgress.toFixed(0)}%`
+              : `Resonance Decaying! Return to Totem Range! (${activeEv.chargeProgress.toFixed(0)}%)`
+          );
         } else if (activeEv.type === 'secondary_totem') {
           const kills = activeEv.killCount || 0;
           const curWave = Math.min(3, kills + 1);
-          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
-          this.eventProgressBar.style.backgroundColor = '#f59e0b';
-          this.eventBannerTitle.style.color = '#f59e0b';
-          this.eventBannerDesc.textContent = `Sequential Elite Trial: Defeat Elite ${curWave} of 3 (${kills}/3 Eliminated)`;
+          this.setWidthPct(this.eventProgressBar, `${activeEv.chargeProgress.toFixed(0)}%`);
+          if (this.eventProgressBar.style.backgroundColor !== '#f59e0b') this.eventProgressBar.style.backgroundColor = '#f59e0b';
+          if (this.eventBannerTitle.style.color !== '#f59e0b') this.eventBannerTitle.style.color = '#f59e0b';
+          this.setText(this.eventBannerDesc, `Sequential Elite Trial: Defeat Elite ${curWave} of 3 (${kills}/3 Eliminated)`);
         } else if (activeEv.type === 'dash_totem') {
           const reached = activeEv.highestPlatformReached || 0;
-          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
-          this.eventProgressBar.style.backgroundColor = '#818cf8';
-          this.eventBannerTitle.style.color = '#818cf8';
-          this.eventBannerDesc.textContent = `Ascend the 5 Phase Platforms to Reach the Summit Core! [${reached}/5 Platforms Reached]`;
+          this.setWidthPct(this.eventProgressBar, `${activeEv.chargeProgress.toFixed(0)}%`);
+          if (this.eventProgressBar.style.backgroundColor !== '#818cf8') this.eventProgressBar.style.backgroundColor = '#818cf8';
+          if (this.eventBannerTitle.style.color !== '#818cf8') this.eventBannerTitle.style.color = '#818cf8';
+          this.setText(this.eventBannerDesc, `Ascend the 5 Phase Platforms to Reach the Summit Core! [${reached}/5 Platforms Reached]`);
         } else {
-          this.eventProgressBar.style.width = `${activeEv.chargeProgress.toFixed(0)}%`;
-          this.eventProgressBar.style.backgroundColor = '#fbbf24';
-          this.eventBannerTitle.style.color = '#fbbf24';
+          this.setWidthPct(this.eventProgressBar, `${activeEv.chargeProgress.toFixed(0)}%`);
+          if (this.eventProgressBar.style.backgroundColor !== '#fbbf24') this.eventProgressBar.style.backgroundColor = '#fbbf24';
+          if (this.eventBannerTitle.style.color !== '#fbbf24') this.eventBannerTitle.style.color = '#fbbf24';
           if (!activeEv.payloadCollected) {
             const itemDist = activeEv.payloadPos
               ? Math.round(Math.hypot(p.pos.x - activeEv.payloadPos.x, p.pos.y - activeEv.payloadPos.y))
               : 0;
-            this.eventBannerDesc.textContent = `Follow the Vertical Light Beam to Collect the Quantum Core! (${itemDist}m)`;
+            this.setText(this.eventBannerDesc, `Follow the Vertical Light Beam to Collect the Quantum Core! (${itemDist}m)`);
           } else {
             const returnDist = Math.round(Math.hypot(p.pos.x - activeEv.pos.x, p.pos.y - activeEv.pos.y));
-            this.eventBannerDesc.textContent = `Deliver Quantum Core to the Uplink Conduit! (+25% Move Speed · Weapons Offline · ${returnDist}m)`;
+            this.setText(this.eventBannerDesc, `Deliver Quantum Core to the Uplink Conduit! (+25% Move Speed · Weapons Offline · ${returnDist}m)`);
           }
         }
-      } else {
+      } else if (!this.elEventBanner.classList.contains('hidden')) {
         this.elEventBanner.classList.add('hidden');
       }
     }
@@ -2959,18 +2999,22 @@ export class UIManager {
     maxCooldown: number
   ): void {
     if (remaining > 0.05) {
-      cdEl.classList.remove('hidden');
-      cdEl.textContent = remaining.toFixed(1);
-      imgEl?.classList.add('on-cooldown');
+      if (cdEl.classList.contains('hidden')) cdEl.classList.remove('hidden');
+      this.setText(cdEl, remaining.toFixed(1));
+      if (imgEl && !imgEl.classList.contains('on-cooldown')) imgEl.classList.add('on-cooldown');
       if (sweepEl) {
-        sweepEl.classList.remove('hidden');
+        if (sweepEl.classList.contains('hidden')) sweepEl.classList.remove('hidden');
         const ratio = Math.max(0, Math.min(1, remaining / Math.max(remaining, maxCooldown, 0.2)));
-        sweepEl.style.setProperty('--cd-deg', `${(ratio * 360).toFixed(1)}deg`);
+        const degStr = `${(ratio * 360).toFixed(1)}deg`;
+        if (sweepEl.dataset.lastDeg !== degStr) {
+          sweepEl.dataset.lastDeg = degStr;
+          sweepEl.style.setProperty('--cd-deg', degStr);
+        }
       }
     } else {
-      cdEl.classList.add('hidden');
-      imgEl?.classList.remove('on-cooldown');
-      sweepEl?.classList.add('hidden');
+      if (!cdEl.classList.contains('hidden')) cdEl.classList.add('hidden');
+      if (imgEl && imgEl.classList.contains('on-cooldown')) imgEl.classList.remove('on-cooldown');
+      if (sweepEl && !sweepEl.classList.contains('hidden')) sweepEl.classList.add('hidden');
     }
   }
 
@@ -3041,13 +3085,36 @@ export class UIManager {
   }
 
   private updateItemsTray(items: Record<ItemId, number>, buffs?: Record<BuffId, number>): void {
+    let sig = '';
+    if (buffs) {
+      for (const id in buffs) {
+        const stack = buffs[id as BuffId];
+        if (stack > 0) {
+          const def = BUFF_REGISTRY[id as BuffId];
+          if (!def || def.exclusiveEvent || def.replacesSkillSlot || def.enhancesSkillSlot) continue;
+          sig += `b:${id}=${stack};`;
+        }
+      }
+    }
+    for (const id in items) {
+      const stack = items[id as ItemId];
+      if (stack > 0 && ITEM_REGISTRY[id as ItemId]) {
+        sig += `i:${id}=${stack};`;
+      }
+    }
+    if (sig === this.lastItemsTraySig && this.lastItemsHtml !== '') {
+      return;
+    }
+    this.lastItemsTraySig = sig;
+
     let html = '';
     let countAny = false;
 
     if (buffs) {
-      for (const [id, stack] of Object.entries(buffs) as [BuffId, number][]) {
+      for (const id in buffs) {
+        const stack = buffs[id as BuffId];
         if (stack > 0) {
-          const def = BUFF_REGISTRY[id];
+          const def = BUFF_REGISTRY[id as BuffId];
           if (!def || def.exclusiveEvent || def.replacesSkillSlot || def.enhancesSkillSlot) continue;
           countAny = true;
           const capText = def.maxStacks !== undefined ? ` / Max ${def.maxStacks}` : '';
@@ -3061,10 +3128,11 @@ export class UIManager {
       }
     }
 
-    for (const [id, stack] of Object.entries(items) as [ItemId, number][]) {
+    for (const id in items) {
+      const stack = items[id as ItemId];
       if (stack > 0) {
         countAny = true;
-        const def = ITEM_REGISTRY[id];
+        const def = ITEM_REGISTRY[id as ItemId];
         if (!def) continue;
         html += `
           <div class="item-badge" title="${def.name}: ${def.description}">
@@ -3184,6 +3252,7 @@ export class UIManager {
     }
 
     // Helper: world (wx, wy) -> camera-aligned minimap coordinates (clamped on rim if requested)
+    const ptOut = this.radarPtScratch;
     const projectPoint = (wx: number, wy: number, clampEdge: boolean): { x: number; y: number; inRange: boolean } => {
       const dx = wx - p.pos.x;
       const dy = wy - p.pos.y;
@@ -3191,13 +3260,22 @@ export class UIManager {
       const sy = (-(sinY * dx + cosY * dy)) * scale;
       const dist = Math.hypot(sx, sy);
       if (dist <= r - 7) {
-        return { x: cx + sx, y: cy + sy, inRange: true };
+        ptOut.x = cx + sx;
+        ptOut.y = cy + sy;
+        ptOut.inRange = true;
+        return ptOut;
       }
       if (!clampEdge || dist < 0.001) {
-        return { x: cx + sx, y: cy + sy, inRange: false };
+        ptOut.x = cx + sx;
+        ptOut.y = cy + sy;
+        ptOut.inRange = false;
+        return ptOut;
       }
       const k = (r - 6) / dist;
-      return { x: cx + sx * k, y: cy + sy * k, inRange: false };
+      ptOut.x = cx + sx * k;
+      ptOut.y = cy + sy * k;
+      ptOut.inRange = false;
+      return ptOut;
     };
 
     // Subtle radar rings

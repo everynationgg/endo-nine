@@ -83,6 +83,40 @@ const BLOCKING_CATEGORIES = new Set<TerrainSurfaceCategory>([
   'border'
 ]);
 
+const SEAM_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [4.0, 0],
+  [-4.0, 0],
+  [0, 4.0],
+  [0, -4.0],
+  [3.5, 3.5],
+  [-3.5, 3.5],
+  [3.5, -3.5],
+  [-3.5, -3.5]
+];
+
+const LIP_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [10, 0], [-10, 0], [0, 10], [0, -10],
+  [7.1, 7.1], [-7.1, 7.1], [7.1, -7.1], [-7.1, -7.1],
+  [18, 0], [-18, 0], [0, 18], [0, -18],
+  [12.7, 12.7], [-12.7, 12.7], [12.7, -12.7], [-12.7, -12.7]
+];
+
+const CEILING_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [18, 0],
+  [-18, 0],
+  [0, 18],
+  [0, -18],
+  [26, 26],
+  [-26, 26],
+  [26, -26],
+  [-26, -26]
+];
+
+const SLICE_PTS = new Float64Array(12);
+const SLICE_SEG = { x1: 0, z1: 0, x2: 0, z2: 0 };
+const SLICE_Y_VALS = new Float64Array(3);
+const OVERLAP_HIT = { pen: 0, nx: 0, nz: 0 };
+
 interface NavLayerNode {
   id: number;
   gx: number;
@@ -113,13 +147,22 @@ export class MeshTerrainCollider {
 
   public playableBounds: { minX: number; maxX: number; minY: number; maxY: number };
 
-  // Multi-layer 3D NavGraph
+  // Multi-layer 3D NavGraph & pre-allocated A* scratch buffers
   private navCellSize: number = 64;
   private navCols: number = 0;
   private navRows: number = 0;
   private navNodes: NavLayerNode[] = [];
   private navCellBuckets: number[][] = [];
   public validEnemySpawnPositions: Vector2[] = [];
+  private astarGScore: Float32Array = new Float32Array(0);
+  private astarFScore: Float32Array = new Float32Array(0);
+  private astarCameFrom: Int32Array = new Int32Array(0);
+  private astarVisitedGen: Int32Array = new Int32Array(0);
+  private astarClosedGen: Int32Array = new Int32Array(0);
+  private astarInOpenGen: Int32Array = new Int32Array(0);
+  private astarHeapPos: Int32Array = new Int32Array(0);
+  private astarHeap: Int32Array = new Int32Array(0);
+  private astarSearchGen: number = 0;
 
   // Dynamic Tower core & bottom-cap bounds computed from loaded mesh triangles
   private readonly towerBottomCapMaxY: number;
@@ -520,20 +563,11 @@ export class MeshTerrainCollider {
 
     // Micro-seam fallback for all walkable solid surfaces across nearby buckets
     if (!bestSolidTri || (bestWaterTri && bestSolidY < bestWaterY - 3.0)) {
-      const seamOffsets: [number, number][] = [
-        [4.0, 0],
-        [-4.0, 0],
-        [0, 4.0],
-        [0, -4.0],
-        [3.5, 3.5],
-        [-3.5, 3.5],
-        [3.5, -3.5],
-        [-3.5, -3.5]
-      ];
-      for (let dr = -1; dr <= 1; dr++) {
+      const scanDelta = bestSolidTri && bestWaterTri ? 0 : 1;
+      for (let dr = -scanDelta; dr <= scanDelta; dr++) {
         const rr = row + dr;
         if (rr < 0 || rr >= this.rows) continue;
-        for (let dc = -1; dc <= 1; dc++) {
+        for (let dc = -scanDelta; dc <= scanDelta; dc++) {
           const cc = col + dc;
           if (cc < 0 || cc >= this.cols) continue;
           const nTris = this.buckets[rr * this.cols + cc];
@@ -550,9 +584,9 @@ export class MeshTerrainCollider {
             }
             const isMultiStoryStructure = tri.category === 'tower_ledge' || tri.category === 'ship_walkable';
             if (isMultiStoryStructure && tri.minY > structureReachY) continue;
-            for (let k = 0; k < seamOffsets.length; k++) {
-              const sx = wx + seamOffsets[k][0];
-              const sz = wy + seamOffsets[k][1];
+            for (let k = 0; k < SEAM_OFFSETS.length; k++) {
+              const sx = wx + SEAM_OFFSETS[k][0];
+              const sz = wy + SEAM_OFFSETS[k][1];
               if (sx < tri.minX - 0.8 || sx > tri.maxX + 0.8 || sz < tri.minZ - 0.8 || sz > tri.maxZ + 0.8) continue;
               const hitY = this.barycentricY(tri, sx, sz, -0.03);
               if (hitY === null) continue;
@@ -586,16 +620,6 @@ export class MeshTerrainCollider {
       }
     }
 
-    // Re-check buried water after seam fallback (catches hairline mesh creases in closed hillsides above buried water)
-    if (bestWaterTri) {
-      const waterOverAfter = this.analyzeTerrainOverhead(wx, wy, bestWaterY, 88, 8);
-      if (waterOverAfter.insideClosedHill || waterOverAfter.headroomBlocked) {
-        buriedWaterSurfaceY = Math.max(buriedWaterSurfaceY, bestWaterY);
-        bestWaterTri = null;
-        bestWaterY = -Infinity;
-      }
-    }
-
     // Tower outer-lip capsule footing retention: when standing on or stepping across an elevated tower step
     // and the single-point ray slips off the narrow outer bevel onto ground far below, probe within the
     // player's 30u foot footprint (10u and 18u rings) for valid nearby tower_ledge footing at step height.
@@ -606,17 +630,11 @@ export class MeshTerrainCollider {
       (!bestSolidTri || (bestSolidTri.category !== 'tower_ledge' && bestSolidY < entityZ - stepUpLimit - 12)) &&
       Math.hypot(wx - this.towerCenterX, wy - this.towerCenterZ) <= this.towerOuterMaxR + 180
     ) {
-      const lipOffsets: [number, number][] = [
-        [10, 0], [-10, 0], [0, 10], [0, -10],
-        [7.1, 7.1], [-7.1, 7.1], [7.1, -7.1], [-7.1, -7.1],
-        [18, 0], [-18, 0], [0, 18], [0, -18],
-        [12.7, 12.7], [-12.7, 12.7], [12.7, -12.7], [-12.7, -12.7]
-      ];
       let lipBestY = -Infinity;
       let lipBestTri: ColliderTri | null = null;
-      for (let k = 0; k < lipOffsets.length; k++) {
-        const sx = wx + lipOffsets[k][0];
-        const sz = wy + lipOffsets[k][1];
+      for (let k = 0; k < LIP_OFFSETS.length; k++) {
+        const sx = wx + LIP_OFFSETS[k][0];
+        const sz = wy + LIP_OFFSETS[k][1];
         const sCol = Math.max(0, Math.min(this.cols - 1, Math.floor(sx / this.cellSize)));
         const sRow = Math.max(0, Math.min(this.rows - 1, Math.floor(sz / this.cellSize)));
         const nTris = this.buckets[sRow * this.cols + sCol];
@@ -769,20 +787,67 @@ export class MeshTerrainCollider {
     };
   }
 
+  /**
+   * Fast single-bucket terrain height lookup for purely visual effects (VFX decals, shadows, laser rays).
+   * Bypasses overhead arch analysis, 72-probe micro-seams, and lip retention while matching ground/bridge/water elevation.
+   */
+  public queryFastGroundHeight(wx: number, wy: number, refY?: number, stepUpLimit: number = 56): number {
+    if (!Number.isFinite(wx) || !Number.isFinite(wy)) return 0;
+    const col = Math.max(0, Math.min(this.cols - 1, Math.floor(wx / this.cellSize)));
+    const row = Math.max(0, Math.min(this.rows - 1, Math.floor(wy / this.cellSize)));
+    const tris = this.buckets[row * this.cols + col];
+
+    const isTopDown = refY === undefined || !Number.isFinite(refY) || refY >= 1e5;
+    const reachY = isTopDown ? Infinity : (refY as number) + Math.max(stepUpLimit, 56);
+
+    let bestSolidY = -Infinity;
+    let bestHighY = -Infinity;
+    let bestWaterY = -Infinity;
+
+    for (let i = 0; i < tris.length; i++) {
+      const tri = tris[i];
+      if (tri.category === 'tree_nonsolid') continue;
+      if (!WALKABLE_CATEGORIES.has(tri.category)) continue;
+      if (wx < tri.minX - 0.8 || wx > tri.maxX + 0.8 || wy < tri.minZ - 0.8 || wy > tri.maxZ + 0.8) continue;
+
+      const nyS = tri.nySigned ?? 1;
+      if (
+        nyS < -0.15 &&
+        !(tri.sourceTag === 'terrain:ground' && tri.ny >= 0.20)
+      ) {
+        continue;
+      }
+
+      const hitY = this.barycentricY(tri, wx, wy, -0.03);
+      if (hitY === null) continue;
+
+      if (tri.category === 'water') {
+        if (hitY > bestWaterY) bestWaterY = hitY;
+        continue;
+      }
+
+      if (hitY <= reachY) {
+        if (hitY > bestSolidY) bestSolidY = hitY;
+      } else if (hitY > bestHighY) {
+        bestHighY = hitY;
+      }
+    }
+
+    if (bestSolidY > -Infinity) {
+      if (bestWaterY > -Infinity && bestWaterY > bestSolidY + 3.0) {
+        return bestWaterY - 4;
+      }
+      return bestSolidY;
+    }
+    if (bestWaterY > -Infinity) return bestWaterY - 4;
+    if (bestHighY > -Infinity) return bestHighY;
+    return refY !== undefined && Number.isFinite(refY) && refY < 1e5 ? refY : 0;
+  }
+
   private hasGroundCeilingNearby(wx: number, wy: number, entityZ: number, maxHeight: number): boolean {
-    const offsets: [number, number][] = [
-      [18, 0],
-      [-18, 0],
-      [0, 18],
-      [0, -18],
-      [26, 26],
-      [-26, 26],
-      [26, -26],
-      [-26, -26]
-    ];
-    for (let k = 0; k < offsets.length; k++) {
-      const sx = wx + offsets[k][0];
-      const sz = wy + offsets[k][1];
+    for (let k = 0; k < CEILING_OFFSETS.length; k++) {
+      const sx = wx + CEILING_OFFSETS[k][0];
+      const sz = wy + CEILING_OFFSETS[k][1];
       const col = Math.max(0, Math.min(this.cols - 1, Math.floor(sx / this.cellSize)));
       const row = Math.max(0, Math.min(this.rows - 1, Math.floor(sz / this.cellSize)));
       const tris = this.buckets[row * this.cols + col];
@@ -1330,17 +1395,20 @@ export class MeshTerrainCollider {
           const yHi = Math.min(tri.maxY, bodyTop);
           const hit = this.triangleHorizontalOverlap(tri, toPos.x, toPos.y, effectiveRadius, yLo, yHi);
           if (hit) {
+            const hitPen = hit.pen;
+            const hitNx = hit.nx;
+            const hitNz = hit.nz;
             // Escape-from-penetration rule: if the entity already touches this face at fromPos and
             // moving to toPos strictly reduces penetration, allow moving away so players never glue in place.
             const fromHit = this.triangleHorizontalOverlap(tri, fromPos.x, fromPos.y, effectiveRadius, yLo, yHi);
-            if (fromHit && hit.pen < fromHit.pen - 0.05) {
+            if (fromHit && hitPen < fromHit.pen - 0.05) {
               continue;
             }
-            if (hit.pen > bestPen) {
+            if (hitPen > bestPen) {
               blocked = true;
-              bestPen = hit.pen;
-              bestNx = hit.nx;
-              bestNz = hit.nz;
+              bestPen = hitPen;
+              bestNx = hitNx;
+              bestNz = hitNz;
               bestReason = `wall:${tri.sourceTag}`;
             }
           }
@@ -1721,6 +1789,17 @@ export class MeshTerrainCollider {
         }
       }
     }
+
+    const nodeCount = this.navNodes.length;
+    this.astarGScore = new Float32Array(nodeCount);
+    this.astarFScore = new Float32Array(nodeCount);
+    this.astarCameFrom = new Int32Array(nodeCount);
+    this.astarVisitedGen = new Int32Array(nodeCount);
+    this.astarClosedGen = new Int32Array(nodeCount);
+    this.astarInOpenGen = new Int32Array(nodeCount);
+    this.astarHeapPos = new Int32Array(nodeCount);
+    this.astarHeap = new Int32Array(nodeCount);
+    this.astarSearchGen = 0;
   }
 
   private findNearestNavNode(pos: Vector2, zHint?: number): NavLayerNode | null {
@@ -1790,58 +1869,123 @@ export class MeshTerrainCollider {
       };
     }
 
-    // Lightweight bounded A* on precomputed navNodes
-    const gScore = new Map<number, number>();
-    const fScore = new Map<number, number>();
-    const cameFrom = new Map<number, number>();
-    const closed = new Set<number>();
-    const open: number[] = [start.id];
+    // Zero-allocation bounded A* on precomputed navNodes using generation-tagged typed arrays & binary min-heap
+    if (this.astarSearchGen >= 0x7ffffff0) {
+      this.astarVisitedGen.fill(0);
+      this.astarClosedGen.fill(0);
+      this.astarInOpenGen.fill(0);
+      this.astarSearchGen = 0;
+    }
+    const gen = ++this.astarSearchGen;
+    const gScore = this.astarGScore;
+    const fScore = this.astarFScore;
+    const cameFrom = this.astarCameFrom;
+    const visitedGen = this.astarVisitedGen;
+    const closedGen = this.astarClosedGen;
+    const inOpenGen = this.astarInOpenGen;
+    const heapPos = this.astarHeapPos;
+    const heap = this.astarHeap;
 
-    gScore.set(start.id, 0);
-    fScore.set(start.id, Math.hypot(goal.x - start.x, goal.y - start.y));
+    const siftUp = (idx: number) => {
+      const nodeId = heap[idx];
+      const f = fScore[nodeId];
+      while (idx > 0) {
+        const parentIdx = (idx - 1) >> 1;
+        const parentId = heap[parentIdx];
+        if (f >= fScore[parentId]) break;
+        heap[idx] = parentId;
+        heapPos[parentId] = idx;
+        idx = parentIdx;
+      }
+      heap[idx] = nodeId;
+      heapPos[nodeId] = idx;
+    };
+
+    const siftDown = (idx: number, size: number) => {
+      const nodeId = heap[idx];
+      const f = fScore[nodeId];
+      const half = size >> 1;
+      while (idx < half) {
+        let childIdx = (idx << 1) + 1;
+        let childId = heap[childIdx];
+        const rightIdx = childIdx + 1;
+        if (rightIdx < size && fScore[heap[rightIdx]] < fScore[childId]) {
+          childIdx = rightIdx;
+          childId = heap[rightIdx];
+        }
+        if (f <= fScore[childId]) break;
+        heap[idx] = childId;
+        heapPos[childId] = idx;
+        idx = childIdx;
+      }
+      heap[idx] = nodeId;
+      heapPos[nodeId] = idx;
+    };
+
+    let heapSize = 1;
+    heap[0] = start.id;
+    heapPos[start.id] = 0;
+    visitedGen[start.id] = gen;
+    inOpenGen[start.id] = gen;
+    cameFrom[start.id] = -1;
+    gScore[start.id] = 0;
+    const startGoalDist = Math.hypot(goal.x - start.x, goal.y - start.y);
+    fScore[start.id] = startGoalDist;
 
     let bestVisited = start;
-    let bestVisitedDist = Math.hypot(goal.x - start.x, goal.y - start.y);
+    let bestVisitedDist = startGoalDist;
     let iterations = 0;
     const maxIterations = 650;
     let reachedGoal = false;
 
-    while (open.length > 0 && iterations < maxIterations) {
+    while (heapSize > 0 && iterations < maxIterations) {
       iterations++;
-      let bestIdx = 0;
-      let bestF = fScore.get(open[0]) ?? Infinity;
-      for (let i = 1; i < open.length; i++) {
-        const f = fScore.get(open[i]) ?? Infinity;
-        if (f < bestF) {
-          bestF = f;
-          bestIdx = i;
-        }
+      const curId = heap[0];
+      heapSize--;
+      if (heapSize > 0) {
+        const lastId = heap[heapSize];
+        heap[0] = lastId;
+        heapPos[lastId] = 0;
+        siftDown(0, heapSize);
       }
-      const curId = open.splice(bestIdx, 1)[0];
+      inOpenGen[curId] = 0;
+
       if (curId === goal.id) {
         reachedGoal = true;
         break;
       }
-      closed.add(curId);
+      closedGen[curId] = gen;
 
-      const cur = this.navNodes[curId];
+      const cur: NavLayerNode = this.navNodes[curId];
       const dToGoal = Math.hypot(goal.x - cur.x, goal.y - cur.y);
       if (dToGoal < bestVisitedDist) {
         bestVisitedDist = dToGoal;
         bestVisited = cur;
       }
 
-      const curG = gScore.get(curId) ?? Infinity;
-      for (let n = 0; n < cur.neighbors.length; n++) {
-        const edge = cur.neighbors[n];
-        if (closed.has(edge.id)) continue;
-        const nb = this.navNodes[edge.id];
+      const curG = gScore[curId];
+      const neighbors: NavLayerNode['neighbors'] = cur.neighbors;
+      for (let n = 0; n < neighbors.length; n++) {
+        const edge: { id: number; cost: number } = neighbors[n];
+        const nbId = edge.id;
+        if (closedGen[nbId] === gen) continue;
+        const nb = this.navNodes[nbId];
         const tentativeG = curG + edge.cost;
-        if (tentativeG < (gScore.get(nb.id) ?? Infinity)) {
-          cameFrom.set(nb.id, curId);
-          gScore.set(nb.id, tentativeG);
-          fScore.set(nb.id, tentativeG + Math.hypot(goal.x - nb.x, goal.y - nb.y));
-          if (!open.includes(nb.id)) open.push(nb.id);
+        const prevG = visitedGen[nbId] === gen ? gScore[nbId] : Infinity;
+        if (tentativeG < prevG) {
+          visitedGen[nbId] = gen;
+          cameFrom[nbId] = curId;
+          gScore[nbId] = tentativeG;
+          fScore[nbId] = tentativeG + Math.hypot(goal.x - nb.x, goal.y - nb.y);
+          if (inOpenGen[nbId] === gen) {
+            siftUp(heapPos[nbId]);
+          } else {
+            inOpenGen[nbId] = gen;
+            heap[heapSize] = nbId;
+            heapPos[nbId] = heapSize;
+            siftUp(heapSize);
+            heapSize++;
+          }
         }
       }
     }
@@ -1858,8 +2002,8 @@ export class MeshTerrainCollider {
     }
 
     let stepId = endId;
-    while (cameFrom.has(stepId) && cameFrom.get(stepId) !== start.id) {
-      stepId = cameFrom.get(stepId)!;
+    while (visitedGen[stepId] === gen && cameFrom[stepId] !== -1 && cameFrom[stepId] !== start.id) {
+      stepId = cameFrom[stepId];
     }
     const nextNode = this.navNodes[stepId];
     return {
@@ -1919,13 +2063,21 @@ export class MeshTerrainCollider {
     yHi: number
   ): { pen: number; nx: number; nz: number } | null {
     if (yHi < yLo) return null;
-    const slices = yHi - yLo < 4 ? [0.5 * (yLo + yHi)] : [yLo + 0.5, 0.5 * (yLo + yHi), yHi - 0.5];
+    let sliceCount = 1;
+    if (yHi - yLo < 4) {
+      SLICE_Y_VALS[0] = 0.5 * (yLo + yHi);
+    } else {
+      sliceCount = 3;
+      SLICE_Y_VALS[0] = yLo + 0.5;
+      SLICE_Y_VALS[1] = 0.5 * (yLo + yHi);
+      SLICE_Y_VALS[2] = yHi - 0.5;
+    }
     let maxPen = 0;
     let outNx = 0;
     let outNz = 0;
 
-    for (let s = 0; s < slices.length; s++) {
-      const y = slices[s];
+    for (let s = 0; s < sliceCount; s++) {
+      const y = SLICE_Y_VALS[s];
       const seg = this.sliceTriangleAtY(tri, y);
       if (!seg) continue;
 
@@ -1958,14 +2110,20 @@ export class MeshTerrainCollider {
       }
     }
 
-    return maxPen > 0 ? { pen: maxPen, nx: outNx, nz: outNz } : null;
+    if (maxPen > 0) {
+      OVERLAP_HIT.pen = maxPen;
+      OVERLAP_HIT.nx = outNx;
+      OVERLAP_HIT.nz = outNz;
+      return OVERLAP_HIT;
+    }
+    return null;
   }
 
   private sliceTriangleAtY(
     tri: ColliderTri,
     y: number
   ): { x1: number; z1: number; x2: number; z2: number } | null {
-    const pts: number[] = [];
+    let ptLen = 0;
     const testEdge = (
       x0: number, y0: number, z0: number,
       x1: number, y1: number, z1: number
@@ -1975,18 +2133,28 @@ export class MeshTerrainCollider {
       if ((d0 <= 0 && d1 >= 0) || (d0 >= 0 && d1 <= 0)) {
         const dy = y1 - y0;
         if (Math.abs(dy) < 1e-6) {
-          pts.push(x0, z0, x1, z1);
-        } else {
+          if (ptLen + 4 <= 12) {
+            SLICE_PTS[ptLen++] = x0;
+            SLICE_PTS[ptLen++] = z0;
+            SLICE_PTS[ptLen++] = x1;
+            SLICE_PTS[ptLen++] = z1;
+          }
+        } else if (ptLen + 2 <= 12) {
           const t = (y - y0) / dy;
-          pts.push(x0 + (x1 - x0) * t, z0 + (z1 - z0) * t);
+          SLICE_PTS[ptLen++] = x0 + (x1 - x0) * t;
+          SLICE_PTS[ptLen++] = z0 + (z1 - z0) * t;
         }
       }
     };
     testEdge(tri.ax, tri.ay, tri.az, tri.bx, tri.by, tri.bz);
     testEdge(tri.bx, tri.by, tri.bz, tri.cx, tri.cy, tri.cz);
     testEdge(tri.cx, tri.cy, tri.cz, tri.ax, tri.ay, tri.az);
-    if (pts.length < 4) return null;
-    return { x1: pts[0], z1: pts[1], x2: pts[2], z2: pts[3] };
+    if (ptLen < 4) return null;
+    SLICE_SEG.x1 = SLICE_PTS[0];
+    SLICE_SEG.z1 = SLICE_PTS[1];
+    SLICE_SEG.x2 = SLICE_PTS[2];
+    SLICE_SEG.z2 = SLICE_PTS[3];
+    return SLICE_SEG;
   }
 
   private intersectSegmentTriangle(

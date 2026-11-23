@@ -378,6 +378,8 @@ interface EnemyRenderEntry {
   titanTentacleChevronAngle?: number;
   titanTentacleMeshes?: THREE.Mesh[];
   titanTentacleSpines?: THREE.Line[];
+  titanTentacleSpinePts?: THREE.Vector3[][];
+  titanTentacleSpineLinePts?: THREE.Vector3[][];
   titanTentacleStingers?: THREE.Mesh[];
   titanTentacleImpactRings?: THREE.Mesh[];
 }
@@ -658,6 +660,37 @@ export class ThreeApp {
   private readonly titanV2Scratch = new THREE.Vector3();
   private readonly titanUpScratch = new THREE.Vector3(0, 1, 0);
   private readonly titanPosZScratch = new THREE.Vector3(0, 0, 1);
+  private projectileGroupPool: Map<string, THREE.Group[]> = new Map();
+  private readonly scratchEnemyIds: Set<string> = new Set();
+  private readonly scratchProjIds: Set<string> = new Set();
+  private readonly scratchDropIds: Set<string> = new Set();
+  private readonly scratchItemDropIds: Set<string> = new Set();
+  private readonly scratchRecoveryIds: Set<string> = new Set();
+  private readonly scratchToxicIds: Set<string> = new Set();
+  private readonly scratchCrossIds: Set<string> = new Set();
+  private readonly scratchDocFrostIds: Set<string> = new Set();
+  private readonly scratchDocTetherIds: Set<string> = new Set();
+  private readonly scratchDocDroneIds: Set<string> = new Set();
+  private readonly scratchDocDecoyIds: Set<string> = new Set();
+  private readonly scratchDocAngelIds: Set<string> = new Set();
+  private readonly scratchDocFallingIds: Set<string> = new Set();
+  private readonly tentacleTScratch = new THREE.Vector3();
+  private readonly tentacleNScratch = new THREE.Vector3();
+  private readonly tentacleBScratch = new THREE.Vector3();
+  private readonly tentacleUnitXScratch = new THREE.Vector3(1, 0, 0);
+  private readonly tentacleCrestScratch = new THREE.Vector3();
+  private readonly tentacleStingerDirScratch = new THREE.Vector3();
+  private readonly tetherStartScratch = new THREE.Vector3();
+  private readonly tetherEndScratch = new THREE.Vector3();
+  private readonly tetherDeltaScratch = new THREE.Vector3();
+  private readonly tetherMidScratch = new THREE.Vector3();
+  private readonly tetherDirScratch = new THREE.Vector3();
+  private readonly tentacleRootScratch = new THREE.Vector3();
+  private readonly tentacleTargetScratch = new THREE.Vector3();
+  private readonly tentacleFullVecScratch = new THREE.Vector3();
+  private readonly tentacleHorizDirScratch = new THREE.Vector3();
+  private readonly tentacleHorizPerpScratch = new THREE.Vector3();
+  private readonly tentacleCurPosScratch = new THREE.Vector3();
 
   // Overseer Artifact
   private artifactGroup!: THREE.Group;
@@ -779,11 +812,9 @@ export class ThreeApp {
     this.terrain = new ThreeTerrain(this.simulation.state.terrain, this.textureLoader);
     this.scene.add(this.terrain.group);
 
-    // 7. 3D VFX (with elevation-aware terrain height sampler so low-elevation telegraphs never snap onto tower roofs)
+    // 7. 3D VFX (with elevation-aware fast visual terrain height sampler)
     this.vfx = new ThreeVFX((x, z, refY) =>
-      refY !== undefined
-        ? this.simulation.state.terrain.getElevation(x, z, refY, 64).height
-        : this.simulation.state.terrain.getElevation(x, z).height
+      this.simulation.state.terrain.getFastVisualHeight(x, z, refY, 56)
     );
     this.scene.add(this.vfx.group);
 
@@ -3411,11 +3442,10 @@ export class ThreeApp {
     if (!posAttr || !normAttr) return;
 
     const segments = spinePoints.length - 1;
-    const T = new THREE.Vector3();
-    const prevT = new THREE.Vector3();
-    const N = new THREE.Vector3();
-    const B = new THREE.Vector3();
-    const worldUp = new THREE.Vector3(0, 1, 0);
+    const T = this.tentacleTScratch;
+    const N = this.tentacleNScratch;
+    const B = this.tentacleBScratch;
+    const worldUp = this.titanUpScratch;
 
     for (let s = 0; s <= segments; s++) {
       const pt = spinePoints[s];
@@ -3430,7 +3460,7 @@ export class ThreeApp {
         // Initial normal vector perpendicular to tangent
         N.crossVectors(T, worldUp).normalize();
         if (N.lengthSq() < 0.0001) {
-          N.crossVectors(T, new THREE.Vector3(1, 0, 0)).normalize();
+          N.crossVectors(T, this.tentacleUnitXScratch).normalize();
         }
       } else {
         // Parallel transport frame projection: removes twist and vertical gimbal singularity
@@ -3441,7 +3471,6 @@ export class ThreeApp {
         }
       }
       B.crossVectors(T, N).normalize();
-      prevT.copy(T);
 
       // Organic tapered radius with subtle muscular ring segmentation
       const t = s / segments;
@@ -3759,7 +3788,8 @@ export class ThreeApp {
 
   private syncEnemies(dt: number = 0.016): void {
     const enemies = this.simulation.state.enemies;
-    const currentIds = new Set<string>();
+    const currentIds = this.scratchEnemyIds;
+    currentIds.clear();
     const elapsedSec = performance.now() * 0.001;
 
     for (let i = 0; i < enemies.length; i++) {
@@ -4302,12 +4332,12 @@ export class ThreeApp {
             // 3D Terrain Obstruction Raycast: check if beam impacts terrain or cliffs
             const raySteps = 32;
             this.titanEndScratch.set(rawEndX, targetZ, rawEndY);
-            for (let r = 1; r <= raySteps; r++) {
-              const rt = r / raySteps;
-              const rx = this.titanMouthScratch.x + (rawEndX - this.titanMouthScratch.x) * rt;
-              const ry = this.titanMouthScratch.z + (rawEndY - this.titanMouthScratch.z) * rt;
-              const rz = this.titanMouthScratch.y + (targetZ - this.titanMouthScratch.y) * rt;
-              const th = this.simulation.state.terrain.calculateHeight(rx, ry);
+              for (let r = 1; r <= raySteps; r++) {
+                const rt = r / raySteps;
+                const rx = this.titanMouthScratch.x + (rawEndX - this.titanMouthScratch.x) * rt;
+                const ry = this.titanMouthScratch.z + (rawEndY - this.titanMouthScratch.z) * rt;
+                const rz = this.titanMouthScratch.y + (targetZ - this.titanMouthScratch.y) * rt;
+                const th = this.simulation.state.terrain.getFastVisualHeight(rx, ry, undefined, 56);
               if (r > 2 && rz <= th) {
                 this.titanEndScratch.set(rx, th + 0.5, ry);
                 break;
@@ -4433,7 +4463,7 @@ export class ThreeApp {
                     const ang = (c / Math.max(1, chevs.length)) * Math.PI * 2 + record.titanTentacleChevronAngle;
                     const lx = Math.cos(ang) * chevDist;
                     const lz = Math.sin(ang) * chevDist;
-                    const ch = this.simulation.state.terrain.calculateHeight(target.x + lx, target.y + lz);
+                    const ch = this.simulation.state.terrain.getFastVisualHeight(target.x + lx, target.y + lz, tZ, 56);
                     chevs[c].position.set(lx, (ch - tZ) + 2.2, lz);
                     // -Z local axis points inward (-lx, -lz) toward reticle center
                     chevs[c].rotation.y = Math.atan2(lx, lz);
@@ -4528,22 +4558,36 @@ export class ThreeApp {
                 if (!mesh) continue;
 
                 // Root socket anchored directly on the 3D boss carapace
-                const rootWorld = record.titan3D.getCarapaceStrikeSocket(a, new THREE.Vector3());
+                const rootWorld = record.titan3D.getCarapaceStrikeSocket(a, this.tentacleRootScratch);
 
                 // Ground landing point
                 const targetGroundX = target.x + cfg.groundOffX;
                 const targetGroundY = target.y + cfg.groundOffY;
                 const targetGroundZ = this.simulation.state.terrain.getElevation(targetGroundX, targetGroundY).height;
-                const targetWorld = new THREE.Vector3(targetGroundX, targetGroundZ + tipHoverY, targetGroundY);
+                const targetWorld = this.tentacleTargetScratch.set(targetGroundX, targetGroundZ + tipHoverY, targetGroundY);
 
                 // Direction towards target
-                const fullVec = new THREE.Vector3().subVectors(targetWorld, rootWorld);
-                const horizDir = new THREE.Vector3(fullVec.x, 0, fullVec.z).normalize();
-                const horizPerp = new THREE.Vector3(-horizDir.z, 0, horizDir.x);
+                const fullVec = this.tentacleFullVecScratch.subVectors(targetWorld, rootWorld);
+                const horizDir = this.tentacleHorizDirScratch.set(fullVec.x, 0, fullVec.z).normalize();
+                const horizPerp = this.tentacleHorizPerpScratch.set(-horizDir.z, 0, horizDir.x);
 
-                // Construct 29 spine points along extending parabolic whip
-                const spinePoints: THREE.Vector3[] = [];
-                const spineLinePoints: THREE.Vector3[] = [];
+                // Lazily allocate reusable 29-point spine buffers per tentacle
+                if (!record.titanTentacleSpinePts) {
+                  record.titanTentacleSpinePts = [];
+                  record.titanTentacleSpineLinePts = [];
+                }
+                let spinePoints = record.titanTentacleSpinePts[a];
+                if (!spinePoints || spinePoints.length !== spineSegments + 1) {
+                  spinePoints = [];
+                  for (let s = 0; s <= spineSegments; s++) spinePoints.push(new THREE.Vector3());
+                  record.titanTentacleSpinePts[a] = spinePoints;
+                }
+                let spineLinePoints = record.titanTentacleSpineLinePts![a];
+                if (!spineLinePoints || spineLinePoints.length !== spineSegments + 1) {
+                  spineLinePoints = [];
+                  for (let s = 0; s <= spineSegments; s++) spineLinePoints.push(new THREE.Vector3());
+                  record.titanTentacleSpineLinePts![a] = spineLinePoints;
+                }
 
                 // Low-slung cobra-coil apex during telegraph (stays inside combat camera!), high overhead whip during strike!
                 const apexHeight = phase === 'telegraph'
@@ -4557,7 +4601,7 @@ export class ThreeApp {
                   const effU = u * extProgress; // Fraction along full trajectory
 
                   // Base interpolation between root and target
-                  const curPos = new THREE.Vector3().lerpVectors(rootWorld, targetWorld, effU);
+                  const curPos = this.tentacleCurPosScratch.lerpVectors(rootWorld, targetWorld, effU);
 
                   // Graceful whip arch peaking across the span
                   const arcEnvelope = Math.pow(Math.sin(effU * Math.PI), 0.78);
@@ -4587,7 +4631,7 @@ export class ThreeApp {
 
                   // Ensure spine glides cleanly above terrain bumps without burying until actual ground contact at tip
                   if (s < spineSegments || !isImpaled) {
-                    const terrH = this.simulation.state.terrain.calculateHeight(curPos.x, curPos.z);
+                    const terrH = this.simulation.state.terrain.getFastVisualHeight(curPos.x, curPos.z, undefined, 56);
                     const minClearance = phase === 'telegraph' ? 14.0 : 4.0;
                     if (curPos.y < terrH + minClearance) {
                       curPos.y = terrH + minClearance;
@@ -4596,23 +4640,31 @@ export class ThreeApp {
                     curPos.y = targetGroundZ + 0.2;
                   }
 
-                  spinePoints.push(curPos);
+                  spinePoints[s].copy(curPos);
 
                   // Outer glowing bio-vein highlight strictly outside tapered flesh radius
                   const curRad = (21.0 * Math.pow(1.0 - u * 0.92, 1.35) + 1.6) * (1.0 + 0.08 * Math.sin(u * Math.PI * 16.0));
-                  const crestPt = new THREE.Vector3().copy(curPos);
+                  const crestPt = spineLinePoints[s].copy(curPos);
                   crestPt.y += curRad + 2.0;
                   crestPt.addScaledVector(horizPerp, Math.sin(nowSec * 3 + u * 6) * 1.2);
-                  spineLinePoints.push(crestPt);
                 }
 
                 // Update volumetric tapered tube geometry (21.0 base radius -> 2.4 razor tip)
                 this.updateTentacleGeo(mesh.geometry, spinePoints, 21.0, 10);
                 mesh.visible = true;
 
-                // Update dorsal glowing vein line
+                // Update dorsal glowing vein line in-place once allocated
                 if (spineLine) {
-                  spineLine.geometry.setFromPoints(spineLinePoints);
+                  const linePos = spineLine.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
+                  if (linePos && linePos.count === spineLinePoints.length) {
+                    for (let s = 0; s < spineLinePoints.length; s++) {
+                      const lp = spineLinePoints[s];
+                      linePos.setXYZ(s, lp.x, lp.y, lp.z);
+                    }
+                    linePos.needsUpdate = true;
+                  } else {
+                    spineLine.geometry.setFromPoints(spineLinePoints);
+                  }
                   spineLine.geometry.computeBoundingSphere();
                   spineLine.visible = true;
                 }
@@ -4622,8 +4674,8 @@ export class ThreeApp {
                   const lastPt = spinePoints[spineSegments];
                   const prevPt = spinePoints[spineSegments - 1];
                   stinger.position.copy(lastPt);
-                  const stingerDir = new THREE.Vector3().subVectors(lastPt, prevPt).normalize();
-                  stinger.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), stingerDir);
+                  this.tentacleStingerDirScratch.subVectors(lastPt, prevPt).normalize();
+                  stinger.quaternion.setFromUnitVectors(this.titanPosZScratch, this.tentacleStingerDirScratch);
                   stinger.visible = true;
                 }
 
@@ -4771,10 +4823,10 @@ export class ThreeApp {
         Math.abs(e.pos.x - record.lastTiltX) > 14 ||
         Math.abs(e.pos.y - record.lastTiltY) > 14
       ) {
-        const hL = this.simulation.state.terrain.calculateHeight(e.pos.x - 12, e.pos.y);
-        const hR = this.simulation.state.terrain.calculateHeight(e.pos.x + 12, e.pos.y);
-        const hD = this.simulation.state.terrain.calculateHeight(e.pos.x, e.pos.y - 12);
-        const hU = this.simulation.state.terrain.calculateHeight(e.pos.x, e.pos.y + 12);
+        const hL = this.simulation.state.terrain.getFastVisualHeight(e.pos.x - 12, e.pos.y, e.groundZ, 56);
+        const hR = this.simulation.state.terrain.getFastVisualHeight(e.pos.x + 12, e.pos.y, e.groundZ, 56);
+        const hD = this.simulation.state.terrain.getFastVisualHeight(e.pos.x, e.pos.y - 12, e.groundZ, 56);
+        const hU = this.simulation.state.terrain.getFastVisualHeight(e.pos.x, e.pos.y + 12, e.groundZ, 56);
         record.cachedSlopeX = Math.atan2(hU - hD, 24);
         record.cachedSlopeZ = Math.atan2(hR - hL, 24);
         record.lastTiltX = e.pos.x;
@@ -5278,7 +5330,8 @@ export class ThreeApp {
 
   private syncProjectiles(): void {
     const projectiles = this.simulation.state.projectiles;
-    const currentIds = new Set<string>();
+    const currentIds = this.scratchProjIds;
+    currentIds.clear();
 
     for (let i = 0; i < projectiles.length; i++) {
       const proj = projectiles[i];
@@ -5286,13 +5339,41 @@ export class ThreeApp {
 
       let obj = this.projMap.get(proj.id);
       if (!obj) {
+        let poolKey: string;
+        if (proj.type === 'bomb') {
+          poolKey = `proj_twin_${proj.extraLayers || 0}`;
+        } else if (proj.type === 'elemental_ball') {
+          poolKey = 'proj_void_orb';
+        } else if (
+          proj.type === 'pulse' ||
+          proj.type === 'missile' ||
+          (proj.type as string) === 'bolt' ||
+          (proj.type as string) === 'lance' ||
+          !proj.type
+        ) {
+          poolKey = 'proj_blaster';
+        } else {
+          poolKey = `proj_tpl_${proj.type}_${proj.hand || ''}`;
+        }
+
+        const poolArr = this.projectileGroupPool.get(poolKey);
         let grp: THREE.Group;
 
-        if (proj.type === 'bomb') {
+        if (poolArr && poolArr.length > 0) {
+          grp = poolArr.pop()!;
+          grp.visible = true;
+          grp.rotation.set(0, 0, 0);
+          grp.quaternion.identity();
+          if (grp.userData.slashGrp?.userData) {
+            grp.userData.slashGrp.userData.elapsed = 0;
+            grp.userData.slashGrp.userData.trailTimer = 0;
+          }
+        } else if (proj.type === 'bomb') {
           grp = new THREE.Group();
           const slashGrp = this.vfx.createTwinSlashProjectileGroup(proj.extraLayers || 0);
           grp.add(slashGrp);
           grp.userData.slashGrp = slashGrp;
+          grp.userData.poolKey = poolKey;
         } else if (proj.type === 'elemental_ball') {
           grp = new THREE.Group();
           const assets = this.getSharedElementalProjectileAssets();
@@ -5307,27 +5388,26 @@ export class ThreeApp {
           const wakeMesh = new THREE.Mesh(assets.wakeGeo, assets.wakeMat);
           wakeMesh.userData = { isSharedGeo: true, isSharedMat: true };
           grp.add(wakeMesh);
-        } else if (
-          proj.type === 'pulse' ||
-          proj.type === 'missile' ||
-          (proj.type as string) === 'bolt' ||
-          (proj.type as string) === 'lance' ||
-          !proj.type
-        ) {
+          grp.userData.isPooled = true;
+          grp.userData.poolKey = poolKey;
+        } else if (poolKey === 'proj_blaster') {
           grp = new THREE.Group();
           const boltGrp = this.vfx.createGoldenBlasterBoltGroup();
           grp.add(boltGrp);
           grp.userData.isPooled = true;
+          grp.userData.poolKey = poolKey;
         } else {
           const template = this.getOrCreateProjectileTemplate(proj.type, proj.hand);
           if (template.children.length > 0) {
             grp = template.clone();
             grp.userData.isPooled = true;
+            grp.userData.poolKey = poolKey;
           } else {
             grp = new THREE.Group();
             const boltGrp = this.vfx.createGoldenBlasterBoltGroup();
             grp.add(boltGrp);
             grp.userData.isPooled = true;
+            grp.userData.poolKey = poolKey;
           }
         }
 
@@ -5426,6 +5506,20 @@ export class ThreeApp {
           );
         }
         this.scene.remove(obj);
+        this.projMap.delete(id);
+        const poolKey = obj.userData?.poolKey as string | undefined;
+        if (poolKey && (obj as THREE.Group).isGroup) {
+          let poolArr = this.projectileGroupPool.get(poolKey);
+          if (!poolArr) {
+            poolArr = [];
+            this.projectileGroupPool.set(poolKey, poolArr);
+          }
+          if (poolArr.length < 160) {
+            obj.visible = false;
+            poolArr.push(obj as THREE.Group);
+            continue;
+          }
+        }
         if (!obj.userData?.isPooled) {
           obj.traverse((child) => {
             if ((child as THREE.Mesh).isMesh) {
@@ -5448,7 +5542,6 @@ export class ThreeApp {
             }
           });
         }
-        this.projMap.delete(id);
       }
     }
   }
@@ -5456,7 +5549,8 @@ export class ThreeApp {
   private syncDrops(): void {
     // Physical Currency Shards
     const drops = this.simulation.state.currencyDrops;
-    const currentDropIds = new Set<string>();
+    const currentDropIds = this.scratchDropIds;
+    currentDropIds.clear();
 
     for (let i = 0; i < drops.length; i++) {
       const d = drops[i];
@@ -5481,7 +5575,8 @@ export class ThreeApp {
 
     // Passive Item & Augment Capsule Drops (Zero-Lag Pooled Spawning)
     const itemDrops = this.simulation.state.itemDrops;
-    const currentItemIds = new Set<string>();
+    const currentItemIds = this.scratchItemDropIds;
+    currentItemIds.clear();
 
     for (let i = 0; i < itemDrops.length; i++) {
       const it = itemDrops[i];
@@ -6310,7 +6405,8 @@ export class ThreeApp {
 
   private syncRecoveryFields(dt: number): void {
     const fields = this.simulation.state.recoveryFields;
-    const currentIds = new Set<string>();
+    const currentIds = this.scratchRecoveryIds;
+    currentIds.clear();
 
     for (let i = 0; i < fields.length; i++) {
       const field = fields[i];
@@ -6423,7 +6519,8 @@ export class ThreeApp {
 
     // --- 2. Sync Doctor Toxic Contamination Zones (Clean Subtle Translucent Bio-Hazard Ring, Strictly Terrain-Clamped) ---
     const toxicFields = this.simulation.state.toxicFields;
-    const currentToxicIds = new Set<string>();
+    const currentToxicIds = this.scratchToxicIds;
+    currentToxicIds.clear();
     for (let i = 0; i < toxicFields.length; i++) {
       const tf = toxicFields[i];
       currentToxicIds.add(tf.id);
@@ -6519,7 +6616,8 @@ export class ThreeApp {
 
     // --- 3. Sync Doctor Ultimate: Sanctuary Cross (Borderless Terrain-Conformed Medical Energy Field) ---
     const crosses = this.simulation.state.sanctuaryCrosses;
-    const currentCrossIds = new Set<string>();
+    const currentCrossIds = this.scratchCrossIds;
+    currentCrossIds.clear();
     const crossTimeSec = performance.now() * 0.001;
     for (let i = 0; i < crosses.length; i++) {
       const cross = crosses[i];
@@ -6791,7 +6889,8 @@ export class ThreeApp {
     const p = state.player;
 
     // 1. Frost Trails (LMB Augment 2: Cryogenic Scalpel terrain-conformed 3s ice trails)
-    const activeFrostIds = new Set<string>();
+    const activeFrostIds = this.scratchDocFrostIds;
+    activeFrostIds.clear();
     for (let i = 0; i < state.frostTrails.length; i++) {
       const ft = state.frostTrails[i];
       activeFrostIds.add(ft.id);
@@ -6867,9 +6966,10 @@ export class ThreeApp {
     }
 
     // 2. Vital Extraction Tethers (LMB Augment 3: Luminous beams with energy flowing enemy -> Doctor)
-    const activeTetherIds = new Set<string>();
-    const startVec = new THREE.Vector3(p.pos.x, p.z + 50, p.pos.y);
-    const zAxis = new THREE.Vector3(0, 0, 1);
+    const activeTetherIds = this.scratchDocTetherIds;
+    activeTetherIds.clear();
+    const startVec = this.tetherStartScratch.set(p.pos.x, p.z + 50, p.pos.y);
+    const zAxis = this.titanPosZScratch;
     for (let i = 0; i < state.vitalTethers.length; i++) {
       const vt = state.vitalTethers[i];
       activeTetherIds.add(vt.id);
@@ -6915,11 +7015,11 @@ export class ThreeApp {
         this.vitalTetherMap.set(vt.id, rec);
       }
 
-      const endVec = new THREE.Vector3(vt.targetPos.x, vt.targetZ + 12, vt.targetPos.y);
-      const delta = endVec.clone().sub(startVec);
+      const endVec = this.tetherEndScratch.set(vt.targetPos.x, vt.targetZ + 12, vt.targetPos.y);
+      const delta = this.tetherDeltaScratch.subVectors(endVec, startVec);
       const dist = Math.max(1, delta.length());
-      const mid = startVec.clone().add(endVec).multiplyScalar(0.5);
-      const dir = delta.clone().divideScalar(dist);
+      const mid = this.tetherMidScratch.addVectors(startVec, endVec).multiplyScalar(0.5);
+      const dir = this.tetherDirScratch.copy(delta).divideScalar(dist);
 
       const pulseScale = 1.0 + 0.25 * Math.sin(now * 0.015 + i);
       rec.mesh.position.copy(mid);
@@ -6945,7 +7045,8 @@ export class ThreeApp {
     }
 
     // 3. Experimental Drones (RMB Augment 1: 1..7 Detailed Mechanical Medical Combat Drones)
-    const activeDroneIds = new Set<string>();
+    const activeDroneIds = this.scratchDocDroneIds;
+    activeDroneIds.clear();
     const drRes = this.ensureSharedDroneResources();
     for (let i = 0; i < state.doctorDrones.length; i++) {
       const dr = state.doctorDrones[i];
@@ -7088,7 +7189,8 @@ export class ThreeApp {
     }
 
     // 4. Holographic Decoys (RMB Augment 3: Straight-Running 2-Hit Hologram Doctor Projections)
-    const activeDecoyIds = new Set<string>();
+    const activeDecoyIds = this.scratchDocDecoyIds;
+    activeDecoyIds.clear();
     for (let i = 0; i < state.holographicDecoys.length; i++) {
       const dec = state.holographicDecoys[i];
       activeDecoyIds.add(dec.id);
@@ -7177,7 +7279,8 @@ export class ThreeApp {
     }
 
     // 5. Divine Angels (Ult Augment 2: 4 Invincible Non-Humanoid Celestial Seraphic Constructs)
-    const activeAngelIds = new Set<string>();
+    const activeAngelIds = this.scratchDocAngelIds;
+    activeAngelIds.clear();
     const angRes = this.ensureSharedAngelResources();
     for (let i = 0; i < state.divineAngels.length; i++) {
       const ang = state.divineAngels[i];
@@ -7283,7 +7386,8 @@ export class ThreeApp {
     }
 
     // 6. Rain of Crosses (Ult Augment 3: Falling Glowing Sanctuary Crosses with Borderless Ground Marker)
-    const activeFallingIds = new Set<string>();
+    const activeFallingIds = this.scratchDocFallingIds;
+    activeFallingIds.clear();
     for (let i = 0; i < state.fallingCrosses.length; i++) {
       const fc = state.fallingCrosses[i];
       activeFallingIds.add(fc.id);
@@ -7486,8 +7590,38 @@ export class ThreeApp {
 
     for (const mesh of this.projMap.values()) {
       this.scene.remove(mesh);
+      if (!mesh.userData?.isPooled) {
+        mesh.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            if (!m.userData?.isPooled && !m.userData?.isSharedGeo) m.geometry?.dispose();
+            if (!m.userData?.isPooled && !m.userData?.isSharedMat) {
+              if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
+              else m.material?.dispose();
+            }
+          }
+        });
+      }
     }
     this.projMap.clear();
+    for (const poolArr of this.projectileGroupPool.values()) {
+      for (let g = 0; g < poolArr.length; g++) {
+        const obj = poolArr[g];
+        if (!obj.userData?.isPooled) {
+          obj.traverse((child) => {
+            if ((child as THREE.Mesh).isMesh) {
+              const m = child as THREE.Mesh;
+              if (!m.userData?.isPooled && !m.userData?.isSharedGeo) m.geometry?.dispose();
+              if (!m.userData?.isPooled && !m.userData?.isSharedMat) {
+                if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
+                else m.material?.dispose();
+              }
+            }
+          });
+        }
+      }
+    }
+    this.projectileGroupPool.clear();
 
     for (const record of this.recoveryFieldMap.values()) {
       this.disposeObject3D(record.group);

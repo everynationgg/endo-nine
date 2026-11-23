@@ -428,6 +428,21 @@ export class TerrainSystem {
       const sup = this.meshCollider.querySupport(wx, wy, 1e6, 22);
       if (sup.hit) return sup.height;
     }
+    return this.sampleHeightGridOrRaw(wx, wy);
+  }
+
+  /**
+   * Fast visual-only terrain height lookup for decals, shadows, and VFX alignment.
+   * Uses single-bucket mesh lookup when MeshTerrainCollider is active.
+   */
+  public getFastVisualHeight(wx: number, wy: number, refY?: number, stepUpLimit: number = 56): number {
+    if (this.meshCollider) {
+      return this.meshCollider.queryFastGroundHeight(wx, wy, refY, stepUpLimit);
+    }
+    return this.sampleHeightGridOrRaw(wx, wy);
+  }
+
+  private sampleHeightGridOrRaw(wx: number, wy: number): number {
     if (!this.heightGrid || this.heightGrid.length === 0) {
       return this.calculateRawHeight(wx, wy);
     }
