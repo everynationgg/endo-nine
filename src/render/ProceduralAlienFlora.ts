@@ -22,18 +22,22 @@ interface MeshBufferBuilder {
   positions: number[];
   normals: number[];
   colors: number[];
+  extras: number[];
   indices: number[];
 }
 
 function createBuilder(): MeshBufferBuilder {
-  return { positions: [], normals: [], colors: [], indices: [] };
+  return { positions: [], normals: [], colors: [], extras: [], indices: [] };
 }
 
-function finalizeBuilderGeometry(b: MeshBufferBuilder): THREE.BufferGeometry {
+function finalizeBuilderGeometry(b: MeshBufferBuilder, extraAttrName?: string): THREE.BufferGeometry {
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(b.positions, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(b.normals, 3));
   geo.setAttribute('color', new THREE.Float32BufferAttribute(b.colors, 3));
+  if (extraAttrName && b.extras.length === b.positions.length) {
+    geo.setAttribute(extraAttrName, new THREE.Float32BufferAttribute(b.extras, 3));
+  }
   geo.setIndex(b.indices);
   geo.computeVertexNormals();
   geo.computeBoundingSphere();
@@ -55,7 +59,8 @@ function appendOrganicTube(
   colorAt: (t: number, ringAngle: number, ringIdx: number) => THREE.Color,
   warpAmp: number,
   seed: number,
-  capTop: boolean = true
+  capTop: boolean = true,
+  extraAt?: (t: number, ringAngle: number, ringIdx: number) => [number, number, number]
 ): void {
   if (spine.length < 2) return;
   const baseVertex = b.positions.length / 3;
@@ -100,6 +105,10 @@ function appendOrganicTube(
 
       const c = colorAt(t, ang, i);
       b.colors.push(c.r, c.g, c.b);
+      if (extraAt) {
+        const ex = extraAt(t, ang, i);
+        b.extras.push(ex[0], ex[1], ex[2]);
+      }
     }
   }
 
@@ -122,6 +131,10 @@ function appendOrganicTube(
     b.positions.push(tip.x, tip.y, tip.z);
     b.normals.push(tangent.x, tangent.y, tangent.z);
     b.colors.push(tipCol.r, tipCol.g, tipCol.b);
+    if (extraAt) {
+      const ex = extraAt(1, 0, spine.length - 1);
+      b.extras.push(ex[0], ex[1], ex[2]);
+    }
     const lastRing = baseVertex + (spine.length - 1) * stride;
     for (let j = 0; j < radialSegments; j++) {
       b.indices.push(lastRing + j, tipIdx, lastRing + j + 1);
@@ -140,7 +153,8 @@ function appendWarpedBlob(
   seed: number,
   warpAmp: number,
   colorFn: (dir: THREE.Vector3, localYNorm: number, nVal: number) => THREE.Color,
-  squashFlatBottom: boolean = false
+  squashFlatBottom: boolean = false,
+  recordLocalMeta: boolean = false
 ): void {
   const unit = new THREE.IcosahedronGeometry(1, detail);
   const nonIndexed = unit.index ? unit.toNonIndexed() : unit;
@@ -158,9 +172,9 @@ function appendWarpedBlob(
     const hVal = hash3(dir.x * 2.4, dir.y * 2.4, dir.z * 2.4, seed);
     const disp = 1 + warpAmp * (wave1 * 0.48 + wave2 * 0.30 + hVal * 0.22);
 
-    let lx = dir.x * scaleX * disp;
+    const lx = dir.x * scaleX * disp;
     let ly = dir.y * scaleY * disp;
-    let lz = dir.z * scaleZ * disp;
+    const lz = dir.z * scaleZ * disp;
     if (squashFlatBottom && ly < -scaleY * 0.35) {
       ly = -scaleY * 0.35 + (ly + scaleY * 0.35) * 0.22;
     }
@@ -170,6 +184,9 @@ function appendWarpedBlob(
 
     const c = colorFn(dir, dir.y, disp);
     b.colors.push(c.r, c.g, c.b);
+    if (recordLocalMeta) {
+      b.extras.push(dir.x, dir.y, dir.z);
+    }
   }
 
   for (let i = 0; i < posAttr.count; i += 3) {
@@ -216,6 +233,7 @@ function appendCrystalSpire(
       b.positions.push(px, py, pz);
       b.normals.push(u.x * Math.cos(a) + v.x * Math.sin(a), u.y * Math.cos(a) + v.y * Math.sin(a), u.z * Math.cos(a) + v.z * Math.sin(a));
       b.colors.push(col.r, col.g, col.b);
+      b.extras.push(s / sides, t, asym);
     }
   }
 
@@ -239,6 +257,7 @@ function appendCrystalSpire(
   b.positions.push(tip.x, tip.y, tip.z);
   b.normals.push(ax.x, ax.y, ax.z);
   b.colors.push(tipCol.r, tipCol.g, tipCol.b);
+  b.extras.push(0.5, 1.0, 1.0);
   const topRing = baseVtx + (rings - 1) * stride;
   for (let s = 0; s < sides; s++) {
     b.indices.push(topRing + s, tipIdx, topRing + s + 1);
@@ -313,6 +332,353 @@ function appendAlienMushroom(
       capBuilder.indices.push(a + 1, d, d + 1);
     }
   }
+}
+
+/** Creates organic bioluminescent bark material with twisted fibers, grooves, and matching canopy-tinted veins. */
+function makeAlienBarkMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.86,
+    metalness: 0.04
+  });
+  mat.customProgramCacheKey = () => 'stage1_alien_bark_v1';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'void main() {',
+        `attribute vec3 aBarkVeinColor;
+varying vec3 vBarkVeinColor;
+varying vec3 vBarkWorldPos;
+varying vec3 vBarkWorldNormal;
+void main() {`
+      )
+      .replace(
+        '#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+vBarkWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vBarkVeinColor = aBarkVeinColor;
+vBarkWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        'void main() {',
+        `varying vec3 vBarkVeinColor;
+varying vec3 vBarkWorldPos;
+varying vec3 vBarkWorldNormal;
+
+float bkHash3(vec3 p) {
+  p = fract(p * vec3(127.1, 311.7, 74.7));
+  p += dot(p, p.yxz + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float bkNoise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = bkHash3(i);
+  float n100 = bkHash3(i + vec3(1.0, 0.0, 0.0));
+  float n010 = bkHash3(i + vec3(0.0, 1.0, 0.0));
+  float n110 = bkHash3(i + vec3(1.0, 1.0, 0.0));
+  float n001 = bkHash3(i + vec3(0.0, 0.0, 1.0));
+  float n101 = bkHash3(i + vec3(1.0, 0.0, 1.0));
+  float n011 = bkHash3(i + vec3(0.0, 1.0, 1.0));
+  float n111 = bkHash3(i + vec3(1.0, 1.0, 1.0));
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z
+  );
+}
+
+float bkFbm3(vec3 p) {
+  return 0.60 * bkNoise3(p) + 0.40 * bkNoise3(p * 2.17 + vec3(7.3, 4.1, 9.7));
+}
+
+void main() {`
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+  vec3 bkWN = normalize(vBarkWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  float bkWarp = bkFbm3(vBarkWorldPos * 0.036);
+  float bkPhi = atan(bkWN.z, bkWN.x) * 3.0 + vBarkWorldPos.y * 0.068 + bkWarp * 3.4;
+  float bkMicro = bkNoise3(vBarkWorldPos * 0.14);
+  float bkGrain = sin(bkPhi * 3.0 + bkMicro * 2.4) * 0.5 + 0.5;
+  float bkSecondary = sin(bkPhi * 6.5 - vBarkWorldPos.y * 0.04 + bkWarp * 5.0) * 0.5 + 0.5;
+  float bkGroove = smoothstep(0.16, 0.84, bkGrain * 0.72 + bkSecondary * 0.28);
+  float bkCrevice = pow(clamp(1.0 - bkGroove, 0.0, 1.0), 2.2);
+  float bkRidge = pow(bkGroove, 1.6);
+
+  // Thin bioluminescent veins threading organically through twisted bark fissures
+  float bkVeinSin = abs(sin(bkPhi * 1.5 + bkWarp * 2.1));
+  float bkVeinPath = pow(clamp(1.0 - bkVeinSin, 0.0, 1.0), 11.0);
+  float bkVeinBreak = smoothstep(0.36, 0.78, bkNoise3(vBarkWorldPos * 0.022 + vec3(4.1, 1.7, 8.3)));
+  float bkVeinMask = bkVeinPath * bkVeinBreak;
+
+  diffuseColor.rgb = diffuseColor.rgb * mix(0.54, 1.32, bkGroove) - diffuseColor.rgb * (bkCrevice * 0.22);
+  diffuseColor.rgb += vBarkVeinColor * (bkVeinMask * 0.28);`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+  roughnessFactor = mix(0.94, 0.70, bkRidge);`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+  totalEmissiveRadiance += vBarkVeinColor * (bkVeinMask * 0.68 + bkRidge * 0.02);`
+      );
+  };
+  return mat;
+}
+
+/** Creates organic bioluminescent canopy material with radial underside gills, fine veins, and translucent rim glow. */
+function makeAlienCanopyMaterial(): THREE.MeshStandardMaterial {
+  const mat = new THREE.MeshStandardMaterial({
+    vertexColors: true,
+    roughness: 0.44,
+    metalness: 0.04
+  });
+  mat.customProgramCacheKey = () => 'stage1_alien_canopy_v1';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'void main() {',
+        `attribute vec3 aCanopyLocal;
+varying vec3 vCanopyLocal;
+varying vec3 vCanopyWorldPos;
+varying vec3 vCanopyWorldNormal;
+void main() {`
+      )
+      .replace(
+        '#include <beginnormal_vertex>',
+        `#include <beginnormal_vertex>
+vCanopyWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vCanopyLocal = aCanopyLocal;
+vCanopyWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        'void main() {',
+        `varying vec3 vCanopyLocal;
+varying vec3 vCanopyWorldPos;
+varying vec3 vCanopyWorldNormal;
+
+float acHash3(vec3 p) {
+  p = fract(p * vec3(127.1, 311.7, 74.7));
+  p += dot(p, p.yxz + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float acNoise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = acHash3(i);
+  float n100 = acHash3(i + vec3(1.0, 0.0, 0.0));
+  float n010 = acHash3(i + vec3(0.0, 1.0, 0.0));
+  float n110 = acHash3(i + vec3(1.0, 1.0, 0.0));
+  float n001 = acHash3(i + vec3(0.0, 0.0, 1.0));
+  float n101 = acHash3(i + vec3(1.0, 0.0, 1.0));
+  float n011 = acHash3(i + vec3(0.0, 1.0, 1.0));
+  float n111 = acHash3(i + vec3(1.0, 1.0, 1.0));
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z
+  );
+}
+
+float acFbm3(vec3 p) {
+  return 0.58 * acNoise3(p) + 0.42 * acNoise3(p * 2.23 + vec3(5.7, 3.1, 11.4));
+}
+
+void main() {`
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+  vec3 acWN = normalize(vCanopyWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  vec3 acViewDir = normalize(cameraPosition - vCanopyWorldPos);
+  float acNdotV = clamp(abs(dot(acWN, acViewDir)), 0.0, 1.0);
+
+  vec3 acLocalDir = normalize(vCanopyLocal + vec3(0.0001));
+  float acRadial = clamp(length(acLocalDir.xz), 0.0, 1.0);
+  float acAng = atan(acLocalDir.z, acLocalDir.x);
+  float acUnder = smoothstep(0.24, -0.58, acLocalDir.y);
+  float acTop = smoothstep(-0.12, 0.72, acLocalDir.y);
+
+  float acMottle = acFbm3(vCanopyWorldPos * 0.044 + acLocalDir * 1.8);
+  float acDetailN = acNoise3(vCanopyWorldPos * 0.12);
+
+  // Soft radial pattern & luminous underside gills spreading from canopy center
+  float acAngWarp = acAng + (acMottle - 0.5) * 0.42;
+  float acGillPrimary = pow(0.5 + 0.5 * cos(acAngWarp * 16.0), 2.4);
+  float acGillSecondary = pow(0.5 + 0.5 * cos(acAngWarp * 32.0 + acRadial * 3.2), 3.0);
+  float acRadialGill = (acGillPrimary * 0.65 + acGillSecondary * 0.35) * smoothstep(0.08, 0.85, acRadial);
+
+  // Fine bioluminescent vein network breaking up flat canopy facets
+  float acVeinWaveA = sin(acRadial * 11.5 - acMottle * 4.8 + cos(acAng * 3.0) * 1.4);
+  float acVeinWaveB = sin((vCanopyWorldPos.x * 0.075 - vCanopyWorldPos.z * 0.070) + acDetailN * 4.6);
+  float acVeinNet = max(
+    pow(clamp(1.0 - abs(acVeinWaveA), 0.0, 1.0), 5.0),
+    pow(clamp(1.0 - abs(acVeinWaveB), 0.0, 1.0), 5.5) * 0.78
+  );
+
+  // Soft underside core channel glow where trunk/limbs meet canopy
+  float acUnderCore = acUnder * smoothstep(0.76, 0.04, acRadial);
+  // Subtle translucent-looking rim highlight
+  float acRim = pow(clamp(1.0 - acNdotV, 0.0, 1.0), 2.15) * (0.45 + 0.55 * acRadial);
+
+  vec3 acBasePigment = diffuseColor.rgb;
+  vec3 acBrightHue = mix(acBasePigment * 1.42, vec3(dot(acBasePigment, vec3(0.3, 0.6, 0.1))) + acBasePigment, 0.35);
+  diffuseColor.rgb = mix(acBasePigment * 0.76, acBrightHue, clamp(acMottle * 0.55 + acRadial * 0.25 + acVeinNet * 0.35, 0.0, 1.0));
+  diffuseColor.rgb += acBrightHue * (acRadialGill * (0.14 + 0.26 * acUnder) + acRim * 0.22);`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+  roughnessFactor = mix(0.54, 0.26, clamp(acVeinNet * 0.6 + acUnderCore * 0.5, 0.0, 1.0));`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+  #ifdef USE_COLOR
+    vec3 acGlowTint = mix(vColor.rgb, acBrightHue, 0.45);
+    float acGlowStrength = 0.18 + acUnderCore * 0.44 + acRadialGill * (0.12 + 0.24 * acUnder) + acVeinNet * (0.28 + 0.12 * acTop) + acRim * 0.24;
+    totalEmissiveRadiance += acGlowTint * acGlowStrength;
+  #endif`
+      );
+  };
+  return mat;
+}
+
+/** Creates faceted, striated, internally luminous alien crystal material with sharp edge highlights. */
+function makeAlienCrystalMaterial(): THREE.MeshPhysicalMaterial {
+  const mat = new THREE.MeshPhysicalMaterial({
+    vertexColors: true,
+    flatShading: true,
+    roughness: 0.16,
+    metalness: 0.14,
+    clearcoat: 0.88,
+    clearcoatRoughness: 0.09,
+    transparent: true,
+    opacity: 0.92,
+    depthWrite: true,
+    side: THREE.FrontSide
+  });
+  mat.customProgramCacheKey = () => 'stage1_alien_crystal_v1';
+  mat.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'void main() {',
+        `attribute vec3 aCrystalMeta;
+varying vec3 vCrystalMeta;
+varying vec3 vCrystalWorldPos;
+void main() {`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>
+vCrystalMeta = aCrystalMeta;
+vCrystalWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        'void main() {',
+        `varying vec3 vCrystalMeta;
+varying vec3 vCrystalWorldPos;
+
+float crHash3(vec3 p) {
+  p = fract(p * vec3(127.1, 311.7, 74.7));
+  p += dot(p, p.yxz + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float crNoise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = crHash3(i);
+  float n100 = crHash3(i + vec3(1.0, 0.0, 0.0));
+  float n010 = crHash3(i + vec3(0.0, 1.0, 0.0));
+  float n110 = crHash3(i + vec3(1.0, 1.0, 0.0));
+  float n001 = crHash3(i + vec3(0.0, 0.0, 1.0));
+  float n101 = crHash3(i + vec3(1.0, 0.0, 1.0));
+  float n011 = crHash3(i + vec3(0.0, 1.0, 1.0));
+  float n111 = crHash3(i + vec3(1.0, 1.0, 1.0));
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z
+  );
+}
+
+void main() {`
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+  vec3 crDpdx = dFdx(vCrystalWorldPos);
+  vec3 crDpdy = dFdy(vCrystalWorldPos);
+  vec3 crCross = cross(crDpdx, crDpdy);
+  float crCrossLen = length(crCross);
+  vec3 crFaceN = crCrossLen > 1e-5 ? (crCross / crCrossLen) : vec3(0.0, 1.0, 0.0);
+  if (!gl_FrontFacing) crFaceN = -crFaceN;
+
+  vec3 crViewDir = normalize(cameraPosition - vCrystalWorldPos);
+  float crNdotV = clamp(abs(dot(crFaceN, crViewDir)), 0.0, 1.0);
+  float crFacetRand = crHash3(floor(crFaceN * 10.0 + vec3(17.3, 5.9, 31.1)));
+
+  // Faceted color shift & crisp facet shade contrast
+  float crDirShade = clamp(dot(crFaceN, normalize(vec3(0.45, 0.82, -0.35))) * 0.5 + 0.5, 0.0, 1.0);
+  float crFacetGain = mix(0.76, 1.30, crFacetRand * 0.55 + crDirShade * 0.45);
+
+  // Fine crystalline quartz growth striations across prism facets
+  float crStriationWave = sin(vCrystalMeta.y * 52.0 + vCrystalWorldPos.y * 0.48 + sin(vCrystalMeta.x * 18.84955) * 0.9 + crFacetRand * 6.2831);
+  float crStriation = smoothstep(0.62, 0.96, crStriationWave * 0.5 + 0.5);
+
+  // Sharp prism edge highlights from normal discontinuities & rim grazing
+  float crEdgeDeriv = clamp(length(fwidth(crFaceN)) * 1.45, 0.0, 1.0);
+  float crPrismRim = pow(clamp(1.0 - crNdotV, 0.0, 1.0), 2.5);
+  float crEdgeHighlight = clamp(crEdgeDeriv * 0.85 + crPrismRim * 0.55, 0.0, 1.0);
+
+  // Simulated internal caustic reflection & subsurface luminous core
+  float crCaustic = crNoise3(vCrystalWorldPos * 0.095 + crFaceN * 2.4);
+  float crInternalCore = pow(crNdotV, 1.35) * (0.45 + 0.55 * crCaustic) * (1.0 - vCrystalMeta.y * 0.42);
+
+  vec3 crRichTint = diffuseColor.rgb * crFacetGain;
+  vec3 crSpecTint = mix(crRichTint * 1.45 + vec3(0.18, 0.24, 0.30), vec3(0.88, 0.96, 1.0), 0.32);
+  diffuseColor.rgb = mix(crRichTint, crSpecTint, clamp(crEdgeHighlight * 0.58 + crStriation * 0.22 + crInternalCore * 0.35, 0.0, 1.0));`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+  roughnessFactor = mix(0.12, 0.26, crFacetRand);`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+  #ifdef USE_COLOR
+    vec3 crCoreColor = mix(vColor.rgb, vec3(0.82, 0.95, 1.0), 0.22);
+    vec3 crFloorGlow = max(vColor.rgb * 0.36, vec3(0.06, 0.08, 0.12));
+    totalEmissiveRadiance += crFloorGlow + vColor.rgb * (crInternalCore * 0.54 + crFacetRand * 0.16) + crCoreColor * (crEdgeHighlight * 0.34 + crStriation * 0.12);
+  #endif`
+      );
+  };
+  return mat;
 }
 
 /** Creates Material with soft per-vertex bioluminescence emission that requires zero external textures. */
@@ -408,7 +774,9 @@ export function buildStage1ProceduralFlora(
   ];
 
   let treeCount = 0;
-  for (let attempt = 0; attempt < 950 && treeCount < 130; attempt++) {
+  let validTreeCandidateIdx = 0;
+  const maxTreeCount = 117; // 130 reduced by 10%
+  for (let attempt = 0; attempt < 950 && treeCount < maxTreeCount; attempt++) {
     const wx = rng.range(minX, maxX);
     const wy = rng.range(minY, maxY);
     if (!isClearOfKeyLandmarks(wx, wy)) continue;
@@ -416,6 +784,9 @@ export function buildStage1ProceduralFlora(
     if (!sup.hit || sup.category !== 'ground' || sup.isInWater) continue;
     if (sup.sourceTag === 'water:frozen_ice' || sup.sourceTag === 'node:tower_walkway') continue;
     if (sup.normalY < 0.66 || sup.height < 566 || sup.height > 1350) continue;
+
+    validTreeCandidateIdx++;
+    if (validTreeCandidateIdx % 10 === 0) continue;
 
     const pal = treePalettes[Math.floor(rng.next() * treePalettes.length)];
     const treeSeed = seed + attempt * 31 + treeCount * 137;
@@ -426,6 +797,8 @@ export function buildStage1ProceduralFlora(
     const twist = rng.range(-0.9, 0.9);
     const barkBaseCol = new THREE.Color(pal.barkA);
     const barkMidCol = new THREE.Color(pal.barkB);
+    const barkVeinCol = new THREE.Color(pal.light);
+    const barkVeinTuple: [number, number, number] = [barkVeinCol.r, barkVeinCol.g, barkVeinCol.b];
     const frostHighlight = new THREE.Color(0x9bb8d6);
     const leafBaseCol = new THREE.Color(pal.leafBase);
     const leafTipCol = new THREE.Color(pal.leafTip);
@@ -460,7 +833,8 @@ export function buildStage1ProceduralFlora(
       },
       0.22,
       treeSeed,
-      true
+      true,
+      () => barkVeinTuple
     );
 
     // 3..5 Unique flaring buttress roots gripping crater rock/soil
@@ -485,7 +859,8 @@ export function buildStage1ProceduralFlora(
         () => barkBaseCol,
         0.18,
         treeSeed + r * 19,
-        true
+        true,
+        () => barkVeinTuple
       );
     }
 
@@ -519,7 +894,8 @@ export function buildStage1ProceduralFlora(
         (t) => barkMidCol.clone().lerp(leafBaseCol, t * 0.45),
         0.20,
         treeSeed + 100 + b * 23,
-        true
+        true,
+        () => barkVeinTuple
       );
 
       // Unique noise-warped bioluminescent canopy cluster at each limb tip (and sub-lobe)
@@ -537,7 +913,9 @@ export function buildStage1ProceduralFlora(
           const c = leafBaseCol.clone().lerp(leafTipCol, Math.max(0, Math.min(1, 0.35 + dir.y * 0.45 + (nVal - 1) * 0.9)));
           if (dir.y > 0.52) c.lerp(frostHighlight, 0.24);
           return c;
-        }
+        },
+        false,
+        true
       );
 
       if (rng.next() < 0.6) {
@@ -556,7 +934,9 @@ export function buildStage1ProceduralFlora(
           1,
           treeSeed + b * 71 + 7,
           0.36,
-          (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.45 + dir.y * 0.4))
+          (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.45 + dir.y * 0.4)),
+          false,
+          true
         );
       }
     }
@@ -572,7 +952,9 @@ export function buildStage1ProceduralFlora(
       1,
       treeSeed + 503,
       0.32,
-      (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.5 + dir.y * 0.45))
+      (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.5 + dir.y * 0.45)),
+      false,
+      true
     );
 
     addGroundAO(wx, wy, sup.height, baseR * 4.4, 0.52);
@@ -795,10 +1177,11 @@ export function buildStage1ProceduralFlora(
   const addBatch = (
     name: string,
     builder: MeshBufferBuilder,
-    material: THREE.Material
+    material: THREE.Material,
+    extraAttrName?: string
   ): void => {
     if (builder.positions.length === 0 || builder.indices.length === 0) return;
-    const geo = finalizeBuilderGeometry(builder);
+    const geo = finalizeBuilderGeometry(builder, extraAttrName);
     totalVertices += geo.getAttribute('position').count;
     const mesh = new THREE.Mesh(geo, material);
     mesh.name = name;
@@ -809,12 +1192,14 @@ export function buildStage1ProceduralFlora(
   addBatch(
     'procedural_trees_trunks',
     trunkBuilder,
-    new THREE.MeshStandardMaterial({ vertexColors: true, roughness: 0.86, metalness: 0.05 })
+    makeAlienBarkMaterial(),
+    'aBarkVeinColor'
   );
   addBatch(
     'procedural_trees_blossoms',
     blossomBuilder,
-    makeBiolumFloraMaterial(0.32, 0.48, 0.04)
+    makeAlienCanopyMaterial(),
+    'aCanopyLocal'
   );
   addBatch(
     'procedural_boulders',
@@ -824,7 +1209,8 @@ export function buildStage1ProceduralFlora(
   addBatch(
     'procedural_crystals',
     crystalBuilder,
-    makeBiolumFloraMaterial(0.58, 0.22, 0.25)
+    makeAlienCrystalMaterial(),
+    'aCrystalMeta'
   );
   addBatch(
     'procedural_shoreline_mushrooms',

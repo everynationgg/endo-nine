@@ -209,7 +209,7 @@ async function parseAndPrepareTestMap(
         m.needsUpdate = true;
         return m;
       }
-      // Red Boss Crystal Formation (skpAB2B > crystal_cave): translucent ruby-red glowing crystal
+      // Red Boss Crystal Formation (skpAB2B > crystal_cave): ruby-red faceted crystalline formation
       if (isRedCrystal) {
         const key = `red_crystal:${m.uuid}`;
         let phys = roleMatCache.get(key) as THREE.MeshPhysicalMaterial | undefined;
@@ -224,23 +224,25 @@ async function parseAndPrepareTestMap(
             clearcoat: 1.0,
             clearcoatRoughness: 0.08,
             reflectivity: 0.92,
+            flatShading: true,
             transparent: true,
-            opacity: 0.84,
+            opacity: 0.86,
             depthWrite: true,
             depthTest: true,
             side: THREE.DoubleSide
           });
+          applyHeroCrystalDetailShader(phys, 'ruby');
           redCrystalMaterials.push({
             material: phys,
             baseEmissiveIntensity: 0.56,
-            baseOpacity: 0.84
+            baseOpacity: 0.86
           });
           roleMatCache.set(key, phys);
         }
         mesh.renderOrder = 3;
         return phys;
       }
-      // Right-Side Crystal Formation (Untitled#3): distinct cool indigo/amethyst-sapphire crystal
+      // Right-Side Crystal Formation (Untitled#3): amethyst-sapphire faceted crystalline formation
       if (isRightCrystal) {
         const key = `right_crystal:${m.uuid}`;
         let phys = roleMatCache.get(key) as THREE.MeshPhysicalMaterial | undefined;
@@ -249,18 +251,20 @@ async function parseAndPrepareTestMap(
             name: `${m.name || 'crystal'}_amethyst`,
             color: new THREE.Color(0x818cf8),
             emissive: new THREE.Color(0x312e81),
-            emissiveIntensity: 0.38,
+            emissiveIntensity: 0.42,
             metalness: 0.08,
             roughness: 0.12,
             clearcoat: 1.0,
             clearcoatRoughness: 0.08,
             reflectivity: 0.92,
+            flatShading: true,
             transparent: true,
-            opacity: 0.82,
+            opacity: 0.84,
             depthWrite: true,
             depthTest: true,
             side: THREE.DoubleSide
           });
+          applyHeroCrystalDetailShader(phys, 'amethyst');
           roleMatCache.set(key, phys);
         }
         mesh.renderOrder = 3;
@@ -1101,6 +1105,99 @@ function getStage1EnvTexture(url: string): { tex: THREE.Texture; isReal: boolean
  * (thawed soil on low flats, fractured basalt rock on slopes/cliffs, crystalline permafrost/snow on high ridges
  * and shaded slopes, and delicate organic bioluminescent moss veins near riverbanks).
  */
+/**
+ * Adds faceted crystal plane variation, fine striations, crisp prism edge highlights,
+ * and internal luminous core glow to Stage 1 ruby/amethyst crystal formations.
+ */
+function applyHeroCrystalDetailShader(
+  phys: THREE.MeshPhysicalMaterial,
+  variant: 'ruby' | 'amethyst'
+): void {
+  const isRuby = variant === 'ruby';
+  phys.customProgramCacheKey = () => `stage1_hero_crystal_v1_${variant}`;
+  phys.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace(
+        'void main() {',
+        `varying vec3 vHeroCrystalWorldPos;\nvoid main() {`
+      )
+      .replace(
+        '#include <begin_vertex>',
+        `#include <begin_vertex>\nvHeroCrystalWorldPos = (modelMatrix * vec4(transformed, 1.0)).xyz;`
+      );
+
+    shader.fragmentShader = shader.fragmentShader
+      .replace(
+        'void main() {',
+        `varying vec3 vHeroCrystalWorldPos;
+
+float hcHash3(vec3 p) {
+  p = fract(p * vec3(127.1, 311.7, 74.7));
+  p += dot(p, p.yxz + 19.19);
+  return fract((p.x + p.y) * p.z);
+}
+
+float hcNoise3(vec3 p) {
+  vec3 i = floor(p);
+  vec3 f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  float n000 = hcHash3(i);
+  float n100 = hcHash3(i + vec3(1.0, 0.0, 0.0));
+  float n010 = hcHash3(i + vec3(0.0, 1.0, 0.0));
+  float n110 = hcHash3(i + vec3(1.0, 1.0, 0.0));
+  float n001 = hcHash3(i + vec3(0.0, 0.0, 1.0));
+  float n101 = hcHash3(i + vec3(1.0, 0.0, 1.0));
+  float n011 = hcHash3(i + vec3(0.0, 1.0, 1.0));
+  float n111 = hcHash3(i + vec3(1.0, 1.0, 1.0));
+  return mix(
+    mix(mix(n000, n100, f.x), mix(n010, n110, f.x), f.y),
+    mix(mix(n001, n101, f.x), mix(n011, n111, f.x), f.y),
+    f.z
+  );
+}
+
+void main() {`
+      )
+      .replace(
+        '#include <color_fragment>',
+        `#include <color_fragment>
+  vec3 hcDpdx = dFdx(vHeroCrystalWorldPos);
+  vec3 hcDpdy = dFdy(vHeroCrystalWorldPos);
+  vec3 hcCross = cross(hcDpdx, hcDpdy);
+  float hcLen = length(hcCross);
+  vec3 hcFaceN = hcLen > 1e-5 ? (hcCross / hcLen) : vec3(0.0, 1.0, 0.0);
+  if (!gl_FrontFacing) hcFaceN = -hcFaceN;
+
+  vec3 hcViewDir = normalize(cameraPosition - vHeroCrystalWorldPos);
+  float hcNdotV = clamp(abs(dot(hcFaceN, hcViewDir)), 0.0, 1.0);
+  float hcFacetRand = hcHash3(floor(hcFaceN * 10.0 + vec3(11.3, 19.7, 5.1)));
+  float hcFacetShade = mix(0.78, 1.28, hcFacetRand * 0.6 + clamp(dot(hcFaceN, normalize(vec3(0.4, 0.85, -0.35))) * 0.5 + 0.5, 0.0, 1.0) * 0.4);
+
+  // Fine crystalline growth striations & sharp facet edges
+  float hcStrCoord = vHeroCrystalWorldPos.y * 0.14 + dot(vHeroCrystalWorldPos.xz, vec2(0.045, -0.035));
+  float hcStriation = smoothstep(0.64, 0.96, sin(hcStrCoord + hcFacetRand * 6.2831) * 0.5 + 0.5);
+  float hcEdge = clamp(length(fwidth(hcFaceN)) * 1.35 + pow(clamp(1.0 - hcNdotV, 0.0, 1.0), 2.5) * 0.48, 0.0, 1.0);
+  float hcCaustic = hcNoise3(vHeroCrystalWorldPos * 0.032 + hcFaceN * 1.8);
+  float hcInternalCore = pow(hcNdotV, 1.4) * (0.45 + 0.55 * hcCaustic);
+
+  vec3 hcEdgeTint = ${isRuby ? 'vec3(1.0, 0.68, 0.78)' : 'vec3(0.76, 0.84, 1.0)'};
+  diffuseColor.rgb = mix(diffuseColor.rgb * hcFacetShade, hcEdgeTint, clamp(hcEdge * 0.48 + hcStriation * 0.18 + hcInternalCore * 0.28, 0.0, 1.0));`
+      )
+      .replace(
+        '#include <roughnessmap_fragment>',
+        `#include <roughnessmap_fragment>
+  roughnessFactor = mix(0.11, 0.24, hcFacetRand);`
+      )
+      .replace(
+        '#include <emissivemap_fragment>',
+        `#include <emissivemap_fragment>
+  vec3 hcCoreCol = ${isRuby ? 'vec3(0.78, 0.12, 0.28)' : 'vec3(0.32, 0.38, 0.88)'};
+  totalEmissiveRadiance = max(totalEmissiveRadiance, hcCoreCol * 0.26);
+  totalEmissiveRadiance += hcCoreCol * (hcInternalCore * 0.42 + hcFacetRand * 0.12) + hcEdgeTint * (hcEdge * 0.24 + hcStriation * 0.10);`
+      );
+  };
+}
+
 function applyStage1TerrainBlendShader(
   root: THREE.Group,
   opts: { waterLevelY: number; minWorldY: number; maxWorldY: number },

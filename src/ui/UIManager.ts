@@ -4,7 +4,6 @@ import { ITEM_REGISTRY, BUFF_REGISTRY } from '../sim/ItemDefs';
 import { getStageArtifactPolicy } from '../sim/StageProgressionPolicy';
 import { ItemId, BuffId, HeroId, SkillSlot, SkillEnhancementId } from '../sim/types';
 import { getDifficultyTier } from '../sim/DifficultyDefs';
-import { SkillPreviewScene } from '../render/SkillPreviewScene';
 import {
   AbilityPreviewData,
   getHeroBaseSkills,
@@ -163,12 +162,10 @@ export class UIManager {
   private elPortraitImg!: HTMLImageElement;
   private elHeroName!: HTMLElement;
 
-  // Skills & Upgrades Pre-Game Interactive Preview Hub
-  private previewScene: SkillPreviewScene | null = null;
+  // Skills & Upgrades Selection Directory State
   private currentPreviewTab: 'base' | 'upgrades' | 'passives' | 'dossier' = 'base';
   private currentPassiveFilter: string = 'all';
   private currentSelectedAbility: AbilityPreviewData | null = null;
-  private selectedExtraProjectiles: number = 0;
 
   // Settings Modal Controls
   private btnSettingPan!: HTMLElement;
@@ -798,7 +795,7 @@ export class UIManager {
             </div>
           </div>
 
-          <!-- Main 3-Column Content Grid -->
+          <!-- Main 2-Column Content Grid -->
           <div class="selection-main-grid">
             <!-- Col 1: Hero Identity & Stats Summary -->
             <div class="hero-preview-col">
@@ -836,11 +833,11 @@ export class UIManager {
               </div>
             </div>
 
-            <!-- Col 2: Interactive List / Directory of Skills, Upgrades, or Passives -->
+            <!-- Main Col 2: Directory of Base Skills, Upgrades, Passives & Dossier -->
             <div class="hero-directory-col">
               <div class="directory-header">
                 <span id="directory-title" class="directory-title">BASE TACTICAL LOADOUT</span>
-                <span id="directory-subtitle" class="directory-subtitle">Select an ability to inspect live visual simulation</span>
+                <span id="directory-subtitle" class="directory-subtitle">Core combat abilities active upon deployment</span>
               </div>
 
               <!-- Filter Pills for Passive Buffs tab -->
@@ -857,109 +854,12 @@ export class UIManager {
                 <!-- Dynamically populated cards -->
               </div>
             </div>
-
-            <!-- Col 3: Interactive Ability & Upgrade Preview Hub -->
-            <div class="hero-preview-hub-col">
-              <!-- Holographic Simulation Viewport -->
-              <div class="sim-viewport-card">
-                <div class="sim-header">
-                  <div style="display: flex; align-items: center;">
-                    <div class="sim-status-dot"></div>
-                    <span class="sim-header-text">LIVE HOLOGRAPHIC SIMULATION</span>
-                  </div>
-                  <span id="preview-loop-timer" class="sim-timer">0.0s / 3.2s</span>
-                </div>
-                <div class="canvas-wrapper">
-                  <canvas id="skill-preview-canvas" width="440" height="230"></canvas>
-                  <div id="passive-notice-overlay" class="passive-notice-overlay hidden">
-                    <div class="passive-icon-large">🧬</div>
-                    <div class="passive-notice-title">PASSIVE ATTRIBUTE ENHANCEMENT</div>
-                    <div class="passive-notice-sub">Continuously amplifies combat statistics. Always active in combat without manual activation.</div>
-                  </div>
-                </div>
-                <!-- Video Controls & Timeline Bar -->
-                <div class="sim-timeline-bar">
-                  <div id="sim-timeline-progress" class="sim-timeline-fill" style="width: 0%;"></div>
-                </div>
-                <div class="sim-controls-bar">
-                  <div style="display: flex; gap: 8px;">
-                    <button id="btn-preview-play" class="sci-btn control-btn" title="Play / Pause Simulation">⏸ PAUSE</button>
-                    <button id="btn-preview-replay" class="sci-btn control-btn" title="Replay Ability from Start">↺ REPLAY</button>
-                  </div>
-                  <div id="preview-slot-badge" class="preview-slot-badge">PRIMARY [LMB]</div>
-                </div>
-
-                <!-- Interactive +Projectiles Attribute Modifier Bar -->
-                <div class="sim-projectile-modifier-card">
-                  <div class="sim-proj-header">
-                    <span class="sim-proj-title">✨ +PROJECTILES MODIFIER</span>
-                    <span id="sim-proj-status-badge" class="sim-proj-badge">+0 Projectiles (Base)</span>
-                  </div>
-                  <div class="sim-proj-btn-group">
-                    <button class="sim-proj-btn active" data-proj="0">+0</button>
-                    <button class="sim-proj-btn" data-proj="1">+1</button>
-                    <button class="sim-proj-btn" data-proj="2">+2</button>
-                    <button class="sim-proj-btn" data-proj="3">+3</button>
-                    <button class="sim-proj-btn" data-proj="4">+4</button>
-                    <button class="sim-proj-btn" data-proj="5">+5</button>
-                    <button class="sim-proj-btn" data-proj="10">+10</button>
-                  </div>
-                  <div id="sim-proj-impact-desc" class="sim-proj-impact-desc">Base attack output. Toggle stacks to inspect individual skill scaling.</div>
-                </div>
-              </div>
-
-              <!-- Detailed Ability Dossier & Evolution Analysis -->
-              <div class="ability-dossier-card">
-                <div class="dossier-header">
-                  <div style="display: flex; align-items: center; gap: 10px;">
-                    <img id="preview-ability-icon" class="dossier-icon" src="/assets/rally_command.png" alt="Icon" />
-                    <div>
-                      <div id="preview-ability-name" class="dossier-name">Service Pistol</div>
-                      <div id="preview-ability-source" class="dossier-source">Standard Vanguard Issue</div>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Stat Grid -->
-                <div class="dossier-stat-grid">
-                  <div class="stat-pill">
-                    <span class="stat-pill-label">DAMAGE</span>
-                    <span id="preview-stat-damage" class="stat-pill-value">26 kinetic</span>
-                  </div>
-                  <div class="stat-pill">
-                    <span class="stat-pill-label">COOLDOWN</span>
-                    <span id="preview-stat-cooldown" class="stat-pill-value">0.65s</span>
-                  </div>
-                  <div class="stat-pill">
-                    <span class="stat-pill-label">RANGE</span>
-                    <span id="preview-stat-range" class="stat-pill-value">460 units</span>
-                  </div>
-                </div>
-
-                <!-- Evolution / Comparison Callout -->
-                <div id="preview-comparison-box" class="dossier-comparison-box">
-                  <div class="comparison-hdr">★ EVOLUTION ANALYSIS (CHANGES VS BASE)</div>
-                  <div id="preview-comparison-text" class="comparison-text">
-                    Standard tactical issue configuration for Vanguard field operatives.
-                  </div>
-                </div>
-
-                <!-- Full Mechanics Description -->
-                <div class="dossier-desc-box">
-                  <div class="desc-hdr">TACTICAL MECHANICS & DETAILS</div>
-                  <div id="preview-ability-desc" class="desc-text">
-                    Fires standard high-velocity military pistol rounds toward valid targets within line of sight.
-                  </div>
-                </div>
-              </div>
-            </div>
           </div>
 
           <!-- Bottom Action Row -->
           <div class="selection-footer-row">
             <button id="btn-select-back" class="sci-btn" style="padding: 9px 18px; font-size: 13px;">⟵ Back to Main</button>
             <div style="display: flex; gap: 12px; align-items: center;">
-              <span style="font-size: 11px; color: var(--text-muted); letter-spacing: 0.5px;">Previewing does not alter active game progression</span>
               <button id="btn-hero-settings" class="sci-btn" style="padding: 9px 16px; font-size: 13px;">⚙ Settings</button>
               <button id="btn-start-run" class="sci-btn primary-gold" style="padding: 9px 24px; font-size: 13.5px; font-weight: 800;">🚀 Initiate Drop</button>
             </div>
@@ -1691,10 +1591,6 @@ export class UIManager {
     document.getElementById('btn-select-back')?.addEventListener('click', () => {
       this.elHeroSelect.classList.add('hidden');
       this.elMainMenu.classList.remove('hidden');
-      if (this.previewScene) {
-        this.previewScene.destroy();
-        this.previewScene = null;
-      }
     });
 
     document.getElementById('btn-select-commander')?.addEventListener('click', () => {
@@ -1893,10 +1789,6 @@ export class UIManager {
         this.elHeroSelect.classList.add('hidden');
         this.elMainMenu.classList.add('hidden');
         this.elHudContainer.classList.remove('hidden');
-        if (this.previewScene) {
-          this.previewScene.destroy();
-          this.previewScene = null;
-        }
       } catch (err: any) {
         this.showPickupNotification(err?.message || 'Failed to start Stage 1');
       } finally {
@@ -2210,48 +2102,10 @@ export class UIManager {
       }
     }
 
-    if (this.previewScene) {
-      this.previewScene.setHero(this.selectedHeroId);
-    }
     this.renderDirectoryTab(this.currentPreviewTab);
   }
 
   public initPreviewHub(): void {
-    const canvas = document.getElementById('skill-preview-canvas') as HTMLCanvasElement | null;
-    if (canvas && !this.previewScene) {
-      this.previewScene = new SkillPreviewScene(canvas);
-      (window as any).__previewScene = this.previewScene;
-      let lastTimerTextUpdate = 0;
-      this.previewScene.setTimeCallback((progress, cur, dur) => {
-        const fill = document.getElementById('sim-timeline-progress');
-        if (fill) fill.style.transform = `scaleX(${progress})`;
-        const now = performance.now();
-        if (now - lastTimerTextUpdate > 100) {
-          lastTimerTextUpdate = now;
-          const timer = document.getElementById('preview-loop-timer');
-          if (timer) timer.textContent = `${cur.toFixed(1)}s / ${dur.toFixed(1)}s`;
-        }
-      });
-    }
-
-    // Attach Play / Pause and Replay buttons
-    const btnPlay = document.getElementById('btn-preview-play');
-    if (btnPlay) {
-      btnPlay.onclick = () => {
-        if (!this.previewScene) return;
-        const isPlaying = this.previewScene.togglePlay();
-        btnPlay.textContent = isPlaying ? '⏸ PAUSE' : '▶ PLAY';
-      };
-    }
-
-    const btnReplay = document.getElementById('btn-preview-replay');
-    if (btnReplay) {
-      btnReplay.onclick = () => {
-        if (!this.previewScene) return;
-        this.previewScene.replay();
-      };
-    }
-
     // Attach Hero Nav Tab buttons
     const tabBtns = document.querySelectorAll('.hero-nav-tab');
     tabBtns.forEach(btn => {
@@ -2275,126 +2129,7 @@ export class UIManager {
       };
     });
 
-    // Attach +Projectiles Interactive Modifier Selector
-    const projBtns = document.querySelectorAll('.sim-proj-btn');
-    projBtns.forEach(btn => {
-      (btn as HTMLElement).onclick = () => {
-        projBtns.forEach(b => b.classList.remove('active'));
-        btn.classList.add('active');
-        const count = parseInt((btn as HTMLElement).dataset.proj || '0', 10);
-        this.selectedExtraProjectiles = count;
-        if (this.previewScene) {
-          this.previewScene.setExtraProjectiles(count);
-        }
-        this.updateProjectileModifierDescription(count);
-      };
-    });
-
     this.updateHeroSelectUI();
-  }
-
-  private updateProjectileModifierDescription(count: number): void {
-    const badge = document.getElementById('sim-proj-status-badge');
-    const desc = document.getElementById('sim-proj-impact-desc');
-    if (!badge || !desc) return;
-
-    badge.textContent = `+${count} Projectiles${count === 0 ? ' (Base)' : ''}`;
-
-    const abilityId = this.currentSelectedAbility ? this.currentSelectedAbility.id : 'energy_pulse';
-
-    if (count === 0) {
-      desc.textContent = 'Base attack output. Select +1, +2, +3, +4, +5, or +10 stacks to inspect skill-specific scaling.';
-      return;
-    }
-
-    switch (abilityId) {
-      case 'energy_pulse':
-        desc.textContent = `+${count} Projectiles: Fires ${1 + count} golden pistol shots simultaneously with spread (no laser visual).`;
-        break;
-
-      case 'explosive_bomb': // Cross Slash
-        if (count === 1) {
-          desc.textContent = `+1 Projectile: Base Cross Slash (Upper crossing blade layer unlocks at +2).`;
-        } else if (count >= 2 && count < 4) {
-          desc.textContent = `+${count} Projectiles: Adds an upper crossing scissor blade layer (+14 Y elevation) crossing in front.`;
-        } else if (count === 4) {
-          desc.textContent = `+4 Projectiles: Adds both upper (+14 Y) and lower (-14 Y) blade layers (3 total crossing blade pairs).`;
-        } else {
-          desc.textContent = `+${count} Projectiles: 3 crossing blade layers + Pierces ${1 + (count - 4)} extra targets through the collision path!`;
-        }
-        break;
-
-      case 'chill_beam':
-        desc.textContent = `+${count} Projectiles: Fires ${1 + count} consecutive icy-blue bolts with distinct spacing, frost trails, and Chill.`;
-        break;
-
-      case 'piercing_laser': {
-        const branches = Math.min(5, count);
-        desc.textContent = `+${count} Projectiles: 1 primary concentrated laser + ${branches} distinct secondary lightning branches seeking different nearby enemies along the beam with clear line-of-sight.`;
-        break;
-      }
-
-      case 'extended_slash':
-        desc.textContent = `+${count} Projectiles: Unleashes ${1 + count} forward extended sword slashes in rapid combo sequence.`;
-        break;
-
-      case 'scissor_slash':
-        desc.textContent = `+${count} Projectiles: Executes ${1 + count} visible inward scissor blade sweeps before the final central explosion.`;
-        break;
-
-      case 'frost_burst':
-        desc.textContent = `+${count} Projectiles: 360° radial frost nova followed by ${count} delayed ice-spike eruptions erupting from the ground.`;
-        break;
-
-      case 'orbiting_blade': {
-        const totalSwords = Math.min(7, 1 + count);
-        desc.textContent = `+${count} Projectiles: ${totalSwords} persistent electric swords in continuous 360° orbit around Commander (capped strictly at 7). Each sword independently damages the nearest enemy in its path.`;
-        break;
-      }
-
-      // --- DOCTOR +PROJECTILES SCALING ---
-      case 'medical_pulse':
-        desc.textContent = `+${count} Projectiles: Fires ${1 + count} rapid-alternating green laser pistol bolts per shot with tactical spread.`;
-        break;
-
-      case 'toxic_chain':
-        desc.textContent = `+${count} Projectiles: Fires ${1 + count} toxic ricochet bolts; each hit applies 1 poison stack (3 stacks trigger toxic explosion).`;
-        break;
-
-      case 'cryogenic_scalpel':
-        desc.textContent = `+${count} Projectiles: Launches ${1 + count} independent rotating cryogenic scalpels that cut outward, return to Doctor, and leave 3s freezing trails.`;
-        break;
-
-      case 'vital_extraction': {
-        const tetherCount = 3 + count;
-        desc.textContent = `+${count} Projectiles: Sustains ${tetherCount} simultaneous medical HP-draining tethers (Base 3 + ${count}), prioritizing distinct enemies.`;
-        break;
-      }
-
-      case 'toxic_contamination':
-        desc.textContent = `+${count} Projectiles: Throws ${1 + count} bio-chemical toxic grenades creating organic slowing venom splatters across terrain.`;
-        break;
-
-      case 'experimental_drones': {
-        const droneCount = Math.min(7, 1 + count);
-        desc.textContent = `+${count} Projectiles: Deploys ${droneCount} autonomous medical-combat drones (capped strictly at 7) orbiting Doctor and firing green bio-bolts.`;
-        break;
-      }
-
-      case 'toxic_cluster_bomb': {
-        const mainBombs = Math.min(5, 1 + count);
-        desc.textContent = `+${count} Projectiles: Launches ${mainBombs} cluster warheads (capped at 5), each bursting into scattered toxic sub-bombs and venom splatters.`;
-        break;
-      }
-
-      case 'holographic_decoy':
-        desc.textContent = `+${count} Projectiles: Projects a holographic Doctor decoy drawing nearby enemy aggro and exploding upon destruction or expiry.`;
-        break;
-
-      default:
-        desc.textContent = `+${count} Projectiles: Modifies hero projectile attribute stack (+${count}).`;
-        break;
-    }
   }
 
   private renderDirectoryTab(tab: 'base' | 'upgrades' | 'passives' | 'dossier'): void {
@@ -2515,12 +2250,35 @@ export class UIManager {
     card.className = `ability-card ${this.currentSelectedAbility?.id === data.id ? 'active' : ''}`;
     card.dataset.abilityId = data.id;
 
+    const dmg = data.damage ? String(data.damage) : '';
+    const cd = data.cooldown ? String(data.cooldown) : (data.category === 'base' || data.category === 'upgrade' ? '' : 'Passive');
+    const rng = data.range ? String(data.range) : '';
+    const sourceBadge = data.eventSource ? `<span class="ability-card-source">${escapeHtml(data.eventSource)}</span>` : '';
+
+    const statChips: string[] = [];
+    if (dmg) statChips.push(`<span class="ability-stat-chip">DMG: <strong>${escapeHtml(dmg)}</strong></span>`);
+    if (cd) statChips.push(`<span class="ability-stat-chip">CD: <strong>${escapeHtml(cd)}</strong></span>`);
+    if (rng) statChips.push(`<span class="ability-stat-chip">RNG: <strong>${escapeHtml(rng)}</strong></span>`);
+
+    const metaNotes: string[] = [];
+    if (data.baseComparison) {
+      metaNotes.push(`<div class="ability-card-meta-box"><span class="ability-meta-tag">★ EVOLUTION:</span> ${escapeHtml(data.baseComparison)}</div>`);
+    }
+    if (data.stackingBehavior) {
+      metaNotes.push(`<div class="ability-card-meta-box stacking"><span class="ability-meta-tag">STACKING:</span> ${escapeHtml(data.stackingBehavior)}</div>`);
+    }
+
     card.innerHTML = `
-      <img class="ability-card-icon" src="${data.icon}" alt="${data.name}" />
+      <img class="ability-card-icon" src="${escapeHtml(data.icon)}" alt="${escapeHtml(data.name)}" />
       <div class="ability-card-info">
-        <div class="ability-card-slot">${data.slotLabel}</div>
-        <div class="ability-card-name">${data.name}</div>
-        <div class="ability-card-desc">${data.description}</div>
+        <div class="ability-card-top-row">
+          <span class="ability-card-slot">${escapeHtml(data.slotLabel)}</span>
+          ${sourceBadge}
+        </div>
+        <div class="ability-card-name">${escapeHtml(data.name)}</div>
+        ${statChips.length > 0 ? `<div class="ability-card-stats">${statChips.join('')}</div>` : ''}
+        <div class="ability-card-desc">${escapeHtml(data.description)}</div>
+        ${metaNotes.join('')}
       </div>
     `;
 
@@ -2534,60 +2292,6 @@ export class UIManager {
   private selectAbilityPreview(data: AbilityPreviewData): void {
     this.currentSelectedAbility = data;
     this.highlightActiveCard(data.id);
-
-    const nameEl = document.getElementById('preview-ability-name');
-    const sourceEl = document.getElementById('preview-ability-source');
-    const iconEl = document.getElementById('preview-ability-icon') as HTMLImageElement;
-    const slotBadge = document.getElementById('preview-slot-badge');
-    const dmgEl = document.getElementById('preview-stat-damage');
-    const cdEl = document.getElementById('preview-stat-cooldown');
-    const rngEl = document.getElementById('preview-stat-range');
-    const compBox = document.getElementById('preview-comparison-box');
-    const compText = document.getElementById('preview-comparison-text');
-    const descEl = document.getElementById('preview-ability-desc');
-    const noticeOverlay = document.getElementById('passive-notice-overlay');
-
-    if (nameEl) nameEl.textContent = data.name;
-    if (sourceEl) sourceEl.textContent = data.eventSource || (data.category === 'item' ? 'Field Drop' : 'Vanguard Loadout');
-    if (iconEl) iconEl.src = data.icon;
-    if (slotBadge) slotBadge.textContent = data.slotLabel;
-
-    if (dmgEl) dmgEl.textContent = data.damage ? String(data.damage) : 'N/A';
-    if (cdEl) cdEl.textContent = data.cooldown ? String(data.cooldown) : 'Passive';
-    if (rngEl) rngEl.textContent = data.range ? String(data.range) : (data.stackingBehavior ? 'Stackable' : 'Self');
-
-    if (compBox && compText) {
-      if (data.baseComparison) {
-        compBox.classList.remove('hidden');
-        compText.textContent = data.baseComparison;
-      } else {
-        compBox.classList.add('hidden');
-      }
-    }
-
-    if (descEl) {
-      let fullDesc = data.description;
-      if (data.stackingBehavior) {
-        fullDesc += `\n\n[STACKING BEHAVIOR]: ${data.stackingBehavior}`;
-      }
-      descEl.textContent = fullDesc;
-    }
-
-    if (noticeOverlay) {
-      if (!data.hasVisualPreview) {
-        noticeOverlay.classList.remove('hidden');
-      } else {
-        noticeOverlay.classList.add('hidden');
-      }
-    }
-
-    this.currentSelectedAbility = data;
-    this.updateProjectileModifierDescription(this.selectedExtraProjectiles);
-
-    if (this.previewScene) {
-      this.previewScene.setAbility(this.selectedHeroId, data.id);
-      this.previewScene.setExtraProjectiles(this.selectedExtraProjectiles);
-    }
   }
 
   private highlightActiveCard(id: string): void {

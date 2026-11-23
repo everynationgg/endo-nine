@@ -175,7 +175,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     }
     return defaultMapPromise;
   };
-  void ensureDefaultMapLoaded();
+  document.getElementById('btn-enter-selection')?.addEventListener('click', () => {
+    void ensureDefaultMapLoaded();
+  });
 
   uiManager.setCallbacks(
     async () => {

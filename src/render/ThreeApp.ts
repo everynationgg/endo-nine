@@ -2680,9 +2680,12 @@ export class ThreeApp {
     if (!this.isRunning) return;
     requestAnimationFrame(this.boundRenderLoop);
 
-    // Pause background 3D simulation and rendering when Character Selection Hub is open to eliminate menu lag
-    const isHeroSelectOpen = this.isScreenOpen('screen-hero-select');
-    if (isHeroSelectOpen) {
+    // Pause background 3D simulation and rendering while pre-game menus (Main Menu / Hero Select) are open
+    const isPreGameMenuOpen =
+      this.isScreenOpen('screen-main-menu') ||
+      this.isScreenOpen('screen-hero-select') ||
+      (!this.simulation.state.isGameStarted && !this.isEditorMode);
+    if (isPreGameMenuOpen) {
       this.lastTime = now;
       return;
     }

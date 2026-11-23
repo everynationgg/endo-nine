@@ -22,9 +22,9 @@ interface SpawnCard {
 }
 
 const SPAWN_CARDS: readonly SpawnCard[] = [
-  { type: 'crawler', cost: 10, weight: 42, minTier: 0, maxGroup: 4, channels: ['fast', 'slow'] },
-  { type: 'spitter', cost: 13, weight: 28, minTier: 0, maxGroup: 3, channels: ['fast', 'slow'] },
-  { type: 'wasp', cost: 15, weight: 22, minTier: 0, maxGroup: 3, channels: ['fast', 'slow'] },
+  { type: 'crawler', cost: 10, weight: 42, minTier: 0, maxGroup: 5, channels: ['fast', 'slow'] },
+  { type: 'spitter', cost: 13, weight: 28, minTier: 0, maxGroup: 4, channels: ['fast', 'slow'] },
+  { type: 'wasp', cost: 15, weight: 22, minTier: 0, maxGroup: 4, channels: ['fast', 'slow'] },
   {
     type: 'elite',
     cost: 42,
@@ -64,30 +64,30 @@ export interface CombatDirectorDiagnostics {
 
 /**
  * Dual-channel Fast (4.2-7.6s) + Slow (19.5-25.5s) Risk of Rain 2-inspired Combat Director.
- * Enforces 36 soft / 42 hard exploration caps (+50% density tuning) with zero batch overshoot,
+ * Enforces 43 soft / 50 hard exploration caps (+20% enemy quantity tuning) with zero batch overshoot,
  * normalized weighted enemy selection across all difficulty tiers, and clean
  * Boss-mode / post-boss encounter shutdown.
  */
 export class CombatDirector {
-  public readonly softCap = 36;
-  public readonly hardCap = 42;
+  public readonly softCap = 43;
+  public readonly hardCap = 50;
 
   private mode: CombatDirectorMode = 'waiting_unlock';
   private fast: DirectorChannelState = {
     id: 'fast',
-    credits: 21,
+    credits: 25,
     timer: 1.0,
     intervalRange: [4.2, 7.6],
-    maxStoredCredits: 72,
-    baseCreditsPerSec: 3.55
+    maxStoredCredits: 86,
+    baseCreditsPerSec: 4.26
   };
   private slow: DirectorChannelState = {
     id: 'slow',
-    credits: 30,
+    credits: 36,
     timer: 14.5,
     intervalRange: [19.5, 25.5],
-    maxStoredCredits: 180,
-    baseCreditsPerSec: 2.35
+    maxStoredCredits: 216,
+    baseCreditsPerSec: 2.82
   };
   private smoothThreat: number = 1.0;
   private retiredDistantOnBoss: number = 0;
@@ -104,19 +104,19 @@ export class CombatDirector {
     this.mode = 'waiting_unlock';
     this.fast = {
       id: 'fast',
-      credits: 21,
+      credits: 25,
       timer: 1.0,
       intervalRange: [4.2, 7.6],
-      maxStoredCredits: 72,
-      baseCreditsPerSec: 3.55
+      maxStoredCredits: 86,
+      baseCreditsPerSec: 4.26
     };
     this.slow = {
       id: 'slow',
-      credits: 30,
+      credits: 36,
       timer: rng.range(13.0, 18.0),
       intervalRange: [19.5, 25.5],
-      maxStoredCredits: 180,
-      baseCreditsPerSec: 2.35
+      maxStoredCredits: 216,
+      baseCreditsPerSec: 2.82
     };
     this.smoothThreat = 1.0;
     this.retiredDistantOnBoss = 0;
