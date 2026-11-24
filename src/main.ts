@@ -7,7 +7,14 @@ import { DialogueDirector } from './narrative/DialogueDirector';
 import { loadStageConfigFromServer } from './dev/StageConfig';
 
 window.addEventListener('DOMContentLoaded', async () => {
+  const prevApp = (window as any).__app;
+  if (prevApp) {
+    prevApp.isRunning = false;
+  }
   const container = document.getElementById('game-container') || document.body;
+  if (container.id === 'game-container') {
+    container.innerHTML = '';
+  }
   const soundManager = new SoundManager();
   const uiManager = new UIManager();
   const stageConfig = await loadStageConfigFromServer('stage1');
@@ -178,6 +185,9 @@ window.addEventListener('DOMContentLoaded', async () => {
   document.getElementById('btn-enter-selection')?.addEventListener('click', () => {
     void ensureDefaultMapLoaded();
   });
+  window.setTimeout(() => {
+    void ensureDefaultMapLoaded();
+  }, 60);
 
   uiManager.setCallbacks(
     async () => {

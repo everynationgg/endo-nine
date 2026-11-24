@@ -26,6 +26,7 @@ export class SoundManager {
   private voiceGain: GainNode | null = null;
 
   private voiceBuffers: Map<string, AudioBuffer | null> = new Map();
+  private voiceInFlight: Map<string, Promise<void>> = new Map();
   private voiceLoadGen: number = 0;
   private activeVoice: ActiveVoicePlayback | null = null;
   private fadingVoices: ActiveVoicePlayback[] = [];
@@ -54,6 +55,7 @@ export class SoundManager {
       this.voiceLoadGen++;
       this.stopVoicePlayback(0, 0);
       this.voiceBuffers.clear();
+      this.voiceInFlight.clear();
     }
   };
 
@@ -162,9 +164,12 @@ export class SoundManager {
     const decodeCtx = this.ctx || (OfflineCtx ? new OfflineCtx(1, 1, 24000) : this.ensureContext());
     if (!decodeCtx) return;
 
-    await Promise.all(
-      uniqueUrls.map(async (url) => {
-        if (this.voiceBuffers.has(url)) return;
+    const loadSingleUrl = (url: string): Promise<void> => {
+      if (this.voiceBuffers.has(url)) return Promise.resolve();
+      const existing = this.voiceInFlight.get(url);
+      if (existing) return existing;
+
+      const task = (async () => {
         try {
           const res = await fetch(url);
           if (myGen !== this.voiceLoadGen) return;
@@ -189,9 +194,32 @@ export class SoundManager {
           if (myGen === this.voiceLoadGen) {
             this.voiceBuffers.set(url, null);
           }
+        } finally {
+          this.voiceInFlight.delete(url);
         }
-      })
-    );
+      })();
+
+      this.voiceInFlight.set(url, task);
+      return task;
+    };
+
+    // Throttle concurrent fetch + decodeAudioData jobs (2 at a time) so Scene 01 decodes
+    // immediately without 49 concurrent WAV decodes starving UI clicks or first-frame WebGL work.
+    const CONCURRENCY = 2;
+    let nextIdx = 0;
+    const workers: Promise<void>[] = [];
+    for (let w = 0; w < Math.min(CONCURRENCY, uniqueUrls.length); w++) {
+      workers.push(
+        (async () => {
+          while (nextIdx < uniqueUrls.length) {
+            if (myGen !== this.voiceLoadGen) break;
+            const url = uniqueUrls[nextIdx++];
+            await loadSingleUrl(url);
+          }
+        })()
+      );
+    }
+    await Promise.all(workers);
   }
 
   private playVoiceBuffer(

@@ -158,7 +158,7 @@ export function validateSpawnSurface(
     return recordFail(diag, 'terrain');
   }
 
-  const isFlyer = opts.usage === 'enemy' && opts.enemyType === 'wasp';
+  const isFlyer = opts.usage === 'enemy' && (opts.enemyType === 'wasp' || opts.enemyType === 'boss' || opts.enemyType === 'broodling');
   const allowWater = Boolean(opts.allowWater || isFlyer);
   const inWater = Boolean(sample.isInWater || sample.category === 'water' || (!terrain.isCustomTestMap && elev <= 5.5));
   if (inWater && !allowWater) {

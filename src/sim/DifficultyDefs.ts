@@ -168,11 +168,12 @@ export function getDifficultyTier(gameTime: number): {
   progressInTier: number;
   nextTierDef: DifficultyTierDef | null;
 } {
+  const safeTime = Number.isFinite(gameTime) && gameTime >= 0 ? gameTime : 0;
   for (let i = 0; i < DIFFICULTY_TIERS.length; i++) {
     const t = DIFFICULTY_TIERS[i];
-    if (gameTime >= t.minTime && gameTime < t.maxTime) {
+    if (safeTime >= t.minTime && safeTime < t.maxTime) {
       const dur = t.maxTime - t.minTime;
-      const prog = dur > 0 ? (gameTime - t.minTime) / dur : 1.0;
+      const prog = dur > 0 ? (safeTime - t.minTime) / dur : 1.0;
       const nextTierDef = i < DIFFICULTY_TIERS.length - 1 ? DIFFICULTY_TIERS[i + 1] : null;
       return {
         tierDef: t,

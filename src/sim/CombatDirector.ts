@@ -96,7 +96,8 @@ export class CombatDirector {
     spitter: 0,
     wasp: 0,
     elite: 0,
-    boss: 0
+    boss: 0,
+    broodling: 0
   };
   private placementDiagnostics: SpawnPlacementDiagnostics = createSpawnPlacementDiagnostics();
 
@@ -125,7 +126,8 @@ export class CombatDirector {
       spitter: 0,
       wasp: 0,
       elite: 0,
-      boss: 0
+      boss: 0,
+      broodling: 0
     };
     this.placementDiagnostics = createSpawnPlacementDiagnostics();
   }
@@ -172,7 +174,7 @@ export class CombatDirector {
     let activeScripted = 0;
     for (let i = 0; i < state.enemies.length; i++) {
       const e = state.enemies[i];
-      if (e.health <= 0 || e.isBoss || e.isStage1Titan) continue;
+      if (e.health <= 0 || e.isBoss || e.isStage1Titan || e.isSummonedOffspring) continue;
       if (e.isScriptedEventEnemy) activeScripted++;
       else activeExploration++;
     }

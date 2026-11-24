@@ -536,10 +536,11 @@ export class GameplayDebugger {
           <div class="dev-ed-prop-row">
             <label>Enemy Type</label>
             <select id="dbg-enemy-type" class="dev-ed-input" style="max-width:160px;">
-              <option value="crawler">Skittering Crawler</option>
-              <option value="spitter">Toxic Spitter</option>
-              <option value="wasp">Void Wasp</option>
-              <option value="elite">Void Goliath (Elite)</option>
+              <option value="crawler">Oreblade (Melee)</option>
+              <option value="wasp">Driftworm (Ranged)</option>
+              <option value="spitter">Slythven (Toxic)</option>
+              <option value="elite">Magmir (Heavy Bruiser)</option>
+              <option value="boss">Brood Queen (Flying)</option>
             </select>
           </div>
           <div class="dev-dbg-btn-grid">

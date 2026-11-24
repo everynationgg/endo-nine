@@ -15,7 +15,10 @@ public/stages/.backups/
 # Scratch & debug captures
 scratch/
 exports/*.png
+exports/originals_backup/
 exports/game_ready/*_Backup.glb
+__pycache__/
+*.pyc
 
 # OS / editor artifacts
 .DS_Store

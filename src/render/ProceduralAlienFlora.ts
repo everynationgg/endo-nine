@@ -213,22 +213,20 @@ function appendUmbrellaCanopy(
           yLocal = crown + brimDip + ribBump;
         }
 
-        const worldPos = center
-          .clone()
-          .addScaledVector(right, rx)
-          .addScaledVector(fwd, rz)
-          .addScaledVector(up, yLocal);
+        const wx = center.x + right.x * rx + fwd.x * rz + up.x * yLocal;
+        const wy = center.y + right.y * rx + fwd.y * rz + up.y * yLocal;
+        const wz = center.z + right.z * rx + fwd.z * rz + up.z * yLocal;
 
-        b.positions.push(worldPos.x, worldPos.y, worldPos.z);
+        b.positions.push(wx, wy, wz);
 
         const nyApprox = isUnderside ? -0.78 : Math.max(0.25, 1 - u * 0.65);
-        const nVec = right
-          .clone()
-          .multiplyScalar(Math.cos(ang) * u * 0.55)
-          .addScaledVector(fwd, Math.sin(ang) * u * 0.55)
-          .addScaledVector(up, nyApprox)
-          .normalize();
-        b.normals.push(nVec.x, nVec.y, nVec.z);
+        const rFactor = Math.cos(ang) * u * 0.55;
+        const fFactor = Math.sin(ang) * u * 0.55;
+        let nx = right.x * rFactor + fwd.x * fFactor + up.x * nyApprox;
+        let ny = right.y * rFactor + fwd.y * fFactor + up.y * nyApprox;
+        let nz = right.z * rFactor + fwd.z * fFactor + up.z * nyApprox;
+        const nInv = 1 / (Math.sqrt(nx * nx + ny * ny + nz * nz) || 1);
+        b.normals.push(nx * nInv, ny * nInv, nz * nInv);
 
         if (isUnderside) {
           colScratch
@@ -282,6 +280,31 @@ function appendUmbrellaCanopy(
   buildShell(true);
 }
 
+const cachedUnitIcoDirs = new Map<number, Float32Array>();
+
+function getUnitIcoDirs(detail: number): Float32Array {
+  let dirs = cachedUnitIcoDirs.get(detail);
+  if (!dirs) {
+    const unit = new THREE.IcosahedronGeometry(1, detail);
+    const nonIndexed = unit.index ? unit.toNonIndexed() : unit;
+    const posAttr = nonIndexed.getAttribute('position') as THREE.BufferAttribute;
+    dirs = new Float32Array(posAttr.count * 3);
+    for (let i = 0; i < posAttr.count; i++) {
+      const x = posAttr.getX(i);
+      const y = posAttr.getY(i);
+      const z = posAttr.getZ(i);
+      const inv = 1 / (Math.sqrt(x * x + y * y + z * z) || 1);
+      dirs[i * 3] = x * inv;
+      dirs[i * 3 + 1] = y * inv;
+      dirs[i * 3 + 2] = z * inv;
+    }
+    unit.dispose();
+    if (nonIndexed !== unit) nonIndexed.dispose();
+    cachedUnitIcoDirs.set(detail, dirs);
+  }
+  return dirs;
+}
+
 /** Appends a noise-sculpted asymmetric organic blob (for boulders and mineral mounds). */
 function appendWarpedBlob(
   b: MeshBufferBuilder,
@@ -296,44 +319,44 @@ function appendWarpedBlob(
   squashFlatBottom: boolean = false,
   recordLocalMeta: boolean = false
 ): void {
-  const unit = new THREE.IcosahedronGeometry(1, detail);
-  const nonIndexed = unit.index ? unit.toNonIndexed() : unit;
-  const posAttr = nonIndexed.getAttribute('position') as THREE.BufferAttribute;
+  const dirs = getUnitIcoDirs(detail);
+  const vertCount = dirs.length / 3;
   const phaseA = (seed % 97) * 0.41;
   const phaseB = (seed % 53) * 0.73;
 
   const baseIdx = b.positions.length / 3;
   const dir = new THREE.Vector3();
-  for (let i = 0; i < posAttr.count; i++) {
-    dir.set(posAttr.getX(i), posAttr.getY(i), posAttr.getZ(i)).normalize();
+  for (let i = 0; i < vertCount; i++) {
+    const dx = dirs[i * 3];
+    const dy = dirs[i * 3 + 1];
+    const dz = dirs[i * 3 + 2];
+    dir.set(dx, dy, dz);
 
-    const wave1 = Math.sin(dir.x * 3.1 + phaseA) * Math.cos(dir.z * 2.7 + phaseB);
-    const wave2 = Math.sin(dir.y * 4.3 + phaseB) * Math.cos(dir.x * 3.9 - phaseA);
-    const hVal = hash3(dir.x * 2.4, dir.y * 2.4, dir.z * 2.4, seed);
+    const wave1 = Math.sin(dx * 3.1 + phaseA) * Math.cos(dz * 2.7 + phaseB);
+    const wave2 = Math.sin(dy * 4.3 + phaseB) * Math.cos(dx * 3.9 - phaseA);
+    const hVal = hash3(dx * 2.4, dy * 2.4, dz * 2.4, seed);
     const disp = 1 + warpAmp * (wave1 * 0.48 + wave2 * 0.30 + hVal * 0.22);
 
-    const lx = dir.x * scaleX * disp;
-    let ly = dir.y * scaleY * disp;
-    const lz = dir.z * scaleZ * disp;
+    const lx = dx * scaleX * disp;
+    let ly = dy * scaleY * disp;
+    const lz = dz * scaleZ * disp;
     if (squashFlatBottom && ly < -scaleY * 0.35) {
       ly = -scaleY * 0.35 + (ly + scaleY * 0.35) * 0.22;
     }
 
     b.positions.push(center.x + lx, center.y + ly, center.z + lz);
-    b.normals.push(dir.x, dir.y, dir.z);
+    b.normals.push(dx, dy, dz);
 
-    const c = colorFn(dir, dir.y, disp);
+    const c = colorFn(dir, dy, disp);
     b.colors.push(c.r, c.g, c.b);
     if (recordLocalMeta) {
-      b.extras.push(dir.x, dir.y, dir.z);
+      b.extras.push(dx, dy, dz);
     }
   }
 
-  for (let i = 0; i < posAttr.count; i += 3) {
+  for (let i = 0; i < vertCount; i += 3) {
     b.indices.push(baseIdx + i, baseIdx + i + 1, baseIdx + i + 2);
   }
-  unit.dispose();
-  if (nonIndexed !== unit) nonIndexed.dispose();
 }
 
 /** Appends a single tapered multi-faceted alien crystal spire oriented along a tilted axis. */
@@ -481,7 +504,7 @@ function makeAlienBarkMaterial(): THREE.MeshStandardMaterial {
     roughness: 0.86,
     metalness: 0.04
   });
-  mat.customProgramCacheKey = () => 'stage1_alien_bark_v1';
+  mat.customProgramCacheKey = () => 'stage1_alien_bark_v2';
   mat.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -495,7 +518,9 @@ void main() {`
       .replace(
         '#include <beginnormal_vertex>',
         `#include <beginnormal_vertex>
-vBarkWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+vec3 bkWNRaw = mat3(modelMatrix) * objectNormal;
+float bkWNLen = length(bkWNRaw);
+vBarkWorldNormal = bkWNLen > 1e-5 ? (bkWNRaw / bkWNLen) : vec3(0.0, 1.0, 0.0);`
       )
       .replace(
         '#include <begin_vertex>',
@@ -545,19 +570,21 @@ void main() {`
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-  vec3 bkWN = normalize(vBarkWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  float bkVWNLen = length(vBarkWorldNormal);
+  vec3 bkWN = (bkVWNLen > 1e-5 ? (vBarkWorldNormal / bkVWNLen) : vec3(0.0, 1.0, 0.0)) * (gl_FrontFacing ? 1.0 : -1.0);
   float bkWarp = bkFbm3(vBarkWorldPos * 0.036);
-  float bkPhi = atan(bkWN.z, bkWN.x) * 3.0 + vBarkWorldPos.y * 0.068 + bkWarp * 3.4;
+  float bkPhiAng = (abs(bkWN.x) + abs(bkWN.z) > 1e-5) ? atan(bkWN.z, bkWN.x) : 0.0;
+  float bkPhi = bkPhiAng * 3.0 + vBarkWorldPos.y * 0.068 + bkWarp * 3.4;
   float bkMicro = bkNoise3(vBarkWorldPos * 0.14);
   float bkGrain = sin(bkPhi * 3.0 + bkMicro * 2.4) * 0.5 + 0.5;
   float bkSecondary = sin(bkPhi * 6.5 - vBarkWorldPos.y * 0.04 + bkWarp * 5.0) * 0.5 + 0.5;
   float bkGroove = smoothstep(0.16, 0.84, bkGrain * 0.72 + bkSecondary * 0.28);
-  float bkCrevice = pow(clamp(1.0 - bkGroove, 0.0, 1.0), 2.2);
-  float bkRidge = pow(bkGroove, 1.6);
+  float bkCrevice = pow(clamp(1.0 - bkGroove, 1e-4, 1.0), 2.2);
+  float bkRidge = pow(clamp(bkGroove, 1e-4, 1.0), 1.6);
 
   // Thin bioluminescent veins threading organically through twisted bark fissures
   float bkVeinSin = abs(sin(bkPhi * 1.5 + bkWarp * 2.1));
-  float bkVeinPath = pow(clamp(1.0 - bkVeinSin, 0.0, 1.0), 11.0);
+  float bkVeinPath = pow(clamp(1.0 - bkVeinSin, 1e-4, 1.0), 11.0);
   float bkVeinBreak = smoothstep(0.36, 0.78, bkNoise3(vBarkWorldPos * 0.022 + vec3(4.1, 1.7, 8.3)));
   float bkVeinMask = bkVeinPath * bkVeinBreak;
 
@@ -585,7 +612,7 @@ function makeAlienCanopyMaterial(): THREE.MeshStandardMaterial {
     roughness: 0.44,
     metalness: 0.04
   });
-  mat.customProgramCacheKey = () => 'stage1_alien_canopy_v1';
+  mat.customProgramCacheKey = () => 'stage1_alien_canopy_v2';
   mat.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -599,7 +626,9 @@ void main() {`
       .replace(
         '#include <beginnormal_vertex>',
         `#include <beginnormal_vertex>
-vCanopyWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+vec3 acWNRaw = mat3(modelMatrix) * objectNormal;
+float acWNLen = length(acWNRaw);
+vCanopyWorldNormal = acWNLen > 1e-5 ? (acWNRaw / acWNLen) : vec3(0.0, 1.0, 0.0);`
       )
       .replace(
         '#include <begin_vertex>',
@@ -649,13 +678,18 @@ void main() {`
       .replace(
         '#include <color_fragment>',
         `#include <color_fragment>
-  vec3 acWN = normalize(vCanopyWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
-  vec3 acViewDir = normalize(cameraPosition - vCanopyWorldPos);
+  float acVWNLen = length(vCanopyWorldNormal);
+  vec3 acWN = (acVWNLen > 1e-5 ? (vCanopyWorldNormal / acVWNLen) : vec3(0.0, 1.0, 0.0)) * (gl_FrontFacing ? 1.0 : -1.0);
+  vec3 acViewRaw = cameraPosition - vCanopyWorldPos;
+  float acViewLen = length(acViewRaw);
+  vec3 acViewDir = acViewLen > 1e-5 ? (acViewRaw / acViewLen) : vec3(0.0, 0.0, 1.0);
   float acNdotV = clamp(abs(dot(acWN, acViewDir)), 0.0, 1.0);
 
-  vec3 acLocalDir = normalize(vCanopyLocal + vec3(0.0001));
+  vec3 acLocalOffset = vCanopyLocal + vec3(0.0001);
+  float acLocalLen = length(acLocalOffset);
+  vec3 acLocalDir = acLocalLen > 1e-5 ? (acLocalOffset / acLocalLen) : vec3(0.0, 1.0, 0.0);
   float acRadial = clamp(length(acLocalDir.xz), 0.0, 1.0);
-  float acAng = atan(acLocalDir.z, acLocalDir.x);
+  float acAng = (abs(acLocalDir.x) + abs(acLocalDir.z) > 1e-5) ? atan(acLocalDir.z, acLocalDir.x) : 0.0;
   float acUnder = smoothstep(0.24, -0.58, acLocalDir.y);
   float acTop = smoothstep(-0.12, 0.72, acLocalDir.y);
 
@@ -664,22 +698,22 @@ void main() {`
 
   // Soft radial pattern & luminous underside gills spreading from canopy center
   float acAngWarp = acAng + (acMottle - 0.5) * 0.42;
-  float acGillPrimary = pow(0.5 + 0.5 * cos(acAngWarp * 16.0), 2.4);
-  float acGillSecondary = pow(0.5 + 0.5 * cos(acAngWarp * 32.0 + acRadial * 3.2), 3.0);
+  float acGillPrimary = pow(clamp(0.5 + 0.5 * cos(acAngWarp * 16.0), 1e-4, 1.0), 2.4);
+  float acGillSecondary = pow(clamp(0.5 + 0.5 * cos(acAngWarp * 32.0 + acRadial * 3.2), 1e-4, 1.0), 3.0);
   float acRadialGill = (acGillPrimary * 0.65 + acGillSecondary * 0.35) * smoothstep(0.08, 0.85, acRadial);
 
   // Fine bioluminescent vein network breaking up flat canopy facets
   float acVeinWaveA = sin(acRadial * 11.5 - acMottle * 4.8 + cos(acAng * 3.0) * 1.4);
   float acVeinWaveB = sin((vCanopyWorldPos.x * 0.075 - vCanopyWorldPos.z * 0.070) + acDetailN * 4.6);
   float acVeinNet = max(
-    pow(clamp(1.0 - abs(acVeinWaveA), 0.0, 1.0), 5.0),
-    pow(clamp(1.0 - abs(acVeinWaveB), 0.0, 1.0), 5.5) * 0.78
+    pow(clamp(1.0 - abs(acVeinWaveA), 1e-4, 1.0), 5.0),
+    pow(clamp(1.0 - abs(acVeinWaveB), 1e-4, 1.0), 5.5) * 0.78
   );
 
   // Soft underside core channel glow where trunk/limbs meet canopy
   float acUnderCore = acUnder * smoothstep(0.76, 0.04, acRadial);
   // Subtle translucent-looking rim highlight
-  float acRim = pow(clamp(1.0 - acNdotV, 0.0, 1.0), 2.15) * (0.45 + 0.55 * acRadial);
+  float acRim = pow(clamp(1.0 - acNdotV, 1e-4, 1.0), 2.15) * (0.45 + 0.55 * acRadial);
 
   vec3 acBasePigment = diffuseColor.rgb;
   vec3 acBrightHue = mix(acBasePigment * 1.42, vec3(dot(acBasePigment, vec3(0.3, 0.6, 0.1))) + acBasePigment, 0.35);
@@ -718,7 +752,7 @@ function makeAlienCrystalMaterial(): THREE.MeshPhysicalMaterial {
     depthWrite: true,
     side: THREE.FrontSide
   });
-  mat.customProgramCacheKey = () => 'stage1_alien_crystal_v1';
+  mat.customProgramCacheKey = () => 'stage1_alien_crystal_v2';
   mat.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -778,7 +812,9 @@ void main() {`
   vec3 crFaceN = crCrossLen > 1e-5 ? (crCross / crCrossLen) : vec3(0.0, 1.0, 0.0);
   if (!gl_FrontFacing) crFaceN = -crFaceN;
 
-  vec3 crViewDir = normalize(cameraPosition - vCrystalWorldPos);
+  vec3 crViewRaw = cameraPosition - vCrystalWorldPos;
+  float crViewLen = length(crViewRaw);
+  vec3 crViewDir = crViewLen > 1e-5 ? (crViewRaw / crViewLen) : vec3(0.0, 0.0, 1.0);
   float crNdotV = clamp(abs(dot(crFaceN, crViewDir)), 0.0, 1.0);
   float crFacetRand = crHash3(floor(crFaceN * 10.0 + vec3(17.3, 5.9, 31.1)));
 
@@ -792,12 +828,12 @@ void main() {`
 
   // Sharp prism edge highlights from normal discontinuities & rim grazing
   float crEdgeDeriv = clamp(length(fwidth(crFaceN)) * 1.45, 0.0, 1.0);
-  float crPrismRim = pow(clamp(1.0 - crNdotV, 0.0, 1.0), 2.5);
+  float crPrismRim = pow(clamp(1.0 - crNdotV, 1e-4, 1.0), 2.5);
   float crEdgeHighlight = clamp(crEdgeDeriv * 0.85 + crPrismRim * 0.55, 0.0, 1.0);
 
   // Simulated internal caustic reflection & subsurface luminous core
   float crCaustic = crNoise3(vCrystalWorldPos * 0.095 + crFaceN * 2.4);
-  float crInternalCore = pow(crNdotV, 1.35) * (0.45 + 0.55 * crCaustic) * (1.0 - vCrystalMeta.y * 0.42);
+  float crInternalCore = pow(clamp(crNdotV, 1e-4, 1.0), 1.35) * (0.45 + 0.55 * crCaustic) * (1.0 - vCrystalMeta.y * 0.42);
 
   vec3 crRichTint = diffuseColor.rgb * crFacetGain;
   vec3 crSpecTint = mix(crRichTint * 1.45 + vec3(0.18, 0.24, 0.30), vec3(0.88, 0.96, 1.0), 0.32);
@@ -894,8 +930,8 @@ export function buildStage1ProceduralFlora(
       const a = (s / segs) * Math.PI * 2;
       const sx = wx + Math.cos(a) * radius;
       const sz = wy + Math.sin(a) * radius;
-      const edgeSup = col.querySupport(sx, sz, wz + 40, 40);
-      const ey = edgeSup.hit ? edgeSup.height + 0.8 : wz + 0.8;
+      const fastH = col.queryFastGroundHeight(sx, sz, wz, 40);
+      const ey = (fastH > 0 ? fastH : wz) + 0.8;
       shadowBuilder.positions.push(sx, ey, sz);
       shadowBuilder.normals.push(0, 1, 0);
       shadowBuilder.colors.push(0, 0, 0);

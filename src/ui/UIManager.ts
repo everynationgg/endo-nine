@@ -230,6 +230,7 @@ export class UIManager {
   private elMinimapCanvas: HTMLCanvasElement | null = null;
   private elMinimapNorth: HTMLElement | null = null;
   private terrainMapCanvas: HTMLCanvasElement | null = null;
+  private terrainMapCacheKey: string = '';
   private terrainMapWorldW: number = 0;
   private terrainMapWorldH: number = 0;
   private terrainMapMargin: number = 0;
@@ -314,6 +315,20 @@ export class UIManager {
     this.cacheElements();
     this.attachEventListeners();
     this.syncSettingsUI();
+    this.preloadHeroMenuAssets();
+  }
+
+  private preloadHeroMenuAssets(): void {
+    if (typeof Image === 'undefined') return;
+    const urls = [
+      '/assets/commander/commander_portrait.png?v=2.0',
+      '/assets/doctor/doctor_portrait.png'
+    ];
+    for (const url of urls) {
+      const img = new Image();
+      img.decoding = 'async';
+      img.src = url;
+    }
   }
 
   private loadSettings(): void {
@@ -723,7 +738,6 @@ export class UIManager {
     this.simulation = sim;
     this.lastRenderedBuffKey = '';
     this.lastBuffsHtml = '';
-    this.terrainMapCanvas = null;
     this.elGameOverModal.classList.add('hidden');
     this.elStageClearModal.classList.add('hidden');
     this.elBuffChoiceModal.classList.add('hidden');
@@ -732,7 +746,14 @@ export class UIManager {
     this.elCodexModal?.classList.add('hidden');
     if (this.elBossBarWrap) this.elBossBarWrap.classList.add('hidden');
 
-    this.buildMinimapTerrainCache(sim.state);
+    const state = sim.state;
+    const nextCacheKey = `${state.worldWidth}x${state.worldHeight}:${state.terrain.isCustomTestMap ? 'custom' : state.terrain.seed}:${state.terrain.meshCollider ? state.terrain.meshCollider.allTriangles.length : 0}`;
+    if (this.terrainMapCacheKey !== nextCacheKey) {
+      this.terrainMapCanvas = null;
+    }
+    if (state.isGameStarted && !this.terrainMapCanvas) {
+      this.buildMinimapTerrainCache(state);
+    }
 
     // Apply saved settings
     sim.state.player.autoCastPrimary = this.settings.autoCastPrimary;
@@ -2043,10 +2064,10 @@ export class UIManager {
 
   public selectHero(heroId: HeroId): void {
     this.selectedHeroId = heroId;
+    this.updateHeroSelectUI();
     if (this.onHeroSelectedCallback) {
       this.onHeroSelectedCallback(heroId);
     }
-    this.updateHeroSelectUI();
   }
 
   public updateHeroSelectUI(): void {
@@ -2889,7 +2910,7 @@ export class UIManager {
         const clampedX = Math.max(0, Math.min(ww, wx));
         const clampedY = Math.max(0, Math.min(wh, wy));
         const outsideDist = Math.hypot(wx - clampedX, wy - clampedY);
-        const h = state.terrain.getElevation(clampedX, clampedY).height;
+        const h = state.terrain.sampleHeightGrid(clampedX, clampedY);
         const idx = (py * size + px) * 4;
 
         // Topographical slate-violet contour palette fading smoothly past crater rim (eliminates hard black edge)
@@ -2904,6 +2925,7 @@ export class UIManager {
     }
     ctx.putImageData(img, 0, 0);
     this.terrainMapCanvas = canvas;
+    this.terrainMapCacheKey = `${ww}x${wh}:${state.terrain.isCustomTestMap ? 'custom' : state.terrain.seed}:${state.terrain.meshCollider ? state.terrain.meshCollider.allTriangles.length : 0}`;
     this.terrainMapWorldW = ww;
     this.terrainMapWorldH = wh;
     this.terrainMapMargin = margin;

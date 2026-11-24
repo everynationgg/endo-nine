@@ -442,6 +442,10 @@ export class TerrainSystem {
     return this.sampleHeightGridOrRaw(wx, wy);
   }
 
+  public sampleHeightGrid(wx: number, wy: number): number {
+    return this.sampleHeightGridOrRaw(wx, wy);
+  }
+
   private sampleHeightGridOrRaw(wx: number, wy: number): number {
     if (!this.heightGrid || this.heightGrid.length === 0) {
       return this.calculateRawHeight(wx, wy);

@@ -30,11 +30,11 @@ export interface BossSpriteEntry {
 export const STAGE1_BOSS_CONFIG = {
   name: 'STAGE 1 BOSS',
   title: 'STAGE 1 BOSS',
-  // 2x entity scaling matching Stage 1 crater & hero scale
-  baseHeight: 876,
-  baseWidth: 876,
-  footOffset: 62,
-  radius: 142,
+  // Scaled 2x for massive Stage 1 Boss presence & crater scale
+  baseHeight: 1752,
+  baseWidth: 1752,
+  footOffset: 124,
+  radius: 284,
   speed: 112,
   touchDamage: 40,
   maxHealth: 8000, // Stage 1 Boss HP
@@ -50,7 +50,7 @@ export const STAGE1_BOSS_CONFIG = {
     slashPhaseDuration: 0.68,
     slash1Time: 0.14,
     slash2Time: 0.40,
-    slashRange: 260,
+    slashRange: 520,
     slashArcRad: Math.PI * 0.75,
     slashDamage: 36
   },
@@ -64,9 +64,9 @@ export const STAGE1_BOSS_CONFIG = {
     sweepArcRad: Math.PI * 0.85,
     shardSpeed: 540,
     shardDamage: 24,
-    shardRadius: 18,
-    maxDistance: 1250,
-    meleeSweepRadius: 235,
+    shardRadius: 36,
+    maxDistance: 1850,
+    meleeSweepRadius: 470,
     meleeSweepDamage: 34
   },
 
@@ -75,31 +75,31 @@ export const STAGE1_BOSS_CONFIG = {
     chargeDuration: 0.72,
     activeDuration: 2.96,
     recoveryDuration: 0.32,
-    thickness: 80,
-    range: 950,
+    thickness: 160,
+    range: 1650,
     trackingTurnRateRadPerSec: 2.15,
     dps: 22
   },
 
-  // SKILL 4 — Rift Stalker: Dorsal Spine Barrage (3.0s Crystal Rain)
+  // SKILL 4 — Rift Stalker: Dorsal Spine Barrage (25% slower crystal drop speed & cadence)
   dorsalSpineBarrage: {
     chargeDuration: 0.75,
     launchRecoveryDuration: 0.55,
     rainDuration: 3.0,
-    waveInterval: 0.25,
+    waveInterval: 0.33,
     crystalsPerWave: 3,
-    arenaRadius: 560,
-    fallStartHeight: 520,
-    fallSpeed: 1080,
-    impactRadius: 115,
+    arenaRadius: 840,
+    fallStartHeight: 720,
+    fallSpeed: 810,
+    impactRadius: 150,
     impactDamage: 34
   },
 
-  // Attack 1: Massive 80-unit Mouth Lightning Laser
+  // Attack 1: Massive 160-unit Mouth Lightning Laser
   laser: {
     duration: 2.96, // +35% attack speed (was 4.0s sweep in simulation)
-    thickness: 80, // Exactly 4x player width (~20 * 4 = 80)
-    range: 950,
+    thickness: 160,
+    range: 1650,
     sweepArcRad: Math.PI * 0.48, // ~86 degree sweeping arc
     damagePerTick: 20,
     tickInterval: 0.185, // +35% attack speed (was 0.25s)
@@ -133,14 +133,14 @@ export const STAGE1_BOSS_CONFIG = {
 
   // Attack 2: Independent Long-Range Tentacle Strikes
   tentacle: {
-    reach: 900,
+    reach: 1400,
     telegraphDuration: 0.48, // +35% attack speed (was 0.65s)
     lockDuration: 0.26,      // +35% attack speed (was 0.35s)
     strikeDuration: 0.30,    // +35% attack speed (was 0.40s)
     impactTime: 0.15,        // +35% attack speed (was 0.20s)
     retractDuration: 0.33,   // +35% attack speed (was 0.45s)
     damage: 55,
-    strikeRadius: 85
+    strikeRadius: 170
   },
 
   // Attack 3: Ten Elemental Projectile Barrage
@@ -149,8 +149,8 @@ export const STAGE1_BOSS_CONFIG = {
     projectileCount: 10,
     speed: 810, // +35% faster projectile velocity (was 600 u/s)
     damage: 24,
-    radius: 18,
-    maxDistance: 1350,
+    radius: 36,
+    maxDistance: 1850,
     // 10 Tentacle tip normalized billboard offsets from center [-0.5..0.5]
     tentacleTipOffsets: [
       { x: 0.384, y: 0.246 },

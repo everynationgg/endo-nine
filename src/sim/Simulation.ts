@@ -388,6 +388,22 @@ export class Simulation {
     p.pos = (this.state.terrain.isCustomTestMap && this.state.terrain.testSpawnPos)
       ? { ...this.state.terrain.testSpawnPos }
       : { ...this.state.playerSpawnPos };
+    if (
+      !this.state.terrain.isCustomTestMap &&
+      (p.pos.x < 100 ||
+        p.pos.x > this.state.worldWidth - 100 ||
+        p.pos.y < 100 ||
+        p.pos.y > this.state.worldHeight - 100)
+    ) {
+      p.pos = { x: 1800, y: 2480 };
+    }
+    if (this.state.terrain.isCustomTestMap && this.state.terrain.meshCollider) {
+      const sup = this.state.terrain.meshCollider.querySupport(p.pos.x, p.pos.y, 1e6, 56);
+      if (!sup.hit || !Number.isFinite(sup.height) || sup.height <= 0) {
+        const safePt = this.resolvePickupClearSpot(p.pos);
+        p.pos = { x: safePt.x, y: safePt.y };
+      }
+    }
     p.velocity = { x: 0, y: 0 };
     p.facing = 'front';
     p.castFacingLockTimer = 0;
@@ -397,7 +413,8 @@ export class Simulation {
     p.enemyProjectileGraceTimer = 0;
     p.hitByEnemyAttackInstanceIds?.clear();
     this.nextEnemyAttackInstanceId = 1;
-    p.z = this.state.terrain.getElevation(p.pos.x, p.pos.y, 1e6, 22).height;
+    const rawSpawnZ = this.state.terrain.getElevation(p.pos.x, p.pos.y, 1e6, 56).height;
+    p.z = Number.isFinite(rawSpawnZ) ? rawSpawnZ : 16;
     p.vz = 0;
     p.groundZ = p.z;
     p.isGrounded = true;
@@ -744,11 +761,6 @@ export class Simulation {
   }
 
   public devSpawnEnemy(type: EnemyType, count: number = 1, nearPlayer: boolean = true): EnemyState[] {
-    if (type === 'boss') {
-      this.spawnStage1Titan(this.state.artifact.pos);
-      const boss = this.state.enemies.find((e) => e.isStage1Titan);
-      return boss ? [boss] : [];
-    }
     const p = this.state.player;
     const { tierDef } = getDifficultyTier(this.state.gameTime);
     const cfg = ENEMY_CONFIGS[type];
@@ -760,12 +772,13 @@ export class Simulation {
       const sx = Math.max(60, Math.min(this.state.worldWidth - 60, p.pos.x + Math.cos(ang) * dist));
       const sy = Math.max(60, Math.min(this.state.worldHeight - 60, p.pos.y + Math.sin(ang) * dist));
       const elev = this.state.terrain.getElevation(sx, sy).height;
+      const hoverZ = type === 'boss' ? 96 : (type === 'wasp' || type === 'broodling') ? 56 : 0;
       const enemy: EnemyState = {
         id: `enemy_${this.nextEnemyId++}`,
         type,
         pos: { x: sx, y: sy },
         velocity: { x: 0, y: 0 },
-        z: elev,
+        z: elev + hoverZ,
         groundZ: elev,
         health: Math.round(cfg.maxHealth * tierDef.hpMultiplier),
         maxHealth: Math.round(cfg.maxHealth * tierDef.hpMultiplier),
@@ -774,8 +787,9 @@ export class Simulation {
         attackCooldown: cfg.attackCooldown,
         attackCooldownRemaining: 0.6,
         attackRange: cfg.attackRange,
-        isElite: cfg.isElite || type === 'elite',
-        isBoss: false,
+        isElite: cfg.isElite || type === 'elite' || type === 'boss',
+        isBoss: type === 'boss',
+        isStage1Titan: false,
         currencyReward: cfg.currencyReward,
         xpReward: cfg.xpReward,
         radius: cfg.radius,
@@ -5542,6 +5556,11 @@ export class Simulation {
             type: 'orbital_impact',
             data: { target: { ...proj.pos }, z: proj.z, radius: blastRadius, variant: 'void' }
           });
+        } else if (proj.type === 'water_bubble') {
+          this.state.events.push({
+            type: 'water_bubble_impact',
+            data: { pos: { ...proj.pos }, z: proj.z }
+          });
         }
         continue; // Projectile blocked and destroyed by solid mountain, cliff, or obstacle!
       }
@@ -5765,6 +5784,11 @@ export class Simulation {
               type: 'orbital_impact',
               data: { target: { ...proj.pos }, z: proj.z, radius: 78, variant: 'void' }
             });
+          } else if (proj.type === 'water_bubble') {
+            this.state.events.push({
+              type: 'water_bubble_impact',
+              data: { pos: { ...proj.pos }, z: proj.z }
+            });
           }
           continue;
         }
@@ -5788,6 +5812,11 @@ export class Simulation {
             this.state.events.push({
               type: 'orbital_impact',
               data: { target: { ...proj.pos }, z: proj.z, radius: 78, variant: 'void' }
+            });
+          } else if (proj.type === 'water_bubble') {
+            this.state.events.push({
+              type: 'water_bubble_impact',
+              data: { pos: { ...proj.pos }, z: proj.z }
             });
           }
           continue;
@@ -6522,6 +6551,14 @@ export class Simulation {
       p.health = Math.min(p.maxHealth, p.health + p.calculatedStats.lifestealOnKill);
     }
 
+    if (enemy.isSummonedOffspring) {
+      this.state.events.push({
+        type: 'brood_offspring_rupture',
+        data: { id: enemy.id, pos: { ...enemy.pos }, z: enemy.z, radius: enemy.radius }
+      });
+      return;
+    }
+
     // 1. Spawn physical Currency Drops (Genes)
     const isCorruption = this.isCorruptionActive();
     const geneMult = isCorruption ? 3 : 1;
@@ -7106,6 +7143,8 @@ export class Simulation {
         e.lockedAttackDir = undefined;
         e.lockedAttackVariant = undefined;
         e.lockedTargetPos = undefined;
+        e.enemyActionPhase = 'none';
+        e.enemyActionTimer = 0;
         e.stunTimer -= dt;
         if (e.stunTimer <= 0) {
           e.isStunned = false;
@@ -7168,8 +7207,15 @@ export class Simulation {
           e.poisonStacks = 0;
         }
       }
+      if ((e.secondarySkillCooldown ?? 0) > 0) {
+        e.secondarySkillCooldown = Math.max(0, (e.secondarySkillCooldown ?? 0) - dt);
+      }
 
-      const isAirborneUnit = Boolean(e.type === 'wasp' || (e.isBoss && !e.isStage1Titan));
+      if ((e.secondarySkillCooldown ?? 0) > 0) {
+        e.secondarySkillCooldown = Math.max(0, (e.secondarySkillCooldown ?? 0) - dt);
+      }
+
+      const isAirborneUnit = Boolean(e.type === 'wasp' || e.type === 'broodling' || (e.isBoss && !e.isStage1Titan));
       const isBossInLeap = Boolean(e.isBossLeaping || e.titanState === 'leap');
       // Height check: enemy adapts to terrain elevation (preserving under-bridge vs bridge top layers)
       const preSample = this.state.terrain.getElevation(e.pos.x, e.pos.y, e.z, 26);
@@ -7255,12 +7301,12 @@ export class Simulation {
         moveVx = (e.wanderDir?.x ?? 0) * (enemySpeed * 0.25);
         moveVy = (e.wanderDir?.y ?? 0) * (enemySpeed * 0.25);
       } else if (e.isBoss) {
-        // --- 1. BROOD QUEEN (FLYING SOVEREIGN) ---
-        // Aerial circling and swooping
-        if (dist > 300) {
+        // --- 1. BROOD QUEEN (FLYING SOVEREIGN — TWIN BONE SPIKES + SACRIFICIAL BROOD, 1.5x Scale) ---
+        const phase = e.enemyActionPhase || 'none';
+        if (dist > 420) {
           moveVx = (dx / dist) * enemySpeed;
           moveVy = (dy / dist) * enemySpeed;
-        } else if (dist < 180) {
+        } else if (dist < 260) {
           moveVx = -(dx / dist) * (enemySpeed * 0.7);
           moveVy = -(dy / dist) * (enemySpeed * 0.7);
         } else {
@@ -7269,49 +7315,77 @@ export class Simulation {
           moveVy = (dx / dist) * (enemySpeed * 0.65);
         }
 
-        // Brood Queen Ranged Attacks: visible 0.8s windup -> locked aim -> 2 separated stingers or 1 spore bomb (-35% frequency)
+        // Maintain elevated aerial altitude (never lands)
+        const targetHoverZ = e.groundZ + 136;
+        e.z += (targetHoverZ - e.z) * Math.min(1.0, dt * 6.0);
+
         const canBossShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS[e.type]);
-        if ((e.rangedWindupTimer ?? 0) > 0) {
-          moveVx *= 0.15;
-          moveVy *= 0.15;
+        if (phase === 'prep') {
+          moveVx *= 0.16;
+          moveVy *= 0.16;
           e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
-          if (e.rangedWindupTimer <= 0 && canBossShoot) {
-            const originZ = e.z + 40;
-            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 26 - originZ };
-            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 26 };
-            const ldx = lockedDir.x;
-            const ldy = lockedDir.y;
-            const lDist = Math.hypot(ldx, ldy) || 1;
-            const ldz = lockedDir.z;
-            const attackInstanceId = this.nextEnemyAttackInstanceId++;
-
-            if (e.lockedAttackVariant === 'spore_bomb') {
-              const bombSpeed = Math.max(150, lDist * 0.85);
-              const timeToTarget = Math.max(0.65, lDist / bombSpeed);
-              const gravity = 360;
-              const bombVz = (ldz / timeToTarget) + 0.5 * gravity * timeToTarget;
-
-              this.state.projectiles.push({
-                id: `proj_${this.nextProjId++}`,
-                type: 'spore_bomb',
-                pos: { x: e.pos.x, y: e.pos.y },
-                z: originZ,
-                velocity: { x: (ldx / lDist) * bombSpeed, y: (ldy / lDist) * bombSpeed },
-                vz: bombVz,
-                speed: bombSpeed,
-                damage: ENEMY_COMBAT_BALANCE.broodQueenSporeBombDamage,
-                pierceCount: 1,
-                maxDistance: Math.max(120, lDist),
-                distanceTraveled: 0,
-                owner: 'enemy',
-                radius: ENEMY_COMBAT_BALANCE.broodQueenSporeBombRadius,
-                hitEnemyIds: new Set(),
-                originZ,
-                targetZ: lockedTgt.z,
-                attackInstanceId
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            if (e.enemyActionVariant === 'spawn_brood') {
+              // Birth a smaller Sacrificial Brood from Brood Queen's reproductive abdomen
+              const fLen = Math.hypot(dx, dy) || 1;
+              const rearX = e.pos.x - (dx / fLen) * 51;
+              const rearY = e.pos.y - (dy / fLen) * 51;
+              const rearElev = this.state.terrain.getElevation(rearX, rearY, e.groundZ, 56).height;
+              const birthZ = Math.max(rearElev + 64, e.z - 32);
+              const bCfg = ENEMY_CONFIGS.broodling;
+              const { tierDef } = getDifficultyTier(this.state.gameTime);
+              const broodling: EnemyState = {
+                id: `brood_${this.nextEnemyId++}`,
+                type: 'broodling',
+                pos: { x: rearX, y: rearY },
+                velocity: { x: -(dx / fLen) * 45, y: -(dy / fLen) * 45 },
+                z: birthZ,
+                groundZ: rearElev,
+                health: Math.round(bCfg.maxHealth * tierDef.hpMultiplier),
+                maxHealth: Math.round(bCfg.maxHealth * tierDef.hpMultiplier),
+                speed: bCfg.speed * tierDef.speedMultiplier,
+                touchDamage: Math.round(bCfg.touchDamage * tierDef.damageMultiplier),
+                attackCooldown: bCfg.attackCooldown,
+                attackCooldownRemaining: 0.4,
+                attackRange: bCfg.attackRange,
+                isElite: false,
+                isBoss: false,
+                isStage1Titan: false,
+                isScriptedEventEnemy: true,
+                isSummonedOffspring: true,
+                parentQueenId: e.id,
+                offspringLifetime: ENEMY_COMBAT_BALANCE.broodOffspringMaxLifetimeSec,
+                enemyActionVariant: 'brood_dive',
+                enemyActionPhase: 'stabilize',
+                enemyActionTimer: ENEMY_COMBAT_BALANCE.broodOffspringStabilizeSec,
+                enemyActionDuration: ENEMY_COMBAT_BALANCE.broodOffspringStabilizeSec,
+                currencyReward: 0,
+                xpReward: 0,
+                radius: bCfg.radius,
+                isSpawning: false,
+                spawnProgress: 1,
+                spawnDuration: 0,
+                isAlerted: true
+              };
+              this.state.enemies.push(broodling);
+              this.state.events.push({
+                type: 'brood_offspring_spawned',
+                data: { queenId: e.id, broodId: broodling.id, pos: { x: rearX, y: rearY }, z: birthZ }
               });
-            } else {
-              // Dual Separated Stinger Split (dodgeable open center lane, zero post-launch tracking)
+              e.enemyActionPhase = 'recover';
+              e.enemyActionTimer = ENEMY_COMBAT_BALANCE.broodQueenSummonRecoverSec;
+              e.enemyActionDuration = ENEMY_COMBAT_BALANCE.broodQueenSummonRecoverSec;
+              e.secondarySkillCooldown = ENEMY_COMBAT_BALANCE.broodQueenSummonCooldownSec;
+              e.attackCooldownRemaining = 0.85;
+            } else if (canBossShoot) {
+              // Attack 1: Twin Bone Spikes (2 separated biological bone spikes, zero visible trajectory lines)
+              const originZ = e.z + 27;
+              const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 26 - originZ };
+              const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 26 };
+              const ldx = lockedDir.x;
+              const ldy = lockedDir.y;
+              const ldz = lockedDir.z;
               const stingerSpeed = ENEMY_COMBAT_BALANCE.broodQueenStingerSpeed;
               const baseAng = Math.atan2(ldy, ldx);
               const dist3D = Math.hypot(ldx, ldy, ldz) || 1;
@@ -7319,20 +7393,25 @@ export class Simulation {
               const horizSpeed = Math.cos(pitch) * stingerSpeed;
               const vz = Math.sin(pitch) * stingerSpeed;
               const fanAngles = ENEMY_COMBAT_BALANCE.broodQueenStingerAngles;
+              const attackInstanceId = this.nextEnemyAttackInstanceId++;
 
               for (let f = 0; f < fanAngles.length; f++) {
                 const ang = baseAng + fanAngles[f];
+                const sidePerp = f === 0 ? -1 : 1;
+                const fwdAng = Math.atan2(ldy, ldx);
+                const perpX = -Math.sin(fwdAng) * 27 * sidePerp;
+                const perpY = Math.cos(fwdAng) * 27 * sidePerp;
                 this.state.projectiles.push({
                   id: `proj_${this.nextProjId++}`,
                   type: 'queen_stinger',
-                  pos: { x: e.pos.x, y: e.pos.y },
+                  pos: { x: e.pos.x + perpX, y: e.pos.y + perpY },
                   z: originZ,
                   velocity: { x: Math.cos(ang) * horizSpeed, y: Math.sin(ang) * horizSpeed },
                   vz,
                   speed: stingerSpeed,
                   damage: ENEMY_COMBAT_BALANCE.broodQueenStingerDamage,
                   pierceCount: 1,
-                  maxDistance: 540,
+                  maxDistance: 780,
                   distanceTraveled: 0,
                   owner: 'enemy',
                   radius: ENEMY_COMBAT_BALANCE.broodQueenStingerRadius,
@@ -7342,27 +7421,60 @@ export class Simulation {
                   attackInstanceId
                 });
               }
-            }
 
-            e.lockedAttackDir = undefined;
-            e.lockedAttackVariant = undefined;
-            e.lockedTargetPos = undefined;
-            e.attackCooldownRemaining = Math.max(
-              0.45,
-              (e.attackCooldown || ENEMY_COMBAT_BALANCE.broodQueenCycleInterval) - ENEMY_COMBAT_BALANCE.broodQueenWindup
-            );
-            this.state.events.push({
-              type: 'enemy_projectile_fired',
-              data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
-            });
+              e.lockedAttackDir = undefined;
+              e.lockedAttackVariant = undefined;
+              e.lockedTargetPos = undefined;
+              e.enemyActionPhase = 'recover';
+              e.enemyActionTimer = 0.28;
+              e.enemyActionDuration = 0.28;
+              e.attackCooldownRemaining = Math.max(
+                0.45,
+                (e.attackCooldown || ENEMY_COMBAT_BALANCE.broodQueenCycleInterval) - ENEMY_COMBAT_BALANCE.broodQueenWindup
+              );
+              this.state.events.push({
+                type: 'enemy_projectile_fired',
+                data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
+              });
+            }
           }
-        } else if (canBossShoot && dist <= 560 && e.attackCooldownRemaining <= 0) {
-          const originZ = e.z + 80;
-          const targetZ = targetPosZ + 52;
-          if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 420)) {
-            e.lockedAttackVariant = dist >= 130 && this.state.rng.next() < 0.35 ? 'spore_bomb' : 'stinger';
+        } else if (phase === 'recover') {
+          moveVx *= 0.55;
+          moveVy *= 0.55;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+            e.enemyActionVariant = undefined;
+          }
+        } else if (dist <= 780 && e.attackCooldownRemaining <= 0) {
+          let activeOffspring = 0;
+          for (let oi = 0; oi < this.state.enemies.length; oi++) {
+            const other = this.state.enemies[oi];
+            if (other.health > 0 && other.type === 'broodling' && other.parentQueenId === e.id) {
+              activeOffspring++;
+            }
+          }
+          const originZ = e.z + 27;
+          const targetZ = targetPosZ + 46;
+          if (
+            (e.secondarySkillCooldown ?? 0) <= 0 &&
+            activeOffspring < ENEMY_COMBAT_BALANCE.broodQueenMaxActiveOffspring &&
+            dist >= 170
+          ) {
+            e.enemyActionVariant = 'spawn_brood';
+            e.enemyActionPhase = 'prep';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.broodQueenSummonWindupSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.broodQueenSummonWindupSec;
+            e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.broodQueenSummonWindupSec;
+            e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.broodQueenSummonWindupSec;
+          } else if (canBossShoot && this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 560)) {
+            e.lockedAttackVariant = 'stinger';
             e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
             e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
+            e.enemyActionVariant = 'twin_spikes';
+            e.enemyActionPhase = 'prep';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.broodQueenWindup;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.broodQueenWindup;
             e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.broodQueenWindup;
             e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.broodQueenWindup;
             this.state.events.push({
@@ -7370,7 +7482,7 @@ export class Simulation {
               data: {
                 id: e.id,
                 type: e.type,
-                variant: e.lockedAttackVariant,
+                variant: 'stinger',
                 pos: { ...e.pos },
                 z: originZ,
                 aimDir: { ...e.lockedAttackDir },
@@ -7379,145 +7491,188 @@ export class Simulation {
             });
           }
         }
+      } else if (e.type === 'broodling') {
+        // --- 1b. SACRIFICIAL BROOD (BROOD QUEEN OFFSPRING — STABILIZE -> PURSUE -> SACRIFICIAL CHARGE) ---
+        e.offspringLifetime = (e.offspringLifetime ?? ENEMY_COMBAT_BALANCE.broodOffspringMaxLifetimeSec) - dt;
+        if (e.offspringLifetime <= 0) {
+          e.health = 0;
+          this.state.events.push({
+            type: 'brood_offspring_rupture',
+            data: { id: e.id, pos: { ...e.pos }, z: e.z, radius: e.radius }
+          });
+          continue;
+        }
+        const phase = e.enemyActionPhase || 'stabilize';
+        const desiredFlightZ = Math.max(e.groundZ + 56, targetPosZ + 44);
+        e.z += (desiredFlightZ - e.z) * Math.min(1.0, dt * 5.0);
+        if (phase === 'stabilize') {
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          moveVx = (e.velocity.x || 0) * 0.85;
+          moveVy = (e.velocity.y || 0) * 0.85;
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+          }
+        } else {
+          const chargeSpd =
+            phase === 'exec' || dist <= ENEMY_COMBAT_BALANCE.broodOffspringChargeTriggerDist
+              ? ENEMY_COMBAT_BALANCE.broodOffspringChargeSpeed * slowFactor
+              : enemySpeed;
+          if (dist <= ENEMY_COMBAT_BALANCE.broodOffspringChargeTriggerDist) {
+            e.enemyActionPhase = 'exec';
+            e.enemyActionVariant = 'brood_dive';
+          }
+          moveVx = (dx / dist) * chargeSpd;
+          moveVy = (dy / dist) * chargeSpd;
 
-        // Swoop contact damage
-        if (dist <= e.radius + 44 && Math.abs(targetPosZ - e.z) < 95) {
-          if ((e.contactCooldownRemaining ?? 0) <= 0) {
-            e.contactCooldownRemaining = e.attackCooldown;
+          if (dist <= e.radius + 48 && Math.abs(targetPosZ - e.z) <= 120) {
             applyTargetDamage(e.touchDamage);
+            e.health = 0;
+            this.state.events.push({
+              type: 'brood_offspring_rupture',
+              data: { id: e.id, pos: { ...e.pos }, z: e.z, radius: e.radius }
+            });
+            continue;
           }
         }
       } else if (e.isElite || e.type === 'elite') {
-        // --- 2. VOID GOLIATH (ELITE CHITIN TANK) ---
-        const canEliteShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS.elite);
-        if ((e.rangedWindupTimer ?? 0) > 0) {
-          // Hold braced ground-slam stance during 0.6s windup with locked direction
+        // --- 2. MAGMIR (HEAVY QUADRUPEDAL MELEE BRUISER — GROUND SLAM & L/R HEAVY PUNCH, NO ROLLING, NO PROJECTILES) ---
+        const phase = e.enemyActionPhase || 'none';
+        if (phase === 'prep') {
           moveVx = 0;
           moveVy = 0;
-          e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
-          if (e.rangedWindupTimer <= 0 && canEliteShoot) {
-            const originZ = e.z + 44;
-            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 52 - originZ };
-            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 52 };
-            const shardSpeed = ENEMY_COMBAT_BALANCE.eliteProjectileSpeed;
-            const dist3D = Math.hypot(lockedDir.x, lockedDir.y, lockedDir.z) || 1;
-            const vx = (lockedDir.x / dist3D) * shardSpeed;
-            const vy = (lockedDir.y / dist3D) * shardSpeed;
-            const vz = (lockedDir.z / dist3D) * shardSpeed;
-            const attackInstanceId = this.nextEnemyAttackInstanceId++;
-
-            // Single fair Seismic Shard projectile (reduced from 3)
-            this.state.projectiles.push({
-              id: `proj_${this.nextProjId++}`,
-              type: 'seismic_shard',
-              pos: { x: e.pos.x, y: e.pos.y },
-              z: originZ,
-              velocity: { x: vx, y: vy },
-              vz,
-              speed: shardSpeed,
-              damage: ENEMY_COMBAT_BALANCE.eliteProjectileDamage,
-              pierceCount: 1,
-              maxDistance: 440,
-              distanceTraveled: 0,
-              owner: 'enemy',
-              radius: ENEMY_COMBAT_BALANCE.eliteProjectileRadius,
-              hitEnemyIds: new Set(),
-              originZ,
-              targetZ: lockedTgt.z,
-              attackInstanceId
-            });
-
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            if (e.enemyActionVariant === 'ground_slam') {
+              const slamR = ENEMY_COMBAT_BALANCE.magmirSlamRadius;
+              if (dist <= slamR && Math.abs(targetPosZ - e.z) <= 185 && !e.enemyActionHitApplied) {
+                e.enemyActionHitApplied = true;
+                applyTargetDamage(Math.round(e.touchDamage * ENEMY_COMBAT_BALANCE.magmirSlamDamageMult));
+              }
+              this.state.events.push({
+                type: 'magmir_slam_impact',
+                data: { id: e.id, pos: { ...e.pos }, z: e.groundZ, radius: slamR }
+              });
+              e.enemyActionPhase = 'recover';
+              e.enemyActionDuration = ENEMY_COMBAT_BALANCE.magmirSlamRecoverSec;
+              e.enemyActionTimer = ENEMY_COMBAT_BALANCE.magmirSlamRecoverSec;
+            } else {
+              // Synchronized contact window for Right or Left Heavy Punch
+              const ld = e.lockedAttackDir ?? { x: dx / dist, y: dy / dist, z: 0 };
+              const fwdDot = (dx / dist) * ld.x + (dy / dist) * ld.y;
+              if (dist <= ENEMY_COMBAT_BALANCE.magmirPunchReach && fwdDot >= 0.20 && Math.abs(targetPosZ - e.z) <= 172 && !e.enemyActionHitApplied) {
+                e.enemyActionHitApplied = true;
+                applyTargetDamage(e.touchDamage);
+              }
+              this.state.events.push({
+                type: 'magmir_punch_swing',
+                data: {
+                  id: e.id,
+                  hand: e.enemyActionVariant === 'punch_l' ? 'left' : 'right',
+                  pos: { ...e.pos },
+                  z: e.z + 64,
+                  dir: { x: ld.x, y: ld.y }
+                }
+              });
+              e.enemyActionPhase = 'recover';
+              e.enemyActionDuration = ENEMY_COMBAT_BALANCE.magmirPunchRecoverSec;
+              e.enemyActionTimer = ENEMY_COMBAT_BALANCE.magmirPunchRecoverSec;
+            }
+          }
+        } else if (phase === 'recover') {
+          moveVx = 0;
+          moveVy = 0;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+            e.enemyActionVariant = undefined;
             e.lockedAttackDir = undefined;
-            e.lockedAttackVariant = undefined;
-            e.lockedTargetPos = undefined;
-            const cycleScale = Math.max(0.8, e.attackCooldown / Math.max(0.01, ENEMY_CONFIGS.elite.attackCooldown));
-            e.attackCooldownRemaining = Math.max(
-              0.95,
-              ENEMY_COMBAT_BALANCE.eliteRangedCycleInterval * cycleScale - ENEMY_COMBAT_BALANCE.eliteRangedWindup
-            );
-            this.state.events.push({
-              type: 'enemy_projectile_fired',
-              data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
-            });
+            e.attackCooldownRemaining = e.attackCooldown;
           }
         } else {
           const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
           moveVx = move.vx;
           moveVy = move.vy;
 
-          // Initiate 0.6s Seismic Shard windup with locked target direction (requires 3D LOS & elevation match)
-          if (canEliteShoot && dist >= 140 && dist <= 420 && e.attackCooldownRemaining <= 0) {
-            const originZ = e.z + 44;
-            const targetZ = targetPosZ + 52;
-            if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 280)) {
-              e.lockedAttackVariant = 'seismic_shard';
-              e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
-              e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
-              e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.eliteRangedWindup;
-              e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.eliteRangedWindup;
+          if (e.attackCooldownRemaining <= 0) {
+            if ((e.secondarySkillCooldown ?? 0) <= 0 && dist <= ENEMY_COMBAT_BALANCE.magmirSlamTriggerRange && Math.abs(targetPosZ - e.z) <= 180) {
+              // Attack 1: Ground Slam
+              e.enemyActionVariant = 'ground_slam';
+              e.enemyActionPhase = 'prep';
+              e.enemyActionDuration = ENEMY_COMBAT_BALANCE.magmirSlamPrepSec;
+              e.enemyActionTimer = ENEMY_COMBAT_BALANCE.magmirSlamPrepSec;
+              e.enemyActionHitApplied = false;
+              e.secondarySkillCooldown = ENEMY_COMBAT_BALANCE.magmirSlamCooldownSec;
+              moveVx = 0;
+              moveVy = 0;
               this.state.events.push({
-                type: 'enemy_attack_windup',
+                type: 'magmir_slam_telegraph',
                 data: {
                   id: e.id,
-                  type: e.type,
-                  variant: 'seismic_shard',
                   pos: { ...e.pos },
-                  z: originZ,
-                  aimDir: { ...e.lockedAttackDir },
-                  duration: ENEMY_COMBAT_BALANCE.eliteRangedWindup
+                  z: e.groundZ,
+                  radius: ENEMY_COMBAT_BALANCE.magmirSlamRadius,
+                  duration: ENEMY_COMBAT_BALANCE.magmirSlamPrepSec
                 }
               });
-            }
-          }
-
-          // Heavy contact crush (reaches past 2x player body separation)
-          if ((e.rangedWindupTimer ?? 0) <= 0 && dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 76) {
-            if (e.attackCooldownRemaining <= 0) {
-              e.attackCooldownRemaining = e.attackCooldown;
-              applyTargetDamage(e.touchDamage);
+            } else if (dist <= ENEMY_COMBAT_BALANCE.magmirPunchTriggerRange && Math.abs(targetPosZ - e.z) <= 168) {
+              // Attack 2: Alternating Heavy Right/Left Punch
+              const useLeft = e.punchHandNext === 'left';
+              e.punchHandNext = useLeft ? 'right' : 'left';
+              e.enemyActionVariant = useLeft ? 'punch_l' : 'punch_r';
+              e.enemyActionPhase = 'prep';
+              e.enemyActionDuration = ENEMY_COMBAT_BALANCE.magmirPunchPrepSec;
+              e.enemyActionTimer = ENEMY_COMBAT_BALANCE.magmirPunchPrepSec;
+              e.enemyActionHitApplied = false;
+              e.lockedAttackDir = { x: dx / dist, y: dy / dist, z: 0 };
+              moveVx = 0;
+              moveVy = 0;
             }
           }
         }
       } else if (e.type === 'wasp') {
-        // --- 3. VOID WASP (AERIAL BIO-ELECTRIC STINGER — AUTHORIZED FLYER) ---
-        if (dist > 200) {
+        // --- 3. DRIFTWORM (FLOATING AQUATIC RANGED — WATER BUBBLE PROJECTILE) ---
+        const phase = e.enemyActionPhase || 'none';
+        if (dist > 220) {
           moveVx = (dx / dist) * enemySpeed;
           moveVy = (dy / dist) * enemySpeed;
-        } else if (dist < 120) {
-          moveVx = -(dx / dist) * (enemySpeed * 0.6);
-          moveVy = -(dy / dist) * (enemySpeed * 0.6);
+        } else if (dist < 135) {
+          moveVx = -(dx / dist) * (enemySpeed * 0.65);
+          moveVy = -(dy / dist) * (enemySpeed * 0.65);
         } else {
-          moveVx = (dx / dist) * enemySpeed;
-          moveVy = (dy / dist) * enemySpeed;
+          // Gentle aquatic drift orbit
+          moveVx = (-dy / dist) * (enemySpeed * 0.45);
+          moveVy = (dx / dist) * (enemySpeed * 0.45);
         }
 
         const canWaspShoot = Boolean(ENEMY_PROJECTILE_PERMISSIONS.wasp);
-        if ((e.rangedWindupTimer ?? 0) > 0) {
-          moveVx *= 0.25;
-          moveVy *= 0.25;
+        if (phase === 'prep') {
+          moveVx *= 0.22;
+          moveVy *= 0.22;
           e.rangedWindupTimer = Math.max(0, (e.rangedWindupTimer ?? 0) - dt);
-          if (e.rangedWindupTimer <= 0 && canWaspShoot) {
-            const originZ = e.z + 36;
-            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 52 - originZ };
-            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 52 };
-            const stingerSpeed = ENEMY_COMBAT_BALANCE.waspProjectileSpeed;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0 && canWaspShoot) {
+            const f2d = Math.hypot(dx, dy) || 1;
+            const originZ = e.z + 44;
+            const lockedDir = e.lockedAttackDir ?? { x: dx, y: dy, z: targetPosZ + 48 - originZ };
+            const lockedTgt = e.lockedTargetPos ?? { x: targetPos.x, y: targetPos.y, z: targetPosZ + 48 };
+            const bubbleSpeed = ENEMY_COMBAT_BALANCE.waspProjectileSpeed;
             const dist3D = Math.hypot(lockedDir.x, lockedDir.y, lockedDir.z) || 1;
-            const vx = (lockedDir.x / dist3D) * stingerSpeed;
-            const vy = (lockedDir.y / dist3D) * stingerSpeed;
-            const vz = (lockedDir.z / dist3D) * stingerSpeed;
+            const vx = (lockedDir.x / dist3D) * bubbleSpeed;
+            const vy = (lockedDir.y / dist3D) * bubbleSpeed;
+            const vz = (lockedDir.z / dist3D) * bubbleSpeed;
             const attackInstanceId = this.nextEnemyAttackInstanceId++;
 
             this.state.projectiles.push({
               id: `proj_${this.nextProjId++}`,
-              type: 'wasp_sting',
-              pos: { x: e.pos.x, y: e.pos.y },
+              type: 'water_bubble',
+              pos: { x: e.pos.x + (dx / f2d) * 18, y: e.pos.y + (dy / f2d) * 18 },
               z: originZ,
               velocity: { x: vx, y: vy },
               vz,
-              speed: stingerSpeed,
+              speed: bubbleSpeed,
               damage: ENEMY_COMBAT_BALANCE.waspProjectileDamage,
               pierceCount: 1,
-              maxDistance: 360,
+              maxDistance: 390,
               distanceTraveled: 0,
               owner: 'enemy',
               radius: ENEMY_COMBAT_BALANCE.waspProjectileRadius,
@@ -7527,9 +7682,12 @@ export class Simulation {
               attackInstanceId
             });
 
-            e.lockedAttackDir = undefined;
             e.lockedAttackVariant = undefined;
             e.lockedTargetPos = undefined;
+            e.enemyActionPhase = 'recover';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.driftwormRecoilSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.driftwormRecoilSec;
+            e.lockedAttackDir = { x: -(dx / f2d), y: -(dy / f2d), z: 0 };
             const cycleScale = Math.max(0.8, e.attackCooldown / Math.max(0.01, ENEMY_CONFIGS.wasp.attackCooldown));
             e.attackCooldownRemaining = Math.max(
               1.1,
@@ -7540,59 +7698,170 @@ export class Simulation {
               data: { id: e.id, type: e.type, pos: { ...e.pos }, z: originZ }
             });
           }
-        } else if (canWaspShoot && dist >= 100 && dist <= 320 && e.attackCooldownRemaining <= 0) {
-          const originZ = e.z + 36;
-          const targetZ = targetPosZ + 52;
+        } else if (phase === 'recover') {
+          // Subtle backward release recoil
+          const rd = e.lockedAttackDir ?? { x: -dx / dist, y: -dy / dist, z: 0 };
+          moveVx = rd.x * 65;
+          moveVy = rd.y * 65;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+            e.enemyActionVariant = undefined;
+            e.lockedAttackDir = undefined;
+          }
+        } else if (canWaspShoot && dist >= 90 && dist <= 350 && e.attackCooldownRemaining <= 0) {
+          const originZ = e.z + 44;
+          const targetZ = targetPosZ + 48;
           if (this.hasEnemyAttackLOS3D(e.pos, originZ, targetPos, targetZ, 300)) {
-            e.lockedAttackVariant = 'wasp_sting';
+            e.lockedAttackVariant = 'water_bubble';
             e.lockedAttackDir = { x: dx, y: dy, z: targetZ - originZ };
             e.lockedTargetPos = { x: targetPos.x, y: targetPos.y, z: targetZ };
+            e.enemyActionVariant = 'water_bubble';
+            e.enemyActionPhase = 'prep';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.waspRangedWindup;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.waspRangedWindup;
             e.rangedWindupDuration = ENEMY_COMBAT_BALANCE.waspRangedWindup;
             e.rangedWindupTimer = ENEMY_COMBAT_BALANCE.waspRangedWindup;
-            this.state.events.push({
-              type: 'enemy_attack_windup',
-              data: {
-                id: e.id,
-                type: e.type,
-                variant: 'wasp_sting',
-                pos: { ...e.pos },
-                z: originZ,
-                aimDir: { ...e.lockedAttackDir },
-                duration: ENEMY_COMBAT_BALANCE.waspRangedWindup
-              }
-            });
-          }
-        }
-
-        // Contact dive
-        if ((e.rangedWindupTimer ?? 0) <= 0 && dist <= e.radius + 44 && Math.abs(targetPosZ - e.z) < 82) {
-          if (e.attackCooldownRemaining <= 0) {
-            e.attackCooldownRemaining = e.attackCooldown;
-            applyTargetDamage(e.touchDamage);
           }
         }
       } else if (e.type === 'spitter') {
-        // --- 4. TOXIC SPITTER (CLOSE-RANGE CORROSIVE MELEE — NO PROJECTILES) ---
-        const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
-        moveVx = move.vx;
-        moveVy = move.vy;
-
-        if (dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 72) {
-          if (e.attackCooldownRemaining <= 0) {
+        // --- 4. SLYTHVEN (SERPENTINE TOXIC AREA-CONTROL — DUAL VENT EXHALATION, NO PROJECTILES) ---
+        const phase = e.enemyActionPhase || 'none';
+        if (phase === 'prep') {
+          moveVx = 0;
+          moveVy = 0;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'exec';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.slythvenExhaleSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.slythvenExhaleSec;
+            e.enemyActionTickTimer = 0.10;
+          }
+        } else if (phase === 'exec') {
+          moveVx = 0;
+          moveVy = 0;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          e.enemyActionTickTimer = (e.enemyActionTickTimer ?? 0) - dt;
+          if ((e.enemyActionTickTimer ?? 0) <= 0) {
+            e.enemyActionTickTimer = ENEMY_COMBAT_BALANCE.slythvenTickIntervalSec;
+            if (dist <= ENEMY_COMBAT_BALANCE.slythvenGasRadius && Math.abs(targetPosZ - e.z) <= 185) {
+              const tickDmg = Math.max(2, Math.round(e.touchDamage * ENEMY_COMBAT_BALANCE.slythvenTickDamageMult));
+              if (targetDecoy) {
+                targetDecoy.hitsRemaining = Math.max(0, targetDecoy.hitsRemaining - 1);
+              } else {
+                this.damagePlayer(tickDmg, false, e, 'other');
+              }
+            }
+          }
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'recover';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.slythvenRecoverSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.slythvenRecoverSec;
+          }
+        } else if (phase === 'recover') {
+          moveVx = 0;
+          moveVy = 0;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+            e.enemyActionVariant = undefined;
             e.attackCooldownRemaining = e.attackCooldown;
-            applyTargetDamage(e.touchDamage);
+          }
+        } else {
+          const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
+          moveVx = move.vx;
+          moveVy = move.vy;
+
+          if (dist <= ENEMY_COMBAT_BALANCE.slythvenTriggerRange && Math.abs(targetPosZ - e.z) <= 185 && e.attackCooldownRemaining <= 0) {
+            e.enemyActionVariant = 'toxic_exhale';
+            e.enemyActionPhase = 'prep';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.slythvenPrepSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.slythvenPrepSec;
+            moveVx = 0;
+            moveVy = 0;
           }
         }
       } else {
-        // --- 5. VOID CRAWLER (GROUND SWARM MELEE — NO PROJECTILES) ---
-        const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
-        moveVx = move.vx;
-        moveVy = move.vy;
+        // --- 5. OREBLADE (SMALL SPINNING MELEE — SPINNING CHARGE SEQUENCE, NO EXPLOSION/PROJECTILES) ---
+        const phase = e.enemyActionPhase || 'none';
+        if (phase === 'prep') {
+          // Briefly stops while spinning up blades before charge
+          moveVx = 0;
+          moveVy = 0;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'exec';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.orebladeChargeSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.orebladeChargeSec;
+            const chargeDir = e.lockedAttackDir ?? { x: dx / dist, y: dy / dist, z: 0 };
+            this.state.events.push({
+              type: 'oreblade_charge_start',
+              data: { id: e.id, pos: { ...e.pos }, z: e.z, dir: { x: chargeDir.x, y: chargeDir.y } }
+            });
+          }
+        } else if (phase === 'exec') {
+          // Rapid acceleration toward locked direction with smooth ramp-in
+          const elapsedExec = Math.max(0, (e.enemyActionDuration ?? 0.46) - (e.enemyActionTimer ?? 0));
+          const accelRamp = Math.min(1.0, 0.35 + (elapsedExec / 0.12) * 0.65);
+          const dir = e.lockedAttackDir ?? { x: dx / dist, y: dy / dist, z: 0 };
+          const chargeSpd = enemySpeed * ENEMY_COMBAT_BALANCE.orebladeChargeSpeedMult * accelRamp;
+          moveVx = dir.x * chargeSpd;
+          moveVy = dir.y * chargeSpd;
 
-        if (dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) < 72) {
-          if (e.attackCooldownRemaining <= 0) {
+          if (!e.enemyActionHitApplied && dist <= e.radius + 46 && Math.abs(targetPosZ - e.z) <= 76) {
+            e.enemyActionHitApplied = true;
+            applyTargetDamage(e.touchDamage);
+            this.state.events.push({
+              type: 'oreblade_charge_hit',
+              data: { id: e.id, pos: { ...e.pos }, z: e.z + 28, dir: { x: dir.x, y: dir.y } }
+            });
+          }
+
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'recover';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.orebladeRecoverSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.orebladeRecoverSec;
+          }
+        } else if (phase === 'recover') {
+          // Smooth braking deceleration after charge
+          const fracLeft = Math.max(0, (e.enemyActionTimer ?? 0) / Math.max(0.05, e.enemyActionDuration ?? 0.45));
+          const dir = e.lockedAttackDir ?? { x: dx / dist, y: dy / dist, z: 0 };
+          moveVx = dir.x * enemySpeed * 0.45 * fracLeft;
+          moveVy = dir.y * enemySpeed * 0.45 * fracLeft;
+          e.enemyActionTimer = Math.max(0, (e.enemyActionTimer ?? 0) - dt);
+          if ((e.enemyActionTimer ?? 0) <= 0) {
+            e.enemyActionPhase = 'none';
+            e.enemyActionVariant = undefined;
+            e.lockedAttackDir = undefined;
+            e.attackCooldownRemaining = e.attackCooldown;
+          }
+        } else {
+          const move = this.getGroundedMoveVelocity(e, enemySpeed, dt, targetDecoy ? targetDecoy.pos : undefined);
+          moveVx = move.vx;
+          moveVy = move.vy;
+
+          if (
+            e.attackCooldownRemaining <= 0 &&
+            dist >= ENEMY_COMBAT_BALANCE.orebladeChargeTriggerMin &&
+            dist <= ENEMY_COMBAT_BALANCE.orebladeChargeTriggerMax &&
+            this.hasEnemyAttackLOS3D(e.pos, e.z + 28, targetPos, targetPosZ + 36, 110)
+          ) {
+            e.lockedAttackDir = { x: dx / dist, y: dy / dist, z: 0 };
+            e.enemyActionVariant = 'spin_charge';
+            e.enemyActionPhase = 'prep';
+            e.enemyActionDuration = ENEMY_COMBAT_BALANCE.orebladePrepSec;
+            e.enemyActionTimer = ENEMY_COMBAT_BALANCE.orebladePrepSec;
+            e.enemyActionHitApplied = false;
+            moveVx = 0;
+            moveVy = 0;
+          } else if (dist <= e.radius + 42 && Math.abs(targetPosZ - e.z) < 72 && e.attackCooldownRemaining <= 0) {
             e.attackCooldownRemaining = e.attackCooldown;
             applyTargetDamage(e.touchDamage);
+            this.state.events.push({
+              type: 'oreblade_charge_hit',
+              data: { id: e.id, pos: { ...e.pos }, z: e.z + 28 }
+            });
           }
         }
       }
@@ -7746,7 +8015,12 @@ export class Simulation {
           if (e2.id <= e1.id) continue; // Deduplicate pair checks & self-check
           if (e2.health <= 0 || e2.isSpawning || e2.isBossLeaping || (e2.isStage1Titan && (e2.titanState === 'emerging' || e2.titanState === 'dying' || e2.titanState === 'leap'))) continue;
 
-          const pairVertBand = (e1.isStage1Titan || e2.isStage1Titan) ? 320 : 120;
+          const pairVertBand =
+            e1.isStage1Titan || e2.isStage1Titan
+              ? 560
+              : e1.radius >= 80 || e2.radius >= 80
+                ? 220
+                : 120;
           if (Math.abs(e1.z - e2.z) > pairVertBand) continue;
 
           const dx = e1.pos.x - e2.pos.x;
@@ -7785,7 +8059,7 @@ export class Simulation {
         }
 
         // 2. Player vs Enemy Collision: require 3D vertical overlap so enemies below the Tower NEVER shove the player!
-        const playerVertBand = e1.isStage1Titan ? 320 : (e1.isBoss ? 180 : 115);
+        const playerVertBand = e1.isStage1Titan ? 560 : (e1.isBoss ? 260 : (e1.radius >= 80 ? 220 : 115));
         if (Math.abs(e1.z - p.z) <= playerVertBand) {
           const pdx = e1.pos.x - p.pos.x;
           const pdy = e1.pos.y - p.pos.y;
@@ -7819,7 +8093,8 @@ export class Simulation {
     for (let i = 0; i < len; i++) {
       const e = enemies[i];
       if (e.health <= 0 || e.isSpawning) continue;
-      const isAirborneUnit = Boolean(e.type === 'wasp' || (e.isBoss && !e.isStage1Titan));
+
+      const isAirborneUnit = Boolean(e.type === 'wasp' || e.type === 'broodling' || (e.isBoss && !e.isStage1Titan));
       const isBossInLeap = Boolean(e.isBossLeaping || e.titanState === 'leap');
       if (!isBossInLeap && !isAirborneUnit && (!e.isStage1Titan || (e.titanState !== 'emerging' && e.titanState !== 'dying'))) {
         const colRadius = e.isStage1Titan ? 56 : Math.min(e.radius, 36);
@@ -7863,7 +8138,7 @@ export class Simulation {
       type,
       pos: { x: pos.x, y: pos.y },
       velocity: { x: 0, y: 0 },
-      z: type === 'wasp' ? groundHeight + 28 : groundHeight - 24,
+      z: (type === 'wasp' || type === 'broodling') ? groundHeight + 38 : type === 'boss' ? groundHeight + 96 : groundHeight - 24,
       groundZ: groundHeight,
       health: scaledHealth,
       maxHealth: scaledHealth,
@@ -8428,8 +8703,8 @@ export class Simulation {
         });
       }
 
-      // Check touch damage against player (2x scale)
-      if (dist <= boss.radius + 36 && Math.abs(p.z - boss.z) < 140) {
+      // Check touch damage against player (2x scaled Stage 1 Boss)
+      if (dist <= boss.radius + 36 && Math.abs(p.z - boss.z) < 280) {
         this.damagePlayer(boss.touchDamage * 0.8 * dt, true, boss, 'melee');
       }
 
@@ -8437,11 +8712,11 @@ export class Simulation {
       boss.titanTimer = (boss.titanTimer ?? STAGE1_BOSS_CONFIG.laser.duration) - dt;
 
       // Do NOT interrupt pursuit or fire through the Tower if player is far away or on a blocked elevation layer
-      const verticalReachable = Math.abs(p.z - boss.z) <= 520;
-      const inAttackRange = dist <= 1100 && verticalReachable;
+      const verticalReachable = Math.abs(p.z - boss.z) <= 720;
+      const inAttackRange = dist <= 1500 && verticalReachable;
       const canAttack =
         (inAttackRange && boss.attackCooldownRemaining <= 0) ||
-        (dist <= 1350 && verticalReachable && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 4 === 3));
+        (dist <= 1750 && verticalReachable && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 4 === 3));
 
       if (canAttack || (boss.titanTimer <= 0 && inAttackRange)) {
         boss.velocity.x = 0;
@@ -8483,7 +8758,7 @@ export class Simulation {
           boss.titanPhaseElapsed = 0;
           boss.titanTimer = STAGE1_BOSS_CONFIG.tailLaser.chargeDuration;
           boss.titanLaserTarget = { x: p.pos.x, y: p.pos.y, z: p.z + 44 };
-          const emOrig = boss.titanLaserOrigin ?? { x: boss.pos.x, y: boss.pos.y, z: boss.z + 270 };
+          const emOrig = boss.titanLaserOrigin ?? { x: boss.pos.x, y: boss.pos.y, z: boss.z + 540 };
           const hDist = Math.max(40, Math.hypot(p.pos.x - emOrig.x, p.pos.y - emOrig.y));
           boss.titanLaserAngle = Math.atan2(p.pos.y - emOrig.y, p.pos.x - emOrig.x);
           boss.titanTailPitch = Math.atan2((p.z + 44) - emOrig.z, hDist);
@@ -8516,9 +8791,9 @@ export class Simulation {
       if (boss.titanSubPhase === 'windup') {
         boss.titanFacing = Math.abs(dx) > Math.abs(dy) * 1.1 ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'front' : 'back';
         if (boss.titanPhaseElapsed >= cfg.windupDuration) {
-          // Probe valid terrain landing spot ~140u in front of player (strictly inside playable bounds & outside hollow tower)
+          // Probe valid terrain landing spot in front of 2x Boss (strictly inside playable bounds & outside hollow tower)
           const pAng = Math.atan2(boss.pos.y - p.pos.y, boss.pos.x - p.pos.x);
-          const standOff = dist < 175 ? 95 : 140;
+          const standOff = dist < 350 ? 220 : 300;
           const desiredSpot = { x: p.pos.x + Math.cos(pAng) * standOff, y: p.pos.y + Math.sin(pAng) * standOff };
           const safeTarget = this.findBossLeapLandingSpot(boss, desiredSpot, p.groundZ);
           const leapDist = Math.hypot(safeTarget.x - boss.pos.x, safeTarget.y - boss.pos.y);
@@ -8543,7 +8818,7 @@ export class Simulation {
         const s = boss.bossLeapStart;
         const t = boss.bossLeapTarget;
         const leapDist = Math.hypot(t.x - s.x, t.y - s.y);
-        const arcPeak = Math.min(340, Math.max(110, leapDist * 0.25 + Math.abs(t.z - s.z) * 0.35));
+        const arcPeak = Math.min(480, Math.max(150, leapDist * 0.28 + Math.abs(t.z - s.z) * 0.35));
 
         boss.pos.x = s.x + (t.x - s.x) * u;
         boss.pos.y = s.y + (t.y - s.y) * u;
@@ -8574,7 +8849,7 @@ export class Simulation {
             type: 'stage1_boss_dual_slash',
             data: { id: boss.id, slashIndex: slashIdx, pos: { ...boss.pos }, z: boss.z, angle: faceAng, radius: cfg.slashRange }
           });
-          if (!p.isDashing && dist <= cfg.slashRange && Math.abs(p.z - boss.z) <= 160) {
+          if (!p.isDashing && dist <= cfg.slashRange && Math.abs(p.z - boss.z) <= 300) {
             let aDiff = Math.atan2(p.pos.y - boss.pos.y, p.pos.x - boss.pos.x) - faceAng;
             while (aDiff < -Math.PI) aDiff += Math.PI * 2;
             while (aDiff > Math.PI) aDiff -= Math.PI * 2;
@@ -8641,9 +8916,9 @@ export class Simulation {
         for (let k = spawnedAlready; k < targetSpawned; k++) {
           const frac = total > 1 ? k / (total - 1) : 0.5;
           const ang = startAng + dir * cfg.sweepArcRad * frac;
-          const originX = boss.pos.x + Math.cos(ang) * 115;
-          const originY = boss.pos.y + Math.sin(ang) * 115;
-          const originZ = boss.z + 155;
+          const originX = boss.pos.x + Math.cos(ang) * 230;
+          const originY = boss.pos.y + Math.sin(ang) * 230;
+          const originZ = boss.z + 310;
           const travelTime = Math.max(0.45, dist / cfg.shardSpeed);
           const vz = (p.z + 46 - originZ) / travelTime;
 
@@ -8671,7 +8946,7 @@ export class Simulation {
         // Close-range sweeping tail impact
         if (((boss.titanSlashHitMask ?? 0) & 1) === 0 && u >= 0.45) {
           boss.titanSlashHitMask = (boss.titanSlashHitMask ?? 0) | 1;
-          if (!p.isDashing && dist <= cfg.meleeSweepRadius && Math.abs(p.z - boss.z) <= 155) {
+          if (!p.isDashing && dist <= cfg.meleeSweepRadius && Math.abs(p.z - boss.z) <= 300) {
             this.damagePlayer(cfg.meleeSweepDamage, false, boss, 'melee');
           }
         }
@@ -8741,9 +9016,9 @@ export class Simulation {
         (boss.titanLaserAngle ?? aimAng) + Math.max(-bodyTurn, Math.min(bodyTurn, angleDiff));
 
       const origin = boss.titanLaserOrigin ?? {
-        x: boss.pos.x + Math.cos(boss.titanLaserAngle) * 72,
-        y: boss.pos.y + Math.sin(boss.titanLaserAngle) * 72,
-        z: boss.z + 270
+        x: boss.pos.x + Math.cos(boss.titanLaserAngle) * 144,
+        y: boss.pos.y + Math.sin(boss.titanLaserAngle) * 144,
+        z: boss.z + 540
       };
       const beamDx = tgt.x - origin.x;
       const beamDy = tgt.y - origin.y;
@@ -8782,8 +9057,8 @@ export class Simulation {
         const vertGap = Math.abs(pCenterZ - closestZ);
 
         if (
-          horizGap <= 62 &&
-          vertGap <= 72 &&
+          horizGap <= 115 &&
+          vertGap <= 135 &&
           this.state.terrain.checkLineOfSight3D(origin, { x: p.pos.x, y: p.pos.y, z: p.z + 48 })
         ) {
           if (!p.isDashing) {
@@ -8830,7 +9105,7 @@ export class Simulation {
 
           this.state.events.push({
             type: 'stage1_boss_spine_launch',
-            data: { id: boss.id, pos: { ...boss.pos }, z: boss.z + 205, duration: cfg.rainDuration }
+            data: { id: boss.id, pos: { ...boss.pos }, z: boss.z + 410, duration: cfg.rainDuration }
           });
         }
       } else {

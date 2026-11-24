@@ -5,15 +5,15 @@ import type { EnemyState, Vector2 } from '../sim/types';
 import type { TerrainSystem } from '../sim/TerrainSystem';
 
 const RIFT_STALKER_GLB_URL = '/assets/models/rift_stalker_3d.glb';
-const RIFT_STALKER_WORLD_SCALE = 410.0; // Scales ~0.95m tail arch -> ~390u & ~0.86m leg span -> ~350u
+const RIFT_STALKER_WORLD_SCALE = 820.0; // Scales 2x taller (~780u tail arch & ~700u leg span)
 
 const LEG_PREFS = [
-  { pref: 'Leg_Front_L', footOffX: 62, footOffZ: 142 },
-  { pref: 'Leg_Front_R', footOffX: -69, footOffZ: 131 },
-  { pref: 'Leg_MidSlash_L', footOffX: 169, footOffZ: 27 },
-  { pref: 'Leg_MidSlash_R', footOffX: -169, footOffZ: -9 },
-  { pref: 'Leg_Rear_L', footOffX: 35, footOffZ: -65 },
-  { pref: 'Leg_Rear_R', footOffX: -32, footOffZ: -83 }
+  { pref: 'Leg_Front_L', footOffX: 124, footOffZ: 284 },
+  { pref: 'Leg_Front_R', footOffX: -138, footOffZ: 262 },
+  { pref: 'Leg_MidSlash_L', footOffX: 338, footOffZ: 54 },
+  { pref: 'Leg_MidSlash_R', footOffX: -338, footOffZ: -18 },
+  { pref: 'Leg_Rear_L', footOffX: 70, footOffZ: -130 },
+  { pref: 'Leg_Rear_R', footOffX: -64, footOffZ: -166 }
 ] as const;
 
 interface CachedRiftStalkerAsset {
@@ -244,9 +244,9 @@ export class RiftStalker3DModel {
       return out;
     }
     // Fallback before async GLB finishes mounting
-    const fwdX = Math.sin(this.currentYaw) * 95;
-    const fwdZ = Math.cos(this.currentYaw) * 95;
-    out.set(this.group.position.x + fwdX, this.group.position.y + 295, this.group.position.z + fwdZ);
+    const fwdX = Math.sin(this.currentYaw) * 190;
+    const fwdZ = Math.cos(this.currentYaw) * 190;
+    out.set(this.group.position.x + fwdX, this.group.position.y + 590, this.group.position.z + fwdZ);
     return out;
   }
 
@@ -260,7 +260,7 @@ export class RiftStalker3DModel {
       node.getWorldPosition(out);
       return out;
     }
-    out.set(this.group.position.x, this.group.position.y + 205, this.group.position.z);
+    out.set(this.group.position.x, this.group.position.y + 410, this.group.position.z);
     return out;
   }
 
@@ -348,7 +348,7 @@ export class RiftStalker3DModel {
   private applyTerrainFootAdaptation(e: EnemyState, dt: number): void {
     const isAirborneOrEmerging = e.isBossLeaping || e.titanState === 'emerging' || e.titanState === 'dying';
     if (!this.terrain || isAirborneOrEmerging) {
-      const targetY = e.titanState === 'emerging' ? e.z : e.z - 6.0;
+      const targetY = e.titanState === 'emerging' ? e.z : e.z - 12.0;
       this.smoothedGroundY += (targetY - this.smoothedGroundY) * Math.min(1.0, dt * 16);
       this.smoothedPitch += (0 - this.smoothedPitch) * Math.min(1.0, dt * 8);
       this.smoothedRoll += (0 - this.smoothedRoll) * Math.min(1.0, dt * 8);
@@ -369,7 +369,7 @@ export class RiftStalker3DModel {
       const lp = LEG_PREFS[i];
       const wx = e.pos.x + lp.footOffX * cosY + lp.footOffZ * sinY;
       const wy = e.pos.y + (-lp.footOffX * sinY + lp.footOffZ * cosY);
-      const fh = this.terrain.getFastVisualHeight(wx, wy, e.groundZ + 80, 56);
+      const fh = this.terrain.getFastVisualHeight(wx, wy, e.groundZ + 140, 56);
       this.scratchFootH[i] = fh;
       sumAll += fh;
       if (fh < lowestH) lowestH = fh;
@@ -385,14 +385,14 @@ export class RiftStalker3DModel {
     const avgRight = sumRight * 0.5;
 
     // Fit pitch/roll plane across wide 6-foot stance so body hugs slopes cleanly
-    const targetPitch = THREE.MathUtils.clamp(-Math.atan2(avgFront - avgRear, 215), -0.34, 0.34);
-    const targetRoll = THREE.MathUtils.clamp(Math.atan2(avgLeft - avgRight, 210), -0.30, 0.30);
+    const targetPitch = THREE.MathUtils.clamp(-Math.atan2(avgFront - avgRear, 430), -0.34, 0.34);
+    const targetRoll = THREE.MathUtils.clamp(Math.atan2(avgLeft - avgRight, 420), -0.30, 0.30);
 
-    // Anchor Y to lower support plane with 7u claw-contact sink so zero legs hover above flat ground or slopes
-    const centerH = this.terrain.getFastVisualHeight(e.pos.x, e.pos.y, e.groundZ + 60, 56);
+    // Anchor Y to lower support plane with 14u claw-contact sink so zero legs hover above flat ground or slopes
+    const centerH = this.terrain.getFastVisualHeight(e.pos.x, e.pos.y, e.groundZ + 120, 56);
     const avgFootH = sumAll / LEG_PREFS.length;
     const supportBlend = Math.min(centerH, avgFootH * 0.65 + lowestH * 0.35);
-    const targetGroundY = Math.max(centerH - 42, Math.min(centerH + 6, supportBlend)) - 7.0;
+    const targetGroundY = Math.max(centerH - 84, Math.min(centerH + 12, supportBlend)) - 14.0;
 
     const blend = Math.min(1.0, dt * 14.0);
     this.smoothedGroundY += (targetGroundY - this.smoothedGroundY) * blend;

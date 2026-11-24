@@ -53,11 +53,28 @@ export interface LoadedTestMap {
 const DEFAULT_WORLD_SIZE = 3600;
 const GRID_RES = 361;
 
+let lastBrowserYieldMs = 0;
+
+/**
+ * Cooperatively yields back to the browser event loop when running in a browser context
+ * and more than 12ms has elapsed on the main thread, preventing UI input freezes while
+ * heavy 3D map geometry and spatial colliders are prepared in the background.
+ */
+async function maybeYieldToBrowser(force: boolean = false): Promise<void> {
+  if (typeof window === 'undefined') return;
+  const now = performance.now();
+  if (force || now - lastBrowserYieldMs >= 12) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    lastBrowserYieldMs = performance.now();
+  }
+}
+
 export async function loadTestMapFromUrl(
   url: string,
   fileName: string,
   scaleMode: TestMapScaleMode = 'auto'
 ): Promise<LoadedTestMap> {
+  preloadStage1EnvTextures();
   const res = await fetch(url);
   if (!res.ok) {
     throw new Error(`Could not fetch "${url}" (${res.status}).`);
@@ -70,6 +87,7 @@ export async function loadTestMapFromFile(
   file: File,
   scaleMode: TestMapScaleMode = 'auto'
 ): Promise<LoadedTestMap> {
+  preloadStage1EnvTextures();
   const buffer = await file.arrayBuffer();
   return parseAndPrepareTestMap(buffer, file.name, scaleMode);
 }
@@ -82,6 +100,7 @@ async function parseAndPrepareTestMap(
   const ext = fileName.split('.').pop()?.toLowerCase() || '';
   let model: THREE.Object3D;
 
+  lastBrowserYieldMs = performance.now();
   if (ext === 'glb' || ext === 'gltf') {
     const loader = new GLTFLoader();
     const gltf = await loader.parseAsync(buffer, '');
@@ -437,8 +456,12 @@ async function parseAndPrepareTestMap(
     });
   }
 
+  await maybeYieldToBrowser();
+
   // Recompute position-welded smooth vertex normals across split-vertex terrain & curved architecture
   // so hills, potholes, riverbanks, and the cylindrical Tower render smoothly instead of flat polygon facets.
+  const meshesToSmooth: THREE.BufferGeometry[] = [];
+  const queuedSmoothGeos = new Set<THREE.BufferGeometry>();
   model.traverse((obj) => {
     if (!isObjectVisibleInTree(obj) || isSkydomeObject(obj)) return;
     const mesh = obj as THREE.Mesh;
@@ -454,15 +477,21 @@ async function parseAndPrepareTestMap(
     const pos = geo.attributes.position;
     if (!pos || pos.count < 9) return;
 
-    if (isTowerObject(mesh)) {
-      // Smooth curved concrete cylinder walls & spiral asphalt ramps while keeping 90-deg stair edges sharp
-      smoothSplitVertexNormals(geo, 48, true);
-    } else {
-      // Organic sculpted terrain (Soil_03_1K), cliffs, potholes, bridges & waterfall rocks:
-      // wide crease angle with hemisphere alignment eliminates facets AND prevents dark seams on flipped faces
-      smoothSplitVertexNormals(geo, 88, true);
-    }
+    // Note: Tower meshes are smoothed once inside widenArtifactTowerSteps() after radial expansion.
+    if (isTowerObject(mesh)) return;
+    if (queuedSmoothGeos.has(geo)) return;
+    queuedSmoothGeos.add(geo);
+
+    meshesToSmooth.push(geo);
   });
+
+  for (let i = 0; i < meshesToSmooth.length; i++) {
+    smoothSplitVertexNormals(meshesToSmooth[i], 88, true);
+    if ((i & 7) === 7) {
+      await maybeYieldToBrowser();
+    }
+  }
+  await maybeYieldToBrowser();
 
   // Measure authored solid terrain bounds (excluding oversized protruding water planes & skydomes)
   const rawBox = new THREE.Box3();
@@ -556,14 +585,15 @@ async function parseAndPrepareTestMap(
   clipWaterMeshesToBounds(root, clipBounds);
 
   // Non-destructively widen the exterior Artifact Tower spiral steps before building terrain colliders
-  widenArtifactTowerSteps(root);
+  await widenArtifactTowerSteps(root);
   root.updateMatrixWorld(true);
+  await maybeYieldToBrowser();
 
   // Derive narrow flowing river-channel / waterfall plunge-pool freeze profile (mostly frozen ice)
   const waterFreezeProfile = extractWaterFreezeProfileFromScene(root);
 
   // Build True-3D Classified Spatial Triangle Collider
-  const { collider, heightGrid, minHeight, maxHeight } = buildMeshColliderAndFallbackGrid(
+  const { collider, heightGrid, minHeight, maxHeight } = await buildMeshColliderAndFallbackGrid(
     root,
     worldWidth,
     worldHeight,
@@ -573,9 +603,11 @@ async function parseAndPrepareTestMap(
     seaLevelWorldY,
     waterFreezeProfile
   );
+  await maybeYieldToBrowser();
 
   // Locate key authored landmarks directly from the transformed GLB hierarchy
   const layout = extractMapLandmarksAndLayout(root, collider, worldWidth, worldHeight, clipBounds);
+  await maybeYieldToBrowser();
 
   // Apply real-texture triplanar height/slope terrain blend shader, frozen-ice shader, & Overseer Tower glyph shader
   const waterLevelY = waterFreezeProfile ? waterFreezeProfile.waterLevelY : seaLevelWorldY;
@@ -597,6 +629,7 @@ async function parseAndPrepareTestMap(
   applyFrozenWaterShader(root, waterFreezeProfile, waterTimeUniform, freezeUniforms);
   applyOverseerTowerShader(root, waterTimeUniform, { x: layout.artifactPos.x, z: layout.artifactPos.y }, freezeUniforms);
   batchStaticMapMeshesByMaterial(root);
+  await maybeYieldToBrowser();
 
   return {
     root,
@@ -660,7 +693,16 @@ function smoothSplitVertexNormals(
   // Quantization step ~ 1/100,000 of mesh extent (e.g. ~0.004m on a 400m terrain) so shared corners weld cleanly
   const invStep = Math.min(2000, Math.max(50, Math.round(100000 / extent)));
 
-  const groupMap = new Map<string, number>();
+  // Zero-string-allocation open-addressed spatial hash table for welding coincident split vertices
+  const hashBits = Math.max(4, 32 - Math.clz32(Math.max(16, vertCount * 2 - 1)));
+  const hashSize = 1 << Math.min(22, hashBits);
+  const hashMask = hashSize - 1;
+  const hashHead = new Int32Array(hashSize);
+  hashHead.fill(-1);
+  const hashNext = new Int32Array(vertCount);
+  const qxArr = new Int32Array(vertCount);
+  const qyArr = new Int32Array(vertCount);
+  const qzArr = new Int32Array(vertCount);
   const vertGroup = new Int32Array(vertCount);
   let uniqueCount = 0;
 
@@ -668,11 +710,21 @@ function smoothSplitVertexNormals(
     const qx = Math.round(pos.getX(i) * invStep);
     const qy = Math.round(pos.getY(i) * invStep);
     const qz = Math.round(pos.getZ(i) * invStep);
-    const key = `${qx},${qy},${qz}`;
-    let g = groupMap.get(key);
-    if (g === undefined) {
+    qxArr[i] = qx;
+    qyArr[i] = qy;
+    qzArr[i] = qz;
+    const h = (Math.imul(qx, 73856093) ^ Math.imul(qy, 19349663) ^ Math.imul(qz, 83492791)) & hashMask;
+    let g = -1;
+    for (let cur = hashHead[h]; cur !== -1; cur = hashNext[cur]) {
+      if (qxArr[cur] === qx && qyArr[cur] === qy && qzArr[cur] === qz) {
+        g = vertGroup[cur];
+        break;
+      }
+    }
+    if (g === -1) {
       g = uniqueCount++;
-      groupMap.set(key, g);
+      hashNext[i] = hashHead[h];
+      hashHead[h] = i;
     }
     vertGroup[i] = g;
   }
@@ -707,13 +759,13 @@ function smoothSplitVertexNormals(
     const nx = e1y * e2z - e1z * e2y;
     const ny = e1z * e2x - e1x * e2z;
     const nz = e1x * e2y - e1y * e2x;
-    const len = Math.hypot(nx, ny, nz);
+    const lenSq = nx * nx + ny * ny + nz * nz;
 
-    if (len > 1e-10) {
+    if (lenSq > 1e-20) {
       fnX[t] = nx;
       fnY[t] = ny;
       fnZ[t] = nz;
-      const invLen = 1 / len;
+      const invLen = 1 / Math.sqrt(lenSq);
       unX[t] = nx * invLen;
       unY[t] = ny * invLen;
       unZ[t] = nz * invLen;
@@ -784,9 +836,9 @@ function smoothSplitVertexNormals(
             sz += fnZ[t2];
           }
         }
-        const sLen = Math.hypot(sx, sy, sz);
-        if (sLen > 1e-10) {
-          const inv = 1 / sLen;
+        const sLenSq = sx * sx + sy * sy + sz * sz;
+        if (sLenSq > 1e-20) {
+          const inv = 1 / Math.sqrt(sLenSq);
           outNormals[vi * 3] = sx * inv;
           outNormals[vi * 3 + 1] = sy * inv;
           outNormals[vi * 3 + 2] = sz * inv;
@@ -823,9 +875,9 @@ function smoothSplitVertexNormals(
           sz += fnZ[t2];
         }
       }
-      const sLen = Math.hypot(sx, sy, sz);
-      if (sLen > 1e-10) {
-        const inv = 1 / sLen;
+      const sLenSq = sx * sx + sy * sy + sz * sz;
+      if (sLenSq > 1e-20) {
+        const inv = 1 / Math.sqrt(sLenSq);
         outNormals[vi * 3] = sx * inv;
         outNormals[vi * 3 + 1] = sy * inv;
         outNormals[vi * 3 + 2] = sz * inv;
@@ -1076,6 +1128,18 @@ function extractWaterFreezeProfileFromScene(root: THREE.Group): WaterFreezeProfi
 
 const stage1EnvTexCache = new Map<string, THREE.Texture>();
 let stage1FallbackWhiteTex: THREE.DataTexture | null = null;
+const STAGE1_ENV_TEX_URLS = [
+  '/assets/environment/floor_ref_thawed_earth.png',
+  '/assets/environment/floor_ref_rocky_fissure.png',
+  '/assets/environment/Icy%20Alien%20Frostland%20Texture.png',
+  '/assets/environment/floor_ref_organic_moss.png'
+];
+
+export function preloadStage1EnvTextures(): void {
+  for (const url of STAGE1_ENV_TEX_URLS) {
+    getStage1EnvTexture(url);
+  }
+}
 
 function getStage1EnvTexture(url: string): { tex: THREE.Texture; isReal: boolean } {
   const canLoadTex = typeof window !== 'undefined' && typeof Image !== 'undefined';
@@ -1116,7 +1180,7 @@ function applyHeroCrystalDetailShader(
   variant: 'ruby' | 'amethyst'
 ): void {
   const isRuby = variant === 'ruby';
-  phys.customProgramCacheKey = () => `stage1_hero_crystal_v1_${variant}`;
+  phys.customProgramCacheKey = () => `stage1_hero_crystal_v2_${variant}`;
   phys.onBeforeCompile = (shader) => {
     shader.vertexShader = shader.vertexShader
       .replace(
@@ -1170,7 +1234,9 @@ void main() {`
   vec3 hcFaceN = hcLen > 1e-5 ? (hcCross / hcLen) : vec3(0.0, 1.0, 0.0);
   if (!gl_FrontFacing) hcFaceN = -hcFaceN;
 
-  vec3 hcViewDir = normalize(cameraPosition - vHeroCrystalWorldPos);
+  vec3 hcViewRaw = cameraPosition - vHeroCrystalWorldPos;
+  float hcViewLen = length(hcViewRaw);
+  vec3 hcViewDir = hcViewLen > 1e-5 ? (hcViewRaw / hcViewLen) : vec3(0.0, 0.0, 1.0);
   float hcNdotV = clamp(abs(dot(hcFaceN, hcViewDir)), 0.0, 1.0);
   float hcFacetRand = hcHash3(floor(hcFaceN * 10.0 + vec3(11.3, 19.7, 5.1)));
   float hcFacetShade = mix(0.78, 1.28, hcFacetRand * 0.6 + clamp(dot(hcFaceN, normalize(vec3(0.4, 0.85, -0.35))) * 0.5 + 0.5, 0.0, 1.0) * 0.4);
@@ -1178,9 +1244,9 @@ void main() {`
   // Fine crystalline growth striations & sharp facet edges
   float hcStrCoord = vHeroCrystalWorldPos.y * 0.14 + dot(vHeroCrystalWorldPos.xz, vec2(0.045, -0.035));
   float hcStriation = smoothstep(0.64, 0.96, sin(hcStrCoord + hcFacetRand * 6.2831) * 0.5 + 0.5);
-  float hcEdge = clamp(length(fwidth(hcFaceN)) * 1.35 + pow(clamp(1.0 - hcNdotV, 0.0, 1.0), 2.5) * 0.48, 0.0, 1.0);
+  float hcEdge = clamp(length(fwidth(hcFaceN)) * 1.35 + pow(clamp(1.0 - hcNdotV, 1e-4, 1.0), 2.5) * 0.48, 0.0, 1.0);
   float hcCaustic = hcNoise3(vHeroCrystalWorldPos * 0.032 + hcFaceN * 1.8);
-  float hcInternalCore = pow(hcNdotV, 1.4) * (0.45 + 0.55 * hcCaustic);
+  float hcInternalCore = pow(clamp(hcNdotV, 1e-4, 1.0), 1.4) * (0.45 + 0.55 * hcCaustic);
 
   vec3 hcEdgeTint = ${isRuby ? 'vec3(1.0, 0.68, 0.78)' : 'vec3(0.76, 0.84, 1.0)'};
   diffuseColor.rgb = mix(diffuseColor.rgb * hcFacetShade, hcEdgeTint, clamp(hcEdge * 0.48 + hcStriation * 0.18 + hcInternalCore * 0.28, 0.0, 1.0));`
@@ -1237,7 +1303,7 @@ function applyStage1TerrainBlendShader(
       processedMats.add(m.uuid);
 
       const stdMat = m as THREE.MeshStandardMaterial;
-      stdMat.customProgramCacheKey = () => 'stage1_terrain_blend_v3';
+      stdMat.customProgramCacheKey = () => 'stage1_terrain_blend_v4';
       stdMat.onBeforeCompile = (shader) => {
         shader.uniforms.uWaterLevelY = { value: opts.waterLevelY };
         shader.uniforms.uMinY = { value: opts.minWorldY };
@@ -1258,7 +1324,7 @@ function applyStage1TerrainBlendShader(
           )
           .replace(
             '#include <beginnormal_vertex>',
-            `#include <beginnormal_vertex>\nvTerrainWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+            `#include <beginnormal_vertex>\nvec3 tWNRaw = mat3(modelMatrix) * objectNormal;\nfloat tWNLen = length(tWNRaw);\nvTerrainWorldNormal = tWNLen > 1e-5 ? (tWNRaw / tWNLen) : vec3(0.0, 1.0, 0.0);`
           )
           .replace(
             '#include <begin_vertex>',
@@ -1320,9 +1386,10 @@ void main() {`
           .replace(
             '#include <map_fragment>',
             `#include <map_fragment>
-  vec3 tWN = normalize(vTerrainWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  float tVWNLen = length(vTerrainWorldNormal);
+  vec3 tWN = (tVWNLen > 1e-5 ? (vTerrainWorldNormal / tVWNLen) : vec3(0.0, 1.0, 0.0)) * (gl_FrontFacing ? 1.0 : -1.0);
   vec3 tAbsN = abs(tWN);
-  vec3 tTriW = pow(tAbsN, vec3(4.0));
+  vec3 tTriW = pow(max(tAbsN, vec3(1e-4)), vec3(4.0));
   tTriW /= (tTriW.x + tTriW.y + tTriW.z + 0.0001);
   float tUpDot = clamp(tAbsN.y, 0.0, 1.0);
   float tTexLum = dot(diffuseColor.rgb, vec3(0.299, 0.587, 0.114));
@@ -1364,7 +1431,7 @@ void main() {`
   float tNearWater = smoothstep(uWaterLevelY - 25.0, uWaterLevelY + 25.0, vTerrainWorldPos.y) *
                      (1.0 - smoothstep(uWaterLevelY + 90.0, uWaterLevelY + 220.0, vTerrainWorldPos.y));
   float tPatchNoise = smoothstep(0.55, 0.78, tFbm2(vTerrainWorldPos.xz * 0.0042 + vec2(3.1, 7.4)));
-  float tVeinSharp = pow(1.0 - abs(tNoise2(vTerrainWorldPos.xz * 0.022 + vec2(1.7, 4.9)) * 2.0 - 1.0), 3.0);
+  float tVeinSharp = pow(max(1.0 - abs(tNoise2(vTerrainWorldPos.xz * 0.022 + vec2(1.7, 4.9)) * 2.0 - 1.0), 1e-4), 3.0);
   vec3 tMossCol = vec3(0.05, 0.16, 0.18);
   if (uHasDetailTex > 0.5) {
     vec3 mTex = texture2D(uTexMoss, vTerrainWorldPos.xz * 0.0028).rgb;
@@ -1468,7 +1535,7 @@ function applyFrozenWaterShader(
     });
 
     mat.customProgramCacheKey = () =>
-      isWaterfall ? 'stage1_open_waterfall_v3' : 'stage1_frozen_water_v3';
+      isWaterfall ? 'stage1_open_waterfall_v4' : 'stage1_frozen_water_v4';
 
     mat.onBeforeCompile = (shader) => {
       shader.uniforms.uTime = timeUniform;
@@ -1575,7 +1642,7 @@ void main() {`
 
   // Real-texture crystalline glacier ice sheet with crisp fracture fissures
   float wFrostNoise = wNoise2(vWaterWorldPos.xz * 0.018);
-  float wCrackLine = pow(1.0 - abs(wNoise2(vWaterWorldPos.xz * 0.015 + vec2(1.4, -2.9)) * 2.0 - 1.0), 6.0);
+  float wCrackLine = pow(max(1.0 - abs(wNoise2(vWaterWorldPos.xz * 0.015 + vec2(1.4, -2.9)) * 2.0 - 1.0), 1e-4), 6.0);
   vec3 wIceCol = mix(vec3(0.28, 0.44, 0.60), vec3(0.56, 0.72, 0.86), wFrostNoise);
   if (uHasIceTex > 0.5) {
     vec2 iUvA = vWaterWorldPos.xz * 0.0026;
@@ -1672,7 +1739,7 @@ function applyOverseerTowerShader(
       const isWalkway = matLow.includes('asphalt');
 
       stdMat.customProgramCacheKey = () =>
-        isWalkway ? 'stage1_tower_walkway_v3' : 'stage1_tower_stone_v3';
+        isWalkway ? 'stage1_tower_walkway_v4' : 'stage1_tower_stone_v4';
 
       stdMat.onBeforeCompile = (shader) => {
         shader.uniforms.uTime = timeUniform;
@@ -1693,7 +1760,7 @@ function applyOverseerTowerShader(
           )
           .replace(
             '#include <beginnormal_vertex>',
-            `#include <beginnormal_vertex>\nvTowerWorldNormal = normalize(mat3(modelMatrix) * objectNormal);`
+            `#include <beginnormal_vertex>\nvec3 twWNRaw = mat3(modelMatrix) * objectNormal;\nfloat twWNLen = length(twWNRaw);\nvTowerWorldNormal = twWNLen > 1e-5 ? (twWNRaw / twWNLen) : vec3(0.0, 1.0, 0.0);`
           )
           .replace(
             '#include <begin_vertex>',
@@ -1750,7 +1817,7 @@ float twFbm(vec3 p) {
 
 vec3 twTriplanar(sampler2D tex, vec3 wp, vec3 wn, float sc) {
   vec3 bw = abs(wn);
-  bw = pow(bw, vec3(3.0));
+  bw = pow(max(bw, vec3(1e-4)), vec3(3.0));
   bw /= max(bw.x + bw.y + bw.z, 0.0001);
   vec3 cx = texture2D(tex, wp.zy * sc).rgb;
   vec3 cy = texture2D(tex, wp.xz * sc).rgb;
@@ -1763,7 +1830,8 @@ void main() {`
           .replace(
             '#include <map_fragment>',
             `#include <map_fragment>
-  vec3 twMapN = normalize(vTowerWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  float twMapNLen = length(vTowerWorldNormal);
+  vec3 twMapN = (twMapNLen > 1e-5 ? (vTowerWorldNormal / twMapNLen) : vec3(0.0, 1.0, 0.0)) * (gl_FrontFacing ? 1.0 : -1.0);
   float twMacro = twFbm(vTowerWorldPos * 0.0031);
   float twMicro = twFbm(vTowerWorldPos * 0.015 + vec3(twMacro * 1.4));
   vec3 twRockSample = uHasDetailTex > 0.5
@@ -1793,7 +1861,8 @@ void main() {`
           .replace(
             '#include <emissivemap_fragment>',
             `#include <emissivemap_fragment>
-  vec3 twEmN = normalize(vTowerWorldNormal) * (gl_FrontFacing ? 1.0 : -1.0);
+  float twEmNLen = length(vTowerWorldNormal);
+  vec3 twEmN = (twEmNLen > 1e-5 ? (vTowerWorldNormal / twEmNLen) : vec3(0.0, 1.0, 0.0)) * (gl_FrontFacing ? 1.0 : -1.0);
   vec3 twWarp = vec3(
     twFbm(vTowerWorldPos * 0.0036 + vec3(3.7, 1.2, 9.4)),
     twFbm(vTowerWorldPos * 0.0036 + vec3(14.1, 7.8, 2.5)),
@@ -1820,7 +1889,7 @@ void main() {`
  * at runtime before collider generation, preserving the gray stone material aesthetic, vertical
  * spiral progression, inner core cylinder, and summit teleporter circle.
  */
-function widenArtifactTowerSteps(root: THREE.Object3D): void {
+async function widenArtifactTowerSteps(root: THREE.Object3D): Promise<void> {
   const towerMeshes: Array<{ mesh: THREE.Mesh; isWalkway: boolean }> = [];
   const towerBox = new THREE.Box3();
   const v = new THREE.Vector3();
@@ -1844,71 +1913,21 @@ function widenArtifactTowerSteps(root: THREE.Object3D): void {
   const tcZ = (towerBox.min.z + towerBox.max.z) * 0.5;
   const tMinY = towerBox.min.y;
   const tMaxY = towerBox.max.y;
-  const heightSpan = Math.max(100, tMaxY - tMinY);
-  const SLICE_COUNT = 48;
-  const sliceHeight = heightSpan / SLICE_COUNT;
-
-  const walkwayRadiiBySlice: number[][] = Array.from({ length: SLICE_COUNT }, () => []);
-
-  for (const entry of towerMeshes) {
-    if (!entry.isWalkway) continue;
-    const pos = entry.mesh.geometry.attributes.position as THREE.BufferAttribute | undefined;
-    if (!pos) continue;
-    for (let i = 0; i < pos.count; i++) {
-      v.fromBufferAttribute(pos, i).applyMatrix4(entry.mesh.matrixWorld);
-      const r = Math.hypot(v.x - tcX, v.z - tcZ);
-      const s = Math.max(0, Math.min(SLICE_COUNT - 1, Math.floor((v.y - tMinY) / sliceHeight)));
-      walkwayRadiiBySlice[s].push(r);
-    }
-  }
-
-  const rawInnerR = new Float32Array(SLICE_COUNT);
-  rawInnerR.fill(Infinity);
-  for (let s = 0; s < SLICE_COUNT; s++) {
-    const arr = walkwayRadiiBySlice[s];
-    if (arr.length === 0) continue;
-    arr.sort((a, b) => a - b);
-    const pIdx = Math.min(arr.length - 1, Math.floor(arr.length * 0.08));
-    rawInnerR[s] = arr[pIdx];
-  }
-
-  const sliceInnerR = new Float32Array(SLICE_COUNT);
-  let lastKnownR = 540;
-  for (let s = 0; s < SLICE_COUNT; s++) {
-    if (Number.isFinite(rawInnerR[s])) {
-      lastKnownR = rawInnerR[s];
-      sliceInnerR[s] = lastKnownR;
-    } else {
-      let nextKnownR = lastKnownR;
-      for (let k = s + 1; k < SLICE_COUNT; k++) {
-        if (Number.isFinite(rawInnerR[k])) {
-          nextKnownR = rawInnerR[k];
-          break;
-        }
-      }
-      sliceInnerR[s] = Math.min(lastKnownR, nextKnownR);
-    }
-  }
 
   const smoothstep01 = (x: number): number => {
     const t = Math.max(0, Math.min(1, x));
     return t * t * (3 - 2 * t);
   };
 
-  const sampleInnerRadius = (wy: number): number => {
-    const f = Math.max(0, Math.min(SLICE_COUNT - 1, (wy - tMinY) / sliceHeight - 0.5));
-    const i0 = Math.floor(f);
-    const i1 = Math.min(SLICE_COUNT - 1, i0 + 1);
-    const alpha = f - i0;
-    return sliceInnerR[i0] * (1 - alpha) + sliceInnerR[i1] * alpha;
-  };
-
   const EXPANSION_FACTOR = 0.65;
   const CONSTANT_PIVOT_R = 300;
   const invMat = new THREE.Matrix4();
+  const processedGeos = new Set<THREE.BufferGeometry>();
 
   for (const entry of towerMeshes) {
     const geo = entry.mesh.geometry as THREE.BufferGeometry;
+    if (processedGeos.has(geo)) continue;
+    processedGeos.add(geo);
     const pos = geo.attributes.position as THREE.BufferAttribute | undefined;
     if (!pos) continue;
     invMat.copy(entry.mesh.matrixWorld).invert();
@@ -1939,6 +1958,7 @@ function widenArtifactTowerSteps(root: THREE.Object3D): void {
     smoothSplitVertexNormals(geo, 48, true);
     geo.computeBoundingBox();
     geo.computeBoundingSphere();
+    await maybeYieldToBrowser();
   }
 }
 
@@ -2057,7 +2077,7 @@ function clipWaterMeshesToBounds(
   });
 }
 
-function buildMeshColliderAndFallbackGrid(
+async function buildMeshColliderAndFallbackGrid(
   root: THREE.Group,
   worldWidth: number,
   worldHeight: number,
@@ -2066,12 +2086,12 @@ function buildMeshColliderAndFallbackGrid(
   hasSculptedSoil03: boolean = false,
   seaLevelWorldY: number = 10,
   waterFreezeProfile: WaterFreezeProfile | null = null
-): {
+): Promise<{
   collider: MeshTerrainCollider;
   heightGrid: Float32Array;
   minHeight: number;
   maxHeight: number;
-} {
+}> {
   const triangles: ColliderTri[] = [];
   const vA = new THREE.Vector3();
   const vB = new THREE.Vector3();
@@ -2209,9 +2229,6 @@ function buildMeshColliderAndFallbackGrid(
         const maxZ = Math.max(vA.z, vB.z, vC.z);
 
         let category: TerrainSurfaceCategory;
-        const triCx = (vA.x + vB.x + vC.x) / 3;
-        const triCz = (vA.z + vB.z + vC.z) / 3;
-        const distFromTower = towerCenter ? Math.hypot(triCx - towerCenter.x, triCz - towerCenter.z) : Infinity;
 
         if (grpInfo.baseRole === 'solid_obstacle') {
           category = 'solid_obstacle';
@@ -2229,6 +2246,9 @@ function buildMeshColliderAndFallbackGrid(
             // Exterior Asphalt spiral walkway: accept both normal and inverted-winding treads/ramps so no stair drops through
             category = nyAbs >= 0.08 ? 'tower_ledge' : 'cliff';
           } else if (hasTowerWalkway && towerCenter) {
+            const triCx = (vA.x + vB.x + vC.x) / 3;
+            const triCz = (vA.z + vB.z + vC.z) / 3;
+            const distFromTower = Math.hypot(triCx - towerCenter.x, triCz - towerCenter.z);
             // Tower concrete walls & interior core below the summit remain non-walkable;
             // allow the summit deck (where Teleporter sits) and all exterior spiral concrete steps/landings
             // (including sloped ny >= 0.32 treads and flipped-winding exterior steps strictly outside the hollow shaft).
@@ -2328,6 +2348,7 @@ function buildMeshColliderAndFallbackGrid(
     maxY: Math.min(worldHeight - 40, clipBounds.maxZ - edgeInset)
   };
 
+  await maybeYieldToBrowser();
   const collider = new MeshTerrainCollider(
     triangles,
     worldWidth,
@@ -2336,16 +2357,44 @@ function buildMeshColliderAndFallbackGrid(
     undefined,
     waterFreezeProfile
   );
+  await maybeYieldToBrowser();
 
   // Sample fallback heightGrid across [0..worldWidth, 0..worldHeight] for legacy minimap/utility consumers
+  // Fast stride-2 sampling with bilinear interpolation cuts 130,321 lookups to 32,761 while preserving contour fidelity
   const heightGrid = new Float32Array(GRID_RES * GRID_RES);
-  for (let gz = 0; gz < GRID_RES; gz++) {
+  const cMinX = clipBounds.minX;
+  const cMaxX = clipBounds.maxX;
+  const cMinZ = clipBounds.minZ;
+  const cMaxZ = clipBounds.maxZ;
+  for (let gz = 0; gz < GRID_RES; gz += 2) {
     const wz = (gz / (GRID_RES - 1)) * worldHeight;
     const rowOff = gz * GRID_RES;
-    for (let gx = 0; gx < GRID_RES; gx++) {
+    const zInside = wz >= cMinZ && wz <= cMaxZ;
+    for (let gx = 0; gx < GRID_RES; gx += 2) {
+      if (!zInside) {
+        heightGrid[rowOff + gx] = 280;
+        continue;
+      }
       const wx = (gx / (GRID_RES - 1)) * worldWidth;
-      const sup = collider.querySupport(wx, wz, 1e6, 22);
-      heightGrid[rowOff + gx] = sup.hit ? sup.height : 280;
+      if (wx < cMinX || wx > cMaxX) {
+        heightGrid[rowOff + gx] = 280;
+        continue;
+      }
+      const h = collider.queryFastGroundHeight(wx, wz, 1e6, 22);
+      heightGrid[rowOff + gx] = h > 0 ? h : 280;
+    }
+    // Interpolate odd X columns on even rows
+    for (let gx = 1; gx < GRID_RES - 1; gx += 2) {
+      heightGrid[rowOff + gx] = 0.5 * (heightGrid[rowOff + gx - 1] + heightGrid[rowOff + gx + 1]);
+    }
+  }
+  // Interpolate odd Z rows
+  for (let gz = 1; gz < GRID_RES - 1; gz += 2) {
+    const rowOff = gz * GRID_RES;
+    const prevRow = (gz - 1) * GRID_RES;
+    const nextRow = (gz + 1) * GRID_RES;
+    for (let gx = 0; gx < GRID_RES; gx++) {
+      heightGrid[rowOff + gx] = 0.5 * (heightGrid[prevRow + gx] + heightGrid[nextRow + gx]);
     }
   }
 
@@ -2755,8 +2804,11 @@ function batchStaticMapMeshesByMaterial(root: THREE.Group): void {
     const convertNonIndexed = hasIndexed && hasNonIndexed;
 
     const bakedGeos: THREE.BufferGeometry[] = [];
+    const validMeshes: THREE.Mesh[] = [];
     for (let i = 0; i < list.length; i++) {
       const m = list[i];
+      const det = m.matrixWorld.determinant();
+      if (!Number.isFinite(det) || Math.abs(det) < 1e-8) continue;
       let g = m.geometry.clone();
       for (const attr of Object.keys(g.attributes)) {
         if (attr !== 'position' && attr !== 'normal' && attr !== 'uv' && attr !== 'uv1' && attr !== 'color') {
@@ -2769,7 +2821,58 @@ function batchStaticMapMeshesByMaterial(root: THREE.Group): void {
         g = nonIdx;
       }
       g.applyMatrix4(m.matrixWorld);
+      if (det < 0) {
+        // Mirrored static meshes invert winding when baked into a single world-space geometry
+        const idx = g.getIndex();
+        if (idx) {
+          const arr = idx.array;
+          for (let k = 0; k + 2 < arr.length; k += 3) {
+            const tmp = arr[k + 1];
+            arr[k + 1] = arr[k + 2];
+            arr[k + 2] = tmp;
+          }
+          idx.needsUpdate = true;
+        } else {
+          for (const attrName of Object.keys(g.attributes)) {
+            const attr = g.getAttribute(attrName);
+            const itemSize = attr.itemSize;
+            const arr = attr.array as Float32Array;
+            for (let k = 0; k + 2 < attr.count; k += 3) {
+              const i1 = (k + 1) * itemSize;
+              const i2 = (k + 2) * itemSize;
+              for (let c = 0; c < itemSize; c++) {
+                const tmp = arr[i1 + c];
+                arr[i1 + c] = arr[i2 + c];
+                arr[i2 + c] = tmp;
+              }
+            }
+            attr.needsUpdate = true;
+          }
+        }
+      }
+      const nAttr = g.getAttribute('normal');
+      if (nAttr) {
+        const nArr = nAttr.array as Float32Array;
+        let dirty = false;
+        for (let k = 0; k + 2 < nArr.length; k += 3) {
+          const nx = nArr[k], ny = nArr[k + 1], nz = nArr[k + 2];
+          const lenSq = nx * nx + ny * ny + nz * nz;
+          if (!Number.isFinite(lenSq) || lenSq < 1e-10) {
+            nArr[k] = 0;
+            nArr[k + 1] = 1;
+            nArr[k + 2] = 0;
+            dirty = true;
+          }
+        }
+        if (dirty) nAttr.needsUpdate = true;
+      }
       bakedGeos.push(g);
+      validMeshes.push(m);
+    }
+
+    if (validMeshes.length < 2) {
+      for (const g of bakedGeos) g.dispose();
+      continue;
     }
 
     const merged = mergeGeometries(bakedGeos, false);
@@ -2788,8 +2891,8 @@ function batchStaticMapMeshesByMaterial(root: THREE.Group): void {
     batchedGroup.add(batchMesh);
     mergedBatchCount++;
 
-    for (let i = 0; i < list.length; i++) {
-      const src = list[i];
+    for (let i = 0; i < validMeshes.length; i++) {
+      const src = validMeshes[i];
       src.parent?.remove(src);
       src.geometry.dispose();
       mergedSourceCount++;

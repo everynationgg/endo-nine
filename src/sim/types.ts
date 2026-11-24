@@ -481,7 +481,7 @@ export interface FloatingSwordData {
   hitApplied?: boolean;
 }
 
-export type EnemyType = 'crawler' | 'spitter' | 'wasp' | 'elite' | 'boss';
+export type EnemyType = 'crawler' | 'spitter' | 'wasp' | 'elite' | 'boss' | 'broodling';
 
 export interface EnemyState {
   id: string;
@@ -501,8 +501,29 @@ export interface EnemyState {
   rangedWindupTimer?: number;
   rangedWindupDuration?: number;
   lockedAttackDir?: { x: number; y: number; z: number };
-  lockedAttackVariant?: 'stinger' | 'spore_bomb' | 'seismic_shard' | 'wasp_sting';
+  lockedAttackVariant?: 'stinger' | 'spore_bomb' | 'seismic_shard' | 'wasp_sting' | 'water_bubble';
   lockedTargetPos?: { x: number; y: number; z: number };
+  // Structured creature animation & combat state machine
+  enemyActionPhase?: 'none' | 'prep' | 'exec' | 'recover' | 'stabilize';
+  enemyActionTimer?: number;
+  enemyActionDuration?: number;
+  enemyActionVariant?:
+    | 'spin_charge'
+    | 'water_bubble'
+    | 'toxic_exhale'
+    | 'ground_slam'
+    | 'punch_r'
+    | 'punch_l'
+    | 'twin_spikes'
+    | 'spawn_brood'
+    | 'brood_dive';
+  enemyActionHitApplied?: boolean;
+  enemyActionTickTimer?: number;
+  secondarySkillCooldown?: number;
+  punchHandNext?: 'left' | 'right';
+  parentQueenId?: string;
+  isSummonedOffspring?: boolean;
+  offspringLifetime?: number;
   attackRange: number;
   isElite: boolean;
   isBoss?: boolean;
@@ -627,6 +648,7 @@ export type ProjectileType =
   | 'flame'
   | 'drone_laser'
   | 'wasp_sting'
+  | 'water_bubble'
   | 'seismic_shard'
   | 'queen_stinger'
   | 'spore_bomb'
@@ -1032,6 +1054,14 @@ export interface SimEvent {
   | 'enemy_emerging'
   | 'enemy_attack_windup'
   | 'enemy_projectile_fired'
+  | 'oreblade_charge_start'
+  | 'oreblade_charge_hit'
+  | 'water_bubble_impact'
+  | 'magmir_slam_telegraph'
+  | 'magmir_slam_impact'
+  | 'magmir_punch_swing'
+  | 'brood_offspring_spawned'
+  | 'brood_offspring_rupture'
   | 'stage_cleared'
   | 'game_over'
   | 'chain_spark'

@@ -2637,10 +2637,10 @@ export class ThreeVFX {
       }
     }
 
-    const puffCount = 8;
+    const puffCount = 10;
     for (let i = 0; i < puffCount; i++) {
       const ang = (i / puffCount) * Math.PI * 2 + (Math.random() - 0.5) * 0.35;
-      const speed = 38 + Math.random() * 44;
+      const speed = 72 + Math.random() * 78;
       const mat = this.acquireBasicMat(
         i % 2 === 0 ? 0xcbd5e1 : 0x7dd3fc,
         0.45,
@@ -2651,13 +2651,13 @@ export class ThreeVFX {
       );
       const mesh = new THREE.Mesh(this.sharedDustGeo, mat);
       mesh.userData.isSharedGeo = true;
-      const startR = 26 + Math.random() * 26;
+      const startR = 52 + Math.random() * 52;
       mesh.position.set(
         pos.x + Math.cos(ang) * startR,
-        baseElev + 7 + Math.random() * 6,
+        baseElev + 12 + Math.random() * 10,
         pos.y + Math.sin(ang) * startR
       );
-      const baseScale = 18 + Math.random() * 14;
+      const baseScale = 36 + Math.random() * 26;
       mesh.scale.set(baseScale, baseScale * 0.7, 1);
       this.group.add(mesh);
 
@@ -2666,7 +2666,7 @@ export class ThreeVFX {
         mesh,
         kind: 'dust',
         vx: Math.cos(ang) * speed,
-        vy: 10 + Math.random() * 14,
+        vy: 18 + Math.random() * 24,
         vz: Math.sin(ang) * speed,
         rotSpeedX: 0,
         rotSpeedY: 0,
@@ -2854,7 +2854,7 @@ export class ThreeVFX {
     }
   }
 
-  /** Clear locked-direction attack telegraph for Void Goliath (0.6s), Brood Queen (0.8s), and Void Wasp (0.3s) */
+  /** Subtle ground telegraph without prohibited trajectory guide lines or generic flash discs */
   public spawnEnemyAttackTelegraph(
     origin: Vector2,
     originZ: number,
@@ -2862,65 +2862,12 @@ export class ThreeVFX {
     variant: string,
     duration: number
   ): void {
-    const colorHex =
-      variant === 'seismic_shard'
-        ? 0xf97316
-        : variant === 'spore_bomb'
-          ? 0xd946ef
-          : variant === 'stinger'
-            ? 0xf43f5e
-            : 0xc084fc;
-    const baseElev = this.getTerrainHeight(origin.x, origin.y, originZ - 36);
-    const ringRadius = variant === 'seismic_shard' ? 68 : variant === 'stinger' || variant === 'spore_bomb' ? 86 : 44;
-    this.spawnShockwaveRing(origin, ringRadius, colorHex, baseElev + 1.5, duration);
-
-    const len = Math.hypot(aimDir.x, aimDir.y);
-    if (len < 1) return;
-    const baseAng = Math.atan2(aimDir.y, aimDir.x);
-
     if (variant === 'spore_bomb') {
       const tx = origin.x + aimDir.x;
       const ty = origin.y + aimDir.y;
       const targetRefZ = originZ + (aimDir.z ?? 0);
       const tElev = this.getTerrainHeight(tx, ty, targetRefZ);
-      this.spawnShockwaveRing({ x: tx, y: ty }, 86, 0xd946ef, tElev + 1.5, duration);
-      return;
-    }
-
-    const lineOffsets = variant === 'stinger' ? [-0.38, 0.38] : [0];
-    const lineLen = variant === 'stinger' ? 320 : variant === 'seismic_shard' ? 280 : 210;
-    const len3D = Math.hypot(aimDir.x, aimDir.y, aimDir.z ?? 0) || 1;
-    const dzPerUnit = (aimDir.z ?? 0) / len3D;
-    for (let i = 0; i < lineOffsets.length; i++) {
-      const ang = baseAng + lineOffsets[i];
-      const dx = Math.cos(ang);
-      const dy = Math.sin(ang);
-      const guideGeo = this.createOrganicPlumeColumnGeo(1.1, 1.8, lineLen, 6, 8, 0.35, 1.5);
-      guideGeo.rotateX(Math.PI / 2);
-      const guideMat = new THREE.MeshBasicMaterial({
-        color: colorHex,
-        transparent: true,
-        opacity: 0.42,
-        blending: THREE.AdditiveBlending,
-        side: THREE.DoubleSide
-      });
-      const guideMesh = new THREE.Mesh(guideGeo, guideMat);
-      const startY = Math.max(baseElev + 14, originZ);
-      const endX = origin.x + dx * lineLen;
-      const endY = startY + dzPerUnit * lineLen;
-      const endZ = origin.y + dy * lineLen;
-      guideMesh.position.set(
-        (origin.x + endX) * 0.5,
-        (startY + endY) * 0.5,
-        (origin.y + endZ) * 0.5
-      );
-      guideMesh.lookAt(endX, endY, endZ);
-      this.group.add(guideMesh);
-      this.beams.push({
-        mesh: guideMesh,
-        lifetime: duration,
-        maxLifetime: duration
-      });
+      this.spawnShockwaveRing({ x: tx, y: ty }, 76, 0xd946ef, tElev + 1.5, duration);
     }
   }
 
@@ -5635,13 +5582,13 @@ export class ThreeVFX {
             float r = length(p);
             if (r > 1.0) discard;
 
-            float a = atan(p.y, p.x);
+            float a = (abs(p.x) + abs(p.y) > 1e-5) ? atan(p.y, p.x) : 0.0;
 
             // Swirling logarithmic spiral arms pulling inward (accelerates late-stage)
             float swirlSpeed = uTime * (uProgress > 0.73 ? 6.8 : 3.8);
             float swirlAngle = a + swirlSpeed + log(max(r, 0.04)) * 4.2;
-            float spiral1 = pow(0.5 + 0.5 * sin(swirlAngle * 3.0), 2.2);
-            float spiral2 = pow(0.5 + 0.5 * cos(swirlAngle * 5.0 - uTime * 2.5), 3.0);
+            float spiral1 = pow(clamp(0.5 + 0.5 * sin(swirlAngle * 3.0), 1e-4, 1.0), 2.2);
+            float spiral2 = pow(clamp(0.5 + 0.5 * cos(swirlAngle * 5.0 - uTime * 2.5), 1e-4, 1.0), 3.0);
 
             // Domain-warped organic void nebula & spiraling rift wisps (zero chevrons or geometric tech rings)
             float n1 = 0.5 + 0.5 * sin(p.x * 7.5 + sin(p.y * 6.0 + uTime * 3.0) * 1.4);
@@ -5806,18 +5753,18 @@ export class ThreeVFX {
             float r = length(p);
             if (r > 1.0) discard;
 
-            float a = atan(p.y, p.x);
+            float a = (abs(p.x) + abs(p.y) > 1e-5) ? atan(p.y, p.x) : 0.0;
 
             // 4 prominent golden energy streams spiraling inward from the 4 outer strike sites
             float streamPhase = a - log(max(r, 0.05)) * 2.6 + uTime * 4.5;
-            float fourStreams = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 2.8);
-            float streamCore = pow(0.5 + 0.5 * cos(streamPhase * 4.0), 7.0);
+            float fourStreams = pow(clamp(0.5 + 0.5 * cos(streamPhase * 4.0), 1e-4, 1.0), 2.8);
+            float streamCore = pow(clamp(0.5 + 0.5 * cos(streamPhase * 4.0), 1e-4, 1.0), 7.0);
 
             float flameWisp = 0.5 + 0.5 * sin(p.x * 8.5 + cos(p.y * 7.5 - uTime * 4.5) * 1.6);
             float warpedR = r + (flameWisp - 0.5) * 0.34;
             if (warpedR > 1.0) discard;
 
-            float maxReach = mix(0.95, 0.32, pow(uProgress, 1.35));
+            float maxReach = mix(0.95, 0.32, pow(clamp(uProgress, 1e-4, 1.0), 1.35));
             float reachMask = smoothstep(maxReach + 0.16, maxReach - 0.20, warpedR) * smoothstep(0.03, 0.18, warpedR);
             float fireCore = smoothstep(0.45, 0.0, warpedR) * (0.65 + uProgress * 0.9) * (0.65 + 0.35 * flameWisp);
 
@@ -5996,13 +5943,13 @@ export class ThreeVFX {
             float expandR = smoothstep(0.0, 0.08, uProgress);
             if (r > expandR) discard;
 
-            float a = atan(p.y, p.x);
+            float a = (abs(p.x) + abs(p.y) > 1e-5) ? atan(p.y, p.x) : 0.0;
 
             // Crystalline ice fracture lines & radial frost veins
             float cell = voronoiCracks(p * 6.5);
             float iceCracks = exp(-pow((cell - 0.48) / 0.045, 2.0)) * 1.25;
             float fineCracks = exp(-pow((voronoiCracks(p * 13.0) - 0.46) / 0.05, 2.0)) * 0.65;
-            float radialVeins = pow(0.5 + 0.5 * cos(a * 16.0 + sin(r * 10.0) * 1.5), 6.0) * smoothstep(0.15, 0.85, r);
+            float radialVeins = pow(clamp(0.5 + 0.5 * cos(a * 16.0 + sin(r * 10.0) * 1.5), 1e-4, 1.0), 6.0) * smoothstep(0.15, 0.85, r);
 
             // Organic fractured ice glaze (zero crisp concentric circles or tick marks)
             float innerMix = smoothstep(0.32, 0.0, r + (cell - 0.5) * 0.3) * 0.7;
@@ -7802,25 +7749,26 @@ export class ThreeVFX {
     slashIndex: number = 1,
     range: number = 260
   ): void {
+    const scale = Math.max(1, range / 260);
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
     const group = new THREE.Group();
-    group.position.set(pos.x, baseElev + 46, pos.y);
+    group.position.set(pos.x, baseElev + 46 * scale, pos.y);
     group.rotation.y = Math.PI / 2 - angle;
     this.group.add(group);
 
     const innerRadius = range * 0.52;
-    const bladeWidth = 105;
+    const bladeWidth = 105 * scale;
     const angleSpan = 2.35;
     const tiltSign = slashIndex % 2 === 1 ? 1 : -1;
 
     const shaderMats: THREE.ShaderMaterial[] = [];
     const tilts = [0.34 * tiltSign, -0.24 * tiltSign, 0.0];
-    const heights = [0, 8, -6];
+    const heights = [0, 8 * scale, -6 * scale];
 
     for (let l = 0; l < tilts.length; l++) {
       const geo = this.createCrescentBladeGeometry(
-        innerRadius + l * 10,
-        bladeWidth - l * 22,
+        innerRadius + l * 10 * scale,
+        bladeWidth - l * 22 * scale,
         angleSpan - l * 0.14,
         28
       );
@@ -7839,9 +7787,9 @@ export class ThreeVFX {
     }
 
     // 3D volumetric outer ribbon arch giving vertical thickness in combat camera
-    const archGeo = this.createOrganicPlumeColumnGeo(12, 22, range * 1.45, 10, 6, 0.34, 1.5);
+    const archGeo = this.createOrganicPlumeColumnGeo(12 * scale, 22 * scale, range * 1.45, 10, 6, 0.34, 1.5);
     archGeo.rotateZ(Math.PI / 2);
-    archGeo.translate(0, 6, innerRadius + bladeWidth * 0.48);
+    archGeo.translate(0, 6 * scale, innerRadius + bladeWidth * 0.48);
     const archMat = this.acquireRiftPlasmaShader(0xf43f5e, 0x9333ea, 0x38bdf8, slashIndex * 7.7);
     const archMesh = new THREE.Mesh(archGeo, archMat);
     archMesh.rotation.z = 0.22 * tiltSign;
@@ -7858,11 +7806,11 @@ export class ThreeVFX {
       flatShading: true
     });
     for (let s = 0; s < 9; s++) {
-      const sGeo = this.createJaggedShardGeo(4.8, 24 + (s % 3) * 7, 5, 19 + s * 7);
+      const sGeo = this.createJaggedShardGeo(4.8 * scale, (24 + (s % 3) * 7) * scale, 5, 19 + s * 7);
       const sm = new THREE.Mesh(sGeo, s === 0 ? shardMat : shardMat.clone());
       const a = (s / 8 - 0.5) * angleSpan * 0.88;
       const dist = innerRadius + bladeWidth * (0.35 + (s % 2) * 0.4);
-      sm.position.set(Math.sin(a) * dist, (s % 3 - 1) * 14, Math.cos(a) * dist);
+      sm.position.set(Math.sin(a) * dist, (s % 3 - 1) * 14 * scale, Math.cos(a) * dist);
       sm.rotation.set(0.6, a, (s % 2 ? 1 : -1) * 0.45);
       group.add(sm);
       shards.push({
@@ -7961,21 +7909,22 @@ export class ThreeVFX {
     arcRad: number,
     radius: number = 235
   ): void {
+    const scale = Math.max(1, radius / 235);
     const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
     const group = new THREE.Group();
     group.position.set(pos.x, baseElev, pos.y);
     this.group.add(group);
 
     const whipPivot = new THREE.Group();
-    whipPivot.position.y = 95;
+    whipPivot.position.y = 95 * scale;
     group.add(whipPivot);
 
     const whipMats: THREE.ShaderMaterial[] = [];
     // 3 braided 3D volumetric plasma tentacles curving radially outward like the former boss's whip tentacles
     const whipConfigs = [
-      { colA: 0xe879f9, colB: 0x7e22ce, core: 0xffffff, baseR: 16, tipR: 3.5, yOff: 0, twist: 1.5 },
-      { colA: 0x38bdf8, colB: 0x9333ea, core: 0xf0abfc, baseR: 11, tipR: 2.5, yOff: 18, twist: -2.0 },
-      { colA: 0xf43f5e, colB: 0x7e22ce, core: 0xfda4af, baseR: 9, tipR: 2.0, yOff: -16, twist: 2.4 }
+      { colA: 0xe879f9, colB: 0x7e22ce, core: 0xffffff, baseR: 16 * scale, tipR: 3.5 * scale, yOff: 0, twist: 1.5 },
+      { colA: 0x38bdf8, colB: 0x9333ea, core: 0xf0abfc, baseR: 11 * scale, tipR: 2.5 * scale, yOff: 18 * scale, twist: -2.0 },
+      { colA: 0xf43f5e, colB: 0x7e22ce, core: 0xfda4af, baseR: 9 * scale, tipR: 2.0 * scale, yOff: -16 * scale, twist: 2.4 }
     ];
     for (let i = 0; i < whipConfigs.length; i++) {
       const wc = whipConfigs[i];
@@ -7983,12 +7932,12 @@ export class ThreeVFX {
       const segs = 18;
       for (let s = 0; s <= segs; s++) {
         const u = s / segs;
-        const r = 45 + u * (radius + 35);
+        const r = 45 * scale + u * (radius + 35 * scale);
         const curveAng = -sweepDir * Math.sin(u * Math.PI * 0.85) * 0.42 + (i - 1) * 0.08 * u;
         pts.push(
           new THREE.Vector3(
             Math.cos(curveAng) * r,
-            wc.yOff + Math.sin(u * Math.PI) * 32 + Math.sin(u * 9.0 + i) * 10,
+            wc.yOff + Math.sin(u * Math.PI) * 32 * scale + Math.sin(u * 9.0 + i) * 10 * scale,
             Math.sin(curveAng) * r
           )
         );

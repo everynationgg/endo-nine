@@ -36,7 +36,9 @@ const BRIDGE_VERT = `
 
     vec4 wp = modelMatrix * vec4(pos, 1.0);
     vWorldPos = wp.xyz;
-    vWorldNormal = normalize(mat3(modelMatrix) * normal);
+    vec3 wNorm = mat3(modelMatrix) * normal;
+    float wNormLen = length(wNorm);
+    vWorldNormal = wNormLen > 1e-5 ? (wNorm / wNormLen) : vec3(0.0, 1.0, 0.0);
     gl_Position = projectionMatrix * viewMatrix * wp;
   }
 `;
@@ -97,7 +99,7 @@ const BRIDGE_FRAG = `
     // Subtle longitudinal filigree guide veins
     float latDist = abs(vBridgeUv.y - 0.5) * 2.0;
     float centerVeins = smoothstep(0.05, 0.0, abs(latDist - 0.24)) * 0.35 + smoothstep(0.04, 0.0, abs(latDist)) * 0.25;
-    float railGlow = pow(smoothstep(0.68, 1.0, latDist), 1.6);
+    float railGlow = pow(max(smoothstep(0.68, 1.0, latDist), 1e-4), 1.6);
 
     // Embedded twinkling starlight motes
     vec2 starGrid = vec2(spanU * 46.0, vBridgeUv.y * 14.0);
@@ -126,8 +128,12 @@ const BRIDGE_FRAG = `
     baseCol += starWhite * (starDot * 1.35 + edgeBand * 1.15);
 
     // Underside/edge Fresnel lift
-    vec3 viewDir = normalize(cameraPosition - vWorldPos);
-    float fresnel = pow(1.0 - abs(dot(normalize(vWorldNormal), viewDir)), 2.2);
+    vec3 vdRaw = cameraPosition - vWorldPos;
+    float vdLen = length(vdRaw);
+    vec3 viewDir = vdLen > 1e-5 ? (vdRaw / vdLen) : vec3(0.0, 0.0, 1.0);
+    float wnLen = length(vWorldNormal);
+    vec3 wn = wnLen > 1e-5 ? (vWorldNormal / wnLen) : vec3(0.0, 1.0, 0.0);
+    float fresnel = pow(max(1.0 - clamp(abs(dot(wn, viewDir)), 0.0, 1.0), 1e-4), 2.2);
     baseCol += mix(elecCyan, elecViolet, 0.5) * fresnel * 0.55;
 
     float alpha = clamp((0.68 + auroraRibbon * 0.18 + railGlow * 0.25 + edgeBand * 0.35) * mix(0.65, 1.0, endSoft), 0.0, 0.95) * alphaReveal;

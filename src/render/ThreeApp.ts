@@ -8,12 +8,21 @@ import { InputManager } from '../input/InputManager';
 import { SoundManager } from './SoundManager';
 import { UIManager, GraphicsQuality } from '../ui/UIManager';
 import { ThreeTerrain } from './ThreeTerrain';
-import { loadTestMapFromFile, loadTestMapFromUrl, TestMapScaleMode, LoadedTestMap, RedCrystalMaterialEntry } from './TestMapLoader';
+import {
+  loadTestMapFromFile,
+  loadTestMapFromUrl,
+  TestMapScaleMode,
+  LoadedTestMap,
+  RedCrystalMaterialEntry,
+  preloadStage1EnvTextures
+} from './TestMapLoader';
 import { ThreeVFX } from './ThreeVFX';
 import { ExperimentalCommander3D } from './ExperimentalCommander3D';
 import { ExperimentalDoctor3D } from './ExperimentalDoctor3D';
 import { CommanderSpriteAnimator } from './CommanderSpriteAnimator';
 import { RiftStalker3DModel } from './RiftStalker3DModel';
+import { EnemyCombatVFX } from './EnemyCombatVFX';
+import { Stage1Enemy3DManager, Enemy3DFrameInfo } from './Stage1Enemy3DManager';
 import { SimEvent, Vector2, HeroId, EnemyType } from '../sim/types';
 import { STAGE1_BOSS_CONFIG } from '../sim/Stage1BossConfig';
 import { ENEMY_VISUAL_CATALOG, EnemyVisualDef } from '../sim/EnemyVisualDefs';
@@ -219,8 +228,12 @@ const VOLUMETRIC_BEAM_FRAG = `
   varying vec3 vViewDir;
 
   void main() {
-    float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
-    float coreMask = pow(ndotv, uFalloffPow);
+    float nLen = length(vViewNormal);
+    float dLen = length(vViewDir);
+    vec3 nN = nLen > 1e-5 ? (vViewNormal / nLen) : vec3(0.0, 0.0, 1.0);
+    vec3 vD = dLen > 1e-5 ? (vViewDir / dLen) : vec3(0.0, 0.0, 1.0);
+    float ndotv = clamp(abs(dot(nN, vD)), 0.0, 1.0);
+    float coreMask = pow(max(ndotv, 1e-4), uFalloffPow);
     float spiral = sin(vUv.y * 26.0 - uTime * uScrollSpeed + vUv.x * 12.56637) * 0.5 + 0.5;
     float axialWave = sin(vUv.y * 42.0 - uTime * (uScrollSpeed * 1.45)) * 0.5 + 0.5;
     float endFade = smoothstep(0.0, 0.04, vUv.y) * smoothstep(1.0, 0.90, vUv.y);
@@ -247,8 +260,12 @@ const BIO_PLASMA_VERT = `
     vec3 displaced = position + normal * (ripple * uWobbleAmp);
     vLocalPos = displaced;
     vec4 mvPosition = modelViewMatrix * vec4(displaced, 1.0);
-    vViewNormal = normalize(normalMatrix * normal);
-    vViewDir = normalize(-mvPosition.xyz);
+    vec3 nView = normalMatrix * normal;
+    float nViewLen = length(nView);
+    vViewNormal = nViewLen > 1e-5 ? (nView / nViewLen) : vec3(0.0, 0.0, 1.0);
+    vec3 vViewRaw = -mvPosition.xyz;
+    float vViewLen = length(vViewRaw);
+    vViewDir = vViewLen > 1e-5 ? (vViewRaw / vViewLen) : vec3(0.0, 0.0, 1.0);
     gl_Position = projectionMatrix * mvPosition;
   }
 `;
@@ -266,9 +283,13 @@ const BIO_PLASMA_FRAG = `
   varying vec3 vLocalPos;
 
   void main() {
-    float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
+    float nLen = length(vViewNormal);
+    float dLen = length(vViewDir);
+    vec3 nN = nLen > 1e-5 ? (vViewNormal / nLen) : vec3(0.0, 0.0, 1.0);
+    vec3 vD = dLen > 1e-5 ? (vViewDir / dLen) : vec3(0.0, 0.0, 1.0);
+    float ndotv = clamp(abs(dot(nN, vD)), 0.0, 1.0);
     // Helical swirling molten lava-plasma currents around the sphere
-    float ang = atan(vLocalPos.z, vLocalPos.x);
+    float ang = (abs(vLocalPos.x) + abs(vLocalPos.z) > 1e-5) ? atan(vLocalPos.z, vLocalPos.x) : 0.0;
     float lat = vLocalPos.y * 0.14;
     float swirl1 = sin(ang * 3.0 + lat * 2.2 - uTime * 7.2 + sin(lat * 3.0 + uTime * 4.0) * 1.1);
     float swirl2 = cos(ang * 5.0 - lat * 2.8 + uTime * 5.8 + swirl1 * 0.9);
@@ -278,11 +299,11 @@ const BIO_PLASMA_FRAG = `
     vec3 col;
     float alpha;
     if (uRimMode > 0.5) {
-      float halo = pow(1.0 - ndotv, 1.55) * smoothstep(0.0, 0.22, ndotv);
+      float halo = pow(max(1.0 - ndotv, 1e-4), 1.55) * smoothstep(0.0, 0.22, ndotv);
       col = mix(uRimColor, uCoreColor, smoothstep(0.3, 0.9, eddy));
       alpha = clamp(halo * (0.68 + 0.58 * eddy), 0.0, 1.0) * uOpacity;
     } else {
-      float centerGlow = pow(ndotv, 0.85);
+      float centerGlow = pow(max(ndotv, 1e-4), 0.85);
       vec3 crustDark = uRimColor * 0.35;
       col = mix(crustDark, uRimColor, smoothstep(0.08, 0.38, eddy));
       col = mix(col, uMidColor, smoothstep(0.36, 0.72, eddy * 0.65 + centerGlow * 0.35));
@@ -316,21 +337,25 @@ const PLASMA_WAKE_FRAG = `
   varying vec3 vViewDir;
 
   void main() {
-    float ndotv = clamp(abs(dot(normalize(vViewNormal), normalize(vViewDir))), 0.0, 1.0);
-    float trailMask = pow(vUv.y, 1.35) * smoothstep(1.0, 0.84, vUv.y);
+    float nLen = length(vViewNormal);
+    float dLen = length(vViewDir);
+    vec3 nN = nLen > 1e-5 ? (vViewNormal / nLen) : vec3(0.0, 0.0, 1.0);
+    vec3 vD = dLen > 1e-5 ? (vViewDir / dLen) : vec3(0.0, 0.0, 1.0);
+    float ndotv = clamp(abs(dot(nN, vD)), 0.0, 1.0);
+    float trailMask = pow(max(vUv.y, 1e-4), 1.35) * smoothstep(1.0, 0.84, vUv.y);
     // Double helical lava-swirl ribbons spiraling back along the comet wake
     float ribbonA = sin(vUv.x * 12.5663 + vUv.y * 16.0 - uTime * 22.0);
     float ribbonB = cos(vUv.x * 18.8495 - vUv.y * 11.0 - uTime * 16.0);
     float streaks = clamp(0.55 + 0.30 * ribbonA + 0.22 * ribbonB, 0.0, 1.0);
     vec3 col = mix(uTailColor, uHeadColor, clamp(vUv.y * 0.75 + streaks * 0.35, 0.0, 1.0));
-    float alpha = pow(ndotv, 1.1) * trailMask * streaks * uOpacity;
+    float alpha = pow(max(ndotv, 1e-4), 1.1) * trailMask * streaks * uOpacity;
     gl_FragColor = vec4(col * 1.15, alpha);
   }
 `;
 
 interface EnemyRenderEntry {
-  mesh: THREE.Mesh;
-  material: THREE.ShaderMaterial;
+  mesh?: THREE.Mesh;
+  material?: THREE.ShaderMaterial;
   visualDef?: EnemyVisualDef;
   aspectWidth: number;
   aspectHeight: number;
@@ -347,6 +372,7 @@ interface EnemyRenderEntry {
   lastTiltY?: number;
   cachedSlopeX?: number;
   cachedSlopeZ?: number;
+  isMigrated3D?: boolean;
   // Stage 1 Boss (Rift Stalker 3D) components
   isTitan?: boolean;
   titan3D?: RiftStalker3DModel;
@@ -506,6 +532,9 @@ export class ThreeApp {
 
   // Entities
   private enemyMap: Map<string, EnemyRenderEntry> = new Map();
+  private enemyCombatVFX!: EnemyCombatVFX;
+  private enemy3DManager!: Stage1Enemy3DManager;
+  private readonly enemy3DInfoScratch: Enemy3DFrameInfo = { ready: false, hpTopOffset: 96 };
   private obstacleEntries: ObstacleRenderEntry[] = [];
   private podMap: Map<string, PodRenderEntry> = new Map();
   private projMap: Map<string, THREE.Object3D> = new Map();
@@ -785,8 +814,43 @@ export class ThreeApp {
       0.36,
       0.88
     );
+    // Sanitize NaN/Inf/extreme HDR fireflies before the 5-mip bloom downsample so any
+    // half-float NaN never blooms across neighboring pixels on D3D11/ANGLE.
+    this.bloomPass.materialHighPassFilter.fragmentShader = /* glsl */`
+      uniform sampler2D tDiffuse;
+      uniform vec3 defaultColor;
+      uniform float defaultOpacity;
+      uniform float luminosityThreshold;
+      uniform float smoothWidth;
+      varying vec2 vUv;
+      void main() {
+        vec4 texel = texture2D( tDiffuse, vUv );
+        vec3 safeRgb = texel.rgb;
+        if (!(safeRgb.r >= 0.0 && safeRgb.r <= 64.0)) safeRgb.r = 0.0;
+        if (!(safeRgb.g >= 0.0 && safeRgb.g <= 64.0)) safeRgb.g = 0.0;
+        if (!(safeRgb.b >= 0.0 && safeRgb.b <= 64.0)) safeRgb.b = 0.0;
+        float safeA = (texel.a >= 0.0 && texel.a <= 1.0) ? texel.a : 1.0;
+        texel = vec4( min( safeRgb, vec3( 16.0 ) ), safeA );
+        float v = luminance( texel.xyz );
+        vec4 outputColor = vec4( defaultColor.rgb, defaultOpacity );
+        float alpha = smoothstep( luminosityThreshold, luminosityThreshold + smoothWidth, v );
+        gl_FragColor = mix( outputColor, texel, alpha );
+      }
+    `;
+    this.bloomPass.materialHighPassFilter.needsUpdate = true;
     this.composer.addPass(this.bloomPass);
-    this.composer.addPass(new OutputPass());
+    const outputPass = new OutputPass();
+    outputPass.material.fragmentShader = outputPass.material.fragmentShader.replace(
+      'gl_FragColor = texture2D( tDiffuse, vUv );',
+      `vec4 safeOutTexel = texture2D( tDiffuse, vUv );
+      if (!(safeOutTexel.r >= 0.0 && safeOutTexel.r <= 65000.0)) safeOutTexel.r = 0.0;
+      if (!(safeOutTexel.g >= 0.0 && safeOutTexel.g <= 65000.0)) safeOutTexel.g = 0.0;
+      if (!(safeOutTexel.b >= 0.0 && safeOutTexel.b <= 65000.0)) safeOutTexel.b = 0.0;
+      safeOutTexel.a = (safeOutTexel.a >= 0.0 && safeOutTexel.a <= 1.0) ? safeOutTexel.a : 1.0;
+      gl_FragColor = safeOutTexel;`
+    );
+    outputPass.material.needsUpdate = true;
+    this.composer.addPass(outputPass);
 
     // 4. Readable Night Lighting (Cool Moonlight Fill + Horizon Rim — Zero Shadow Maps)
     this.ambientLight = new THREE.AmbientLight(0x4a668f, 1.05);
@@ -819,6 +883,17 @@ export class ThreeApp {
       this.simulation.state.terrain.getFastVisualHeight(x, z, refY, 56)
     );
     this.scene.add(this.vfx.group);
+
+    this.enemyCombatVFX = new EnemyCombatVFX(
+      this.scene,
+      (x, z, refY) => this.simulation.state.terrain.getFastVisualHeight(x, z, refY, 56),
+      (trauma) => this.addCameraTrauma(trauma)
+    );
+    this.enemy3DManager = new Stage1Enemy3DManager(
+      this.scene,
+      this.simulation.state.terrain,
+      this.enemyCombatVFX
+    );
 
     // 8. Player Group & Billboard Sprites (2x entity scale)
     const playerInitPos = this.simulation.state.player.pos;
@@ -861,6 +936,12 @@ export class ThreeApp {
       right: this.textures['commander_right']
     });
     this.ensureHeroSpriteSheetsLoaded(this.simulation.state.selectedHeroId);
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        this.ensureHeroSpriteSheetsLoaded('commander');
+        this.ensureHeroSpriteSheetsLoaded('doctor');
+      }, 120);
+    }
 
     // Experimental Localhost-Only Rigged Tripo 3D Commander (lazy-loaded on dev toggle)
     this.experimentalCommander3D = new ExperimentalCommander3D(this.vfx, (reason) => {
@@ -887,6 +968,7 @@ export class ThreeApp {
     });
     this.playerGroup.add(this.experimentalDoctor3D.group);
     RiftStalker3DModel.preload();
+    void Stage1Enemy3DManager.preloadAll();
 
     // Resolve / Sanctuary swirling bio-flame mist aura (zero RingGeometry)
     const auraGeo = new THREE.PlaneGeometry(118, 118);
@@ -1056,13 +1138,11 @@ export class ThreeApp {
   }
 
   private loadTextures(): void {
+    preloadStage1EnvTextures();
     const list = [
       // Base hero directional portraits (heavy action sprite sheets load lazily per selected hero)
       'commander_front', 'commander_back', 'commander_left', 'commander_right',
       'doctor_front', 'doctor_back', 'doctor_left', 'doctor_right',
-      // Stage 1 Enemies
-      'void_crawler', 'toxic_spitter', 'void_wasp', 'void_goliath', 'brood_overseer',
-      'enemy_crawler', 'enemy_spitter', 'enemy_elite', 'enemy_boss',
       // Stage 1 Environment
       'overseer_monolith', 'organic_pod_closed', 'organic_pod_opened', 'alien_mushrooms',
       'organic_pod', 'overseer_artifact', 'alien_mushroom', 'alien_rock',
@@ -2597,12 +2677,16 @@ export class ThreeApp {
     const w = window.innerWidth;
     const h = window.innerHeight;
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
-    const maxDpr = this.graphicsQuality === 'low' ? 1.0 : this.graphicsQuality === 'high' ? 1.5 : 1.25;
-    this.renderer.setPixelRatio(Math.min(dpr, maxDpr));
+    const maxDpr = this.graphicsQuality === 'low' ? 0.85 : this.graphicsQuality === 'high' ? 1.35 : 1.0;
+    const targetDpr = Math.min(dpr, maxDpr);
+    this.renderer.setPixelRatio(targetDpr);
     this.camera.aspect = w / h;
     this.camera.updateProjectionMatrix();
     this.renderer.setSize(w, h);
-    this.composer?.setSize(w, h);
+    if (this.composer) {
+      this.composer.setPixelRatio(targetDpr);
+      this.composer.setSize(w, h);
+    }
     const bloomScale = this.graphicsQuality === 'high' ? 0.75 : 0.5;
     this.bloomPass?.setSize(Math.max(1, Math.floor(w * bloomScale)), Math.max(1, Math.floor(h * bloomScale)));
   }
@@ -2621,8 +2705,12 @@ export class ThreeApp {
       return;
     }
 
-    const dt = Math.min((now - this.lastTime) / 1000, 0.1);
-    this.lastTime = now;
+    const rawDt =
+      Number.isFinite(now) && Number.isFinite(this.lastTime) && this.lastTime > 0
+        ? (now - this.lastTime) / 1000
+        : 0;
+    const dt = Math.max(0, Math.min(rawDt, 0.1));
+    this.lastTime = Number.isFinite(now) ? now : performance.now();
 
     if (this.isEditorMode) {
       if (this.isPointerLocked) {
@@ -2711,9 +2799,9 @@ export class ThreeApp {
       const titan = this.simulation.state.enemies.find((en) => en.isStage1Titan && en.health > 0);
       if (titan) {
         targetFocusX = titan.pos.x;
-        targetFocusY = titan.z + 160;
-        targetFocusZ = titan.pos.y - 140;
-        targetDist = Math.max(this.cameraDistance, 680);
+        targetFocusY = titan.z + 300;
+        targetFocusZ = titan.pos.y - 240;
+        targetDist = Math.max(this.cameraDistance, 960);
       }
     }
 
@@ -3729,8 +3817,10 @@ export class ThreeApp {
       record.titanElementalHaloMat?.dispose();
     }
 
-    this.scene.remove(record.mesh);
-    record.material.dispose();
+    if (record.mesh) {
+      this.scene.remove(record.mesh);
+    }
+    record.material?.dispose();
     this.scene.remove(record.shadow);
     this.scene.remove(record.hpBarGroup);
     if (record.auraRing) {
@@ -3767,8 +3857,8 @@ export class ThreeApp {
           laserGrp.frustumCulled = false;
           laserGrp.renderOrder = 300;
 
-          // 1. Inner Incandescent Turbulent Core Stream (zero CylinderGeometry)
-          const beamCoreGeo = this.vfx.createOrganicPlumeColumnGeo(18.0, 14.0, 1, 16, 10, 0.24, 1.2);
+          // 1. Inner Incandescent Turbulent Core Stream (2x Boss Scale — zero CylinderGeometry)
+          const beamCoreGeo = this.vfx.createOrganicPlumeColumnGeo(36.0, 28.0, 1, 16, 10, 0.24, 1.2);
           const beamCoreMat = this.createVolumetricBeamMaterial(0xffffff, 0xf0abfc, 1.35, 0.96, 26.0);
           const beamCore = new THREE.Mesh(beamCoreGeo, beamCoreMat);
           beamCore.frustumCulled = false;
@@ -3776,7 +3866,7 @@ export class ThreeApp {
           laserGrp.add(beamCore);
 
           // 2. Outer Volumetric Magenta-Violet Plasma Sheath
-          const beamAuraGeo = this.vfx.createOrganicPlumeColumnGeo(44.0, 30.0, 1, 16, 10, 0.30, -1.4);
+          const beamAuraGeo = this.vfx.createOrganicPlumeColumnGeo(88.0, 60.0, 1, 16, 10, 0.30, -1.4);
           const beamAuraMat = this.createVolumetricBeamMaterial(0xe879f9, 0x7e22ce, 2.35, 0.72, 18.0);
           const beamAura = new THREE.Mesh(beamAuraGeo, beamAuraMat);
           beamAura.frustumCulled = false;
@@ -3784,15 +3874,15 @@ export class ThreeApp {
           laserGrp.add(beamAura);
 
           // 3. Flared Maw Emitter Plasma Plume + Molten Oral Flame Core
-          const mouthFunnelGeo = this.vfx.createOrganicPlumeColumnGeo(36.0, 13.0, 56, 16, 6, 0.28, 1.1);
-          mouthFunnelGeo.translate(0, 28, 0);
+          const mouthFunnelGeo = this.vfx.createOrganicPlumeColumnGeo(72.0, 26.0, 112, 16, 6, 0.28, 1.1);
+          mouthFunnelGeo.translate(0, 56, 0);
           const mouthFunnelMat = this.createVolumetricBeamMaterial(0xf5d0fe, 0xc084fc, 1.7, 0.85, 22.0);
           const mouthFunnel = new THREE.Mesh(mouthFunnelGeo, mouthFunnelMat);
           mouthFunnel.frustumCulled = false;
           mouthFunnel.renderOrder = 303;
           laserGrp.add(mouthFunnel);
 
-          const mouthOrbGeo = this.vfx.createOrganicPlumeColumnGeo(14.0, 24.0, 40, 14, 6, 0.35, -1.6);
+          const mouthOrbGeo = this.vfx.createOrganicPlumeColumnGeo(28.0, 48.0, 80, 14, 6, 0.35, -1.6);
           const mouthOrbMat = this.createBioPlasmaMaterial(0xffffff, 0xf472b6, 0xa855f7, 1.4, 0.96, false, true);
           const mouthOrb = new THREE.Mesh(mouthOrbGeo, mouthOrbMat);
           mouthOrb.frustumCulled = false;
@@ -3829,16 +3919,16 @@ export class ThreeApp {
             helixSpinePts.push(pts);
           }
 
-          // 5. Boiling 3D Turbulent Impact Plasma Plume & Organic Ripple Wave (zero flat solid shapes)
-          const impactDomeGeo = this.vfx.createOrganicPlumeColumnGeo(16, 48, 56, 14, 6, 0.34, 1.4);
-          impactDomeGeo.translate(0, 28, 0);
+          // 5. Boiling 3D Turbulent Impact Plasma Plume & Organic Ripple Wave (2x Boss Scale, zero flat solid shapes)
+          const impactDomeGeo = this.vfx.createOrganicPlumeColumnGeo(32, 96, 112, 14, 6, 0.34, 1.4);
+          impactDomeGeo.translate(0, 56, 0);
           const impactDomeMat = this.createBioPlasmaMaterial(0xffffff, 0xf43f5e, 0x9333ea, 2.2, 0.9, false, true);
           const impactDome = new THREE.Mesh(impactDomeGeo, impactDomeMat);
           impactDome.frustumCulled = false;
           impactDome.renderOrder = 304;
           laserGrp.add(impactDome);
 
-          const impactRingGeo = new THREE.PlaneGeometry(195, 195);
+          const impactRingGeo = new THREE.PlaneGeometry(390, 390);
           const impactRingMat = this.vfx.createOrganicRippleShader(0xf43f5e, 0xe879f9, 17.0);
           const impactRing = new THREE.Mesh(impactRingGeo, impactRingMat);
           impactRing.rotation.x = -Math.PI / 2;
@@ -3920,6 +4010,61 @@ export class ThreeApp {
             titanElementalOrbs: elementalOrbs,
             titanElementalMat: elemOrbMat,
             titanElementalHaloMat: elemHaloMat
+          };
+          this.enemyMap.set(e.id, record);
+        } else if (Stage1Enemy3DManager.isMigratedType(e)) {
+          const def = ENEMY_VISUAL_CATALOG[e.type as EnemyType] || ENEMY_VISUAL_CATALOG.crawler;
+
+          // Shared Shadow Decal (unit plane scaled per enemy radius)
+          const shadowSize = e.radius * 2.4;
+          const shadow = new THREE.Mesh(this.sharedUnitPlaneGeo, this.getSharedEnemyShadowMat());
+          shadow.rotation.x = -Math.PI / 2;
+          shadow.scale.set(shadowSize, shadowSize, 1);
+          shadow.userData = { isSharedGeo: true, isSharedMat: true, baseShadowSize: shadowSize };
+          this.scene.add(shadow);
+
+          // No artificial flat aura disc under migrated 3D enemies (ground contact shadow provides depth cleanly)
+          const auraRing: THREE.Mesh | undefined = undefined;
+
+          // 3D HP Bar (shared unit planes + cached color materials)
+          const hpBarGroup = new THREE.Group();
+          const bgMesh = new THREE.Mesh(this.sharedUnitPlaneGeo, this.sharedHpBgMat);
+          bgMesh.scale.set(def.hpWidth, def.hpHeight, 1);
+          bgMesh.userData = { isSharedGeo: true, isSharedMat: true };
+          hpBarGroup.add(bgMesh);
+
+          const borderMesh = new THREE.Mesh(
+            this.sharedUnitPlaneGeo,
+            this.getSharedColorMat(this.sharedHpMatCache, def.hpBorderColor)
+          );
+          borderMesh.scale.set(def.hpWidth + 2, def.hpHeight + 2, 1);
+          borderMesh.position.z = -0.05;
+          borderMesh.userData = { isSharedGeo: true, isSharedMat: true };
+          hpBarGroup.add(borderMesh);
+
+          const hpBarFill = new THREE.Mesh(
+            this.sharedUnitPlaneGeo,
+            this.getSharedColorMat(this.sharedHpMatCache, def.hpColor)
+          );
+          hpBarFill.scale.set(def.hpWidth, def.hpHeight, 1);
+          hpBarFill.position.z = 0.1;
+          hpBarFill.userData = { isSharedGeo: true, isSharedMat: true };
+          hpBarGroup.add(hpBarFill);
+          this.scene.add(hpBarGroup);
+
+          record = {
+            visualDef: def,
+            aspectWidth: def.baseHeight,
+            aspectHeight: def.baseHeight,
+            aspectResolved: true,
+            shadow,
+            auraRing,
+            hpBarGroup,
+            hpBarFill,
+            lastHealth: e.health,
+            hitFlashTimer: 0,
+            baseScale: def.baseHeight,
+            isMigrated3D: true
           };
           this.enemyMap.set(e.id, record);
         } else {
@@ -4026,38 +4171,40 @@ export class ThreeApp {
         }
       }
 
-      // 1. Damage Hit Flash & Status Tint Uniforms
-      if (e.health < record.lastHealth) {
-        record.hitFlashTimer = 0.14;
-        record.lastHealth = e.health;
-      }
-      if (record.hitFlashTimer > 0) {
-        record.hitFlashTimer -= dt;
-      }
-      const hitFlashAmt = record.hitFlashTimer > 0 ? 1.0 : 0.0;
-      record.material.uniforms.uTime.value = elapsedSec;
-      record.material.uniforms.uHitFlash.value = hitFlashAmt;
-      const statusTint = record.material.uniforms.uStatusTint.value as THREE.Color;
-      if (e.isChilled) {
-        statusTint.setRGB(0.45, 0.85, 1.4);
-      } else if (e.isElectrified) {
-        statusTint.setRGB(1.5, 0.65, 1.85);
-      } else if (e.isToxic) {
-        statusTint.setRGB(0.55, 1.35, 0.4);
-      } else if (e.isStunned) {
-        statusTint.setRGB(1.5, 1.4, 0.35);
-      } else if ((e.rangedWindupTimer ?? 0) > 0) {
-        const wPulse = 1.32 + 0.25 * Math.sin(elapsedSec * 24.0);
-        if (e.isBoss) statusTint.setRGB(wPulse * 1.15, 0.72, 0.78);
-        else if (e.isElite) statusTint.setRGB(wPulse * 1.15, 0.92, 0.65);
-        else statusTint.setRGB(wPulse, 0.85, 1.25);
-      } else {
-        statusTint.setRGB(1.0, 1.0, 1.0);
+      // 1. Damage Hit Flash & Status Tint Uniforms (2.5D sprites)
+      if (!record.isMigrated3D && record.material) {
+        if (e.health < record.lastHealth) {
+          record.hitFlashTimer = 0.14;
+          record.lastHealth = e.health;
+        }
+        if (record.hitFlashTimer > 0) {
+          record.hitFlashTimer -= dt;
+        }
+        const hitFlashAmt = record.hitFlashTimer > 0 ? 1.0 : 0.0;
+        record.material.uniforms.uTime.value = elapsedSec;
+        record.material.uniforms.uHitFlash.value = hitFlashAmt;
+        const statusTint = record.material.uniforms.uStatusTint.value as THREE.Color;
+        if (e.isChilled) {
+          statusTint.setRGB(0.45, 0.85, 1.4);
+        } else if (e.isElectrified) {
+          statusTint.setRGB(1.5, 0.65, 1.85);
+        } else if (e.isToxic) {
+          statusTint.setRGB(0.55, 1.35, 0.4);
+        } else if (e.isStunned) {
+          statusTint.setRGB(1.5, 1.4, 0.35);
+        } else if ((e.rangedWindupTimer ?? 0) > 0) {
+          const wPulse = 1.32 + 0.25 * Math.sin(elapsedSec * 24.0);
+          if (e.isBoss) statusTint.setRGB(wPulse * 1.15, 0.72, 0.78);
+          else if (e.isElite) statusTint.setRGB(wPulse * 1.15, 0.92, 0.65);
+          else statusTint.setRGB(wPulse, 0.85, 1.25);
+        } else {
+          statusTint.setRGB(1.0, 1.0, 1.0);
+        }
       }
 
       if (record.isTitan) {
         // --- STAGE 1 TITAN MAIN BOSS 3D ARTICULATED RENDERING ---
-        record.mesh.visible = false;
+        if (record.mesh) record.mesh.visible = false;
         if (record.auraRing) record.auraRing.visible = false;
         record.hpBarGroup.visible = false; // Main boss health bar is on top HUD
 
@@ -4083,7 +4230,7 @@ export class ThreeApp {
         }
 
         record.shadow.position.set(e.pos.x, e.groundZ + 0.25, e.pos.y);
-        record.shadow.scale.set(540, 540, 1);
+        record.shadow.scale.set(1080, 1080, 1);
         record.shadow.visible = (e.titanState !== 'emerging' && e.titanState !== 'dying');
 
         // Synchronized Red Boss Crystal emergence glow & energy pulse
@@ -4236,7 +4383,7 @@ export class ThreeApp {
                     const u = s / 26;
                     const t = u * 0.985;
                     const env = Math.sin(Math.min(1.0, u * 1.15) * Math.PI);
-                    const rad = 14.0 + 10.0 * env + 3.0 * Math.sin(u * 14.0 - elapsedSec * 12.0 + a);
+                    const rad = 28.0 + 20.0 * env + 6.0 * Math.sin(u * 14.0 - elapsedSec * 12.0 + a);
                     const ang = basePhase + u * Math.PI * 9.0 - elapsedSec * 15.0;
                     pts[s]
                       .copy(this.titanMouthScratch)
@@ -4244,7 +4391,7 @@ export class ThreeApp {
                       .addScaledVector(this.titanV1Scratch, Math.cos(ang) * rad)
                       .addScaledVector(this.titanV2Scratch, Math.sin(ang) * rad);
                   }
-                  this.updateTentacleGeo(record.titanLaserHelixTubes[a].geometry, pts, 6.0, 10);
+                  this.updateTentacleGeo(record.titanLaserHelixTubes[a].geometry, pts, 12.0, 10);
                 }
               }
               if (record.titanLaserImpactDome) {
@@ -4288,7 +4435,7 @@ export class ThreeApp {
             for (let k = 0; k < record.titanElementalOrbs.length; k++) {
               const orb = record.titanElementalOrbs[k];
               record.titan3D.getDorsalSpineWorldPos(k, orb.position);
-              orb.scale.setScalar(baseScale);
+              orb.scale.setScalar(baseScale * 2.0);
               orb.rotation.y += dt * 3.0;
               orb.visible = true;
             }
@@ -4302,16 +4449,27 @@ export class ThreeApp {
         continue;
       }
 
-      // Refresh natural image aspect ratio once async texture load finishes
       const def = record.visualDef || ENEMY_VISUAL_CATALOG.crawler;
-      if (!record.aspectResolved) {
-        const tex = record.material.uniforms.uMap.value as THREE.Texture | null;
-        const resolvedAspect = this.computeSpriteAspectScale(tex ?? undefined, def.frameCount, def.baseHeight);
-        if (resolvedAspect.resolved) {
-          record.aspectWidth = resolvedAspect.width;
-          record.aspectHeight = resolvedAspect.height;
-          record.aspectResolved = true;
-          record.material.uniforms.uTexelSize.value.set(1 / resolvedAspect.imgW, 1 / resolvedAspect.imgH);
+      if (record.isMigrated3D) {
+        this.enemy3DManager.updateEnemy(
+          e,
+          dt,
+          this.simulation.state.player.pos.x,
+          this.simulation.state.player.pos.y,
+          elapsedSec,
+          this.enemy3DInfoScratch
+        );
+      } else {
+        // Refresh natural image aspect ratio once async texture load finishes
+        if (!record.aspectResolved && record.material) {
+          const tex = record.material.uniforms.uMap.value as THREE.Texture | null;
+          const resolvedAspect = this.computeSpriteAspectScale(tex ?? undefined, def.frameCount, def.baseHeight);
+          if (resolvedAspect.resolved) {
+            record.aspectWidth = resolvedAspect.width;
+            record.aspectHeight = resolvedAspect.height;
+            record.aspectResolved = true;
+            record.material.uniforms.uTexelSize.value.set(1 / resolvedAspect.imgW, 1 / resolvedAspect.imgH);
+          }
         }
       }
 
@@ -4366,32 +4524,34 @@ export class ThreeApp {
         record.encasedIceGroup.visible = false;
       }
 
-      // 2. Subdivided 2.5D Mesh-Puppet Animation & Crawling Emergence
-      const animTime = elapsedSec * 8.0;
-      const isMoving = e.speed > 0;
-      if (record.material.uniforms.uMoveFactor) {
-        record.material.uniforms.uMoveFactor.value = isMoving ? 1.0 : 0.25;
-      }
-      const squish = Math.sin(animTime * 1.6 + i) * (isMoving ? 0.032 : 0.015);
-
       const emergeProgress = e.isSpawning ? Math.min(1, Math.max(0, e.spawnProgress || 0)) : 1.0;
       const emergeScale = e.isSpawning ? (0.2 + 0.8 * emergeProgress) : 1.0;
-      const crawlJitter = e.isSpawning ? (Math.random() - 0.5) * 2.2 : 0;
 
-      record.mesh.scale.set(
-        record.aspectWidth * (1 + squish) * emergeScale,
-        record.aspectHeight * (1 - squish) * emergeScale,
-        1
-      );
+      if (!record.isMigrated3D && record.material && record.mesh) {
+        // 2. Subdivided 2.5D Mesh-Puppet Animation & Crawling Emergence
+        const animTime = elapsedSec * 8.0;
+        const isMoving = e.speed > 0;
+        if (record.material.uniforms.uMoveFactor) {
+          record.material.uniforms.uMoveFactor.value = isMoving ? 1.0 : 0.25;
+        }
+        const squish = Math.sin(animTime * 1.6 + i) * (isMoving ? 0.032 : 0.015);
+        const crawlJitter = e.isSpawning ? (Math.random() - 0.5) * 2.2 : 0;
 
-      // 3. Position (Foot anchored or hovering for flyers) + Cylindrical Y-Axis Billboarding
-      let yOffset = (record.aspectHeight * (1 - squish) * emergeScale) * 0.46;
-      if (def.hoverHeight > 0) {
-        const hover = Math.sin(animTime * def.hoverFreq + i) * def.hoverAmp;
-        yOffset = (def.hoverHeight + hover) * emergeScale;
+        record.mesh.scale.set(
+          record.aspectWidth * (1 + squish) * emergeScale,
+          record.aspectHeight * (1 - squish) * emergeScale,
+          1
+        );
+
+        // 3. Position (Foot anchored or hovering for flyers) + Cylindrical Y-Axis Billboarding
+        let yOffset = (record.aspectHeight * (1 - squish) * emergeScale) * 0.46;
+        if (def.hoverHeight > 0) {
+          const hover = Math.sin(animTime * def.hoverFreq + i) * def.hoverAmp;
+          yOffset = (def.hoverHeight + hover) * emergeScale;
+        }
+        record.mesh.position.set(e.pos.x + crawlJitter, e.z + yOffset, e.pos.y + crawlJitter);
+        this.setCylindricalYaw(record.mesh, e.pos.x, e.pos.y);
       }
-      record.mesh.position.set(e.pos.x + crawlJitter, e.z + yOffset, e.pos.y + crawlJitter);
-      this.setCylindricalYaw(record.mesh, e.pos.x, e.pos.y);
 
       // Terrain-conforming ground contact shadow (cached slope gradient across 14u movement steps)
       const baseShadowSize = (record.shadow.userData.baseShadowSize as number) || (e.radius * 2.6);
@@ -4426,14 +4586,27 @@ export class ThreeApp {
         record.auraRing.visible = !e.isSpawning;
       }
 
-      // 5. Sleek HP Bar billboarding (shown when damaged or for Elite/Mini-Boss units to reduce visual clutter)
+      // 5. Sleek HP Bar billboarding (distance-clamped & culled near camera lens to prevent oversized rectangles)
       const hpPct = Math.max(0, e.health / e.maxHealth);
-      const isVisible = Boolean(!e.isSpawning && (hpPct < 0.995 || e.isElite || e.isBoss));
+      const hpY =
+        e.z +
+        Math.max(
+          def.hpYOffset,
+          record.isMigrated3D ? this.enemy3DInfoScratch.hpTopOffset : record.aspectHeight * 1.04
+        );
+      const camDx = e.pos.x - this.camera.position.x;
+      const camDy = hpY - this.camera.position.y;
+      const camDz = e.pos.y - this.camera.position.z;
+      const camDistSq = camDx * camDx + camDy * camDy + camDz * camDz;
+      const isVisible = Boolean(
+        !e.isSpawning && camDistSq > 160 * 160 && (hpPct < 0.995 || e.isElite || e.isBoss)
+      );
       record.hpBarGroup.visible = isVisible;
       if (isVisible) {
-        const hpY = e.z + Math.max(def.hpYOffset, record.aspectHeight * 1.04);
         record.hpBarGroup.position.set(e.pos.x, hpY, e.pos.y);
         record.hpBarGroup.quaternion.copy(this.camera.quaternion);
+        const distScale = Math.min(1.0, Math.max(0.58, Math.sqrt(camDistSq) / 520));
+        record.hpBarGroup.scale.setScalar(distScale);
         record.hpBarFill.scale.set(def.hpWidth * hpPct, def.hpHeight, 1);
         record.hpBarFill.position.x = -(def.hpWidth * 0.5) * (1 - hpPct);
       }
@@ -4442,6 +4615,9 @@ export class ThreeApp {
     // Cleanup dead enemies (disposing per-instance WebGL resources while preserving shared caches)
     for (const [id, record] of this.enemyMap.entries()) {
       if (!currentIds.has(id)) {
+        if (record.isMigrated3D) {
+          this.enemy3DManager.releaseEnemy(id, true);
+        }
         this.disposeEnemyRenderEntry(record);
         this.enemyMap.delete(id);
       }
@@ -4557,15 +4733,22 @@ export class ThreeApp {
     const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
     const w = typeof window !== 'undefined' ? window.innerWidth : 1920;
     const h = typeof window !== 'undefined' ? window.innerHeight : 1080;
+    const maxDpr = quality === 'low' ? 0.85 : quality === 'high' ? 1.35 : 1.0;
+    const targetDpr = Math.min(dpr, maxDpr);
+
+    this.renderer.setPixelRatio(targetDpr);
+    this.renderer.setSize(w, h);
+    if (this.composer) {
+      this.composer.setPixelRatio(targetDpr);
+      this.composer.setSize(w, h);
+    }
 
     if (quality === 'low') {
-      this.renderer.setPixelRatio(Math.min(dpr, 0.85));
       this.useComposer = false;
       this.bloomPass.enabled = false;
       this.animateClouds = false;
       this.maxDynamicLights = 4;
     } else if (quality === 'high') {
-      this.renderer.setPixelRatio(Math.min(dpr, 1.35));
       this.useComposer = true;
       this.bloomPass.enabled = true;
       this.bloomPass.strength = 0.32;
@@ -4575,7 +4758,6 @@ export class ThreeApp {
       this.animateClouds = true;
       this.maxDynamicLights = 10;
     } else {
-      this.renderer.setPixelRatio(Math.min(dpr, 1.0));
       this.useComposer = true;
       this.bloomPass.enabled = true;
       this.bloomPass.strength = 0.24;
@@ -4586,8 +4768,6 @@ export class ThreeApp {
       this.maxDynamicLights = 8;
     }
 
-    this.renderer.setSize(w, h);
-    this.composer?.setSize(w, h);
     this.applyQualityToHorizon();
   }
 
@@ -4831,8 +5011,8 @@ export class ThreeApp {
         grp.add(flareSpr);
       }
     } else if (projType === 'rift_shard') {
-      // Multi-layered 3D Crystalline Rift Lance + flanking spikes + swirling volumetric bio-plasma sheath
-      const shardGeo = this.vfx.createJaggedShardGeo(6.8, 34, 6, 73);
+      // Multi-layered 3D Crystalline Rift Lance + flanking spikes + swirling volumetric bio-plasma sheath (2x Boss Scale)
+      const shardGeo = this.vfx.createJaggedShardGeo(13.6, 68, 6, 73);
       shardGeo.rotateX(Math.PI / 2);
       const shardMat = new THREE.MeshStandardMaterial({
         color: 0x38bdf8,
@@ -4844,16 +5024,16 @@ export class ThreeApp {
       });
       grp.add(markShared(new THREE.Mesh(shardGeo, shardMat)));
 
-      const wingGeo = this.vfx.createJaggedShardGeo(3.6, 20, 5, 37);
+      const wingGeo = this.vfx.createJaggedShardGeo(7.2, 40, 5, 37);
       wingGeo.rotateX(Math.PI / 2);
       for (const sgn of [-1, 1]) {
         const wing = markShared(new THREE.Mesh(wingGeo, shardMat));
-        wing.position.set(sgn * 4.5, 0, -4);
+        wing.position.set(sgn * 9.0, 0, -8);
         wing.rotation.y = sgn * 0.24;
         grp.add(wing);
       }
 
-      const glowGeo = this.vfx.createOrganicPlumeColumnGeo(3.6, 8.2, 28, 10, 5, 0.38, 1.6);
+      const glowGeo = this.vfx.createOrganicPlumeColumnGeo(7.2, 16.4, 56, 10, 5, 0.38, 1.6);
       glowGeo.rotateX(Math.PI / 2);
       const plasmaSheathMat = this.createVolumetricBeamMaterial(0xf5d0fe, 0x38bdf8, 1.85, 0.82, 16.0);
       grp.add(markShared(new THREE.Mesh(glowGeo, plasmaSheathMat)));
@@ -5030,6 +5210,10 @@ export class ThreeApp {
           poolKey = `proj_twin_${proj.extraLayers || 0}`;
         } else if (proj.type === 'elemental_ball') {
           poolKey = 'proj_void_orb';
+        } else if (proj.type === 'water_bubble') {
+          poolKey = 'proj_water_bubble';
+        } else if (proj.type === 'queen_stinger') {
+          poolKey = 'proj_bone_spike';
         } else if (
           proj.type === 'pulse' ||
           proj.type === 'missile' ||
@@ -5054,6 +5238,20 @@ export class ThreeApp {
             grp.userData.slashGrp.userData.elapsed = 0;
             grp.userData.slashGrp.userData.trailTimer = 0;
           }
+        } else if (proj.type === 'water_bubble') {
+          grp = this.enemyCombatVFX.createWaterBubbleMesh(proj.radius || 16);
+          grp.userData.isSharedGeo = true;
+          grp.userData.isSharedMat = true;
+          grp.userData.noScaleTwo = true;
+          grp.userData.isPooled = true;
+          grp.userData.poolKey = poolKey;
+        } else if (proj.type === 'queen_stinger') {
+          grp = this.enemyCombatVFX.createBoneSpikeMesh();
+          grp.userData.isSharedGeo = true;
+          grp.userData.isSharedMat = true;
+          grp.userData.customScale = 1.5;
+          grp.userData.isPooled = true;
+          grp.userData.poolKey = poolKey;
         } else if (proj.type === 'bomb') {
           grp = new THREE.Group();
           const slashGrp = this.vfx.createTwinSlashProjectileGroup(proj.extraLayers || 0);
@@ -5097,7 +5295,13 @@ export class ThreeApp {
           }
         }
 
-        grp.scale.setScalar(2.0);
+        if (grp.userData.customScale) {
+          grp.scale.setScalar(grp.userData.customScale as number);
+        } else if (!grp.userData.noScaleTwo) {
+          grp.scale.setScalar(2.0);
+        } else {
+          grp.scale.setScalar(1.0);
+        }
         obj = grp;
         this.scene.add(obj);
         this.projMap.set(proj.id, obj);
@@ -5146,9 +5350,28 @@ export class ThreeApp {
         // Rapid spinning along flight vector
         obj.rotation.y = Math.atan2(proj.velocity.x, proj.velocity.y);
         obj.rotation.z += 0.32;
+      } else if (proj.type === 'water_bubble') {
+        this.enemyCombatVFX.updateWaterBubbleMesh(
+          obj as THREE.Group,
+          performance.now() * 0.001,
+          proj.velocity.x,
+          proj.velocity.y,
+          proj.vz ?? 0,
+          0.016,
+          true
+        );
       } else if (proj.type === 'queen_stinger') {
-        obj.rotation.y = Math.atan2(proj.velocity.x, proj.velocity.y);
-        obj.rotation.z += 0.24;
+        this.enemyCombatVFX.updateBoneSpikeMesh(
+          obj as THREE.Group,
+          proj.pos.x,
+          proj.pos.y,
+          proj.z ?? 24,
+          proj.velocity.x,
+          proj.velocity.y,
+          proj.vz ?? 0,
+          0.016,
+          performance.now() * 0.001
+        );
       } else if (proj.type === 'vortex') {
         obj.rotation.y += 0.14;
       } else if (proj.type === 'acid') {
@@ -5313,6 +5536,8 @@ export class ThreeApp {
 
   private syncVFX(dt: number, time: number): void {
     this.vfx.update(dt, this.camera);
+    this.enemy3DManager?.updateDying(dt);
+    this.enemyCombatVFX?.update(dt, this.camera);
 
     // Pulse Artifact Beacon
     if (this.artifactBeacon) {
@@ -5913,7 +6138,7 @@ export class ThreeApp {
           break;
         case 'enemy_killed':
           this.soundManager.playEnemyHit();
-          {
+          if (e.data.type !== 'broodling') {
             const elev = e.data.z ?? this.simulation.state.terrain.getElevation(e.data.pos.x, e.data.pos.y).height;
             this.vfx.spawnEnemyInternalSplatterBurst(
               e.data.pos,
@@ -5922,6 +6147,84 @@ export class ThreeApp {
               e.data.radius || 42,
               Boolean(e.data.isElite || e.data.isBoss)
             );
+          }
+          break;
+        case 'oreblade_charge_start':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnOrebladeChargeBurst(
+              e.data.pos.x,
+              e.data.pos.y,
+              e.data.z ?? 0,
+              e.data.dir?.x ?? 0,
+              e.data.dir?.y ?? 1
+            );
+          }
+          break;
+        case 'oreblade_charge_hit':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnOrebladeContactSparks(
+              e.data.pos.x,
+              e.data.pos.y,
+              e.data.z ?? 0,
+              e.data.dir?.x ?? 0,
+              e.data.dir?.y ?? 1
+            );
+          }
+          break;
+        case 'water_bubble_impact':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnWaterBubbleImpact(e.data.pos.x, e.data.pos.y, e.data.z ?? 24);
+          }
+          break;
+        case 'magmir_slam_telegraph':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnMagmirSlamTelegraph(
+              e.data.pos.x,
+              e.data.pos.y,
+              e.data.z ?? 0,
+              e.data.radius || 210,
+              e.data.duration || 0.72
+            );
+          }
+          break;
+        case 'magmir_slam_impact':
+          if (e.data?.pos) {
+            this.soundManager.playWorldEventPulse(false);
+            this.enemyCombatVFX.spawnMagmirSlamImpact(
+              e.data.pos.x,
+              e.data.pos.y,
+              e.data.z ?? 0,
+              e.data.radius || 210
+            );
+          }
+          break;
+        case 'magmir_punch_swing':
+          if (e.data?.pos) {
+            const isLeft = e.data.hand === 'left';
+            const hasSocket =
+              e.data.id &&
+              this.enemy3DManager.getLiveFistOrigin(e.data.id, isLeft, this.titanV1Scratch);
+            const hx = hasSocket ? this.titanV1Scratch.x : e.data.pos.x;
+            const hy = hasSocket ? this.titanV1Scratch.y : (e.data.z ?? 32);
+            const hz = hasSocket ? this.titanV1Scratch.z : e.data.pos.y;
+            this.enemyCombatVFX.spawnMagmirPunchSwing(
+              hx,
+              hy,
+              hz,
+              e.data.dir?.x ?? 0,
+              e.data.dir?.y ?? 1,
+              isLeft
+            );
+          }
+          break;
+        case 'brood_offspring_spawned':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnBroodBirthMist(e.data.pos.x, e.data.pos.y, e.data.z ?? 44);
+          }
+          break;
+        case 'brood_offspring_rupture':
+          if (e.data?.pos) {
+            this.enemyCombatVFX.spawnBroodRuptureMist(e.data.pos.x, e.data.pos.y, e.data.z ?? 32);
           }
           break;
         case 'buff_capsule_collected':
@@ -6011,18 +6314,25 @@ export class ThreeApp {
           if (e.data.isEmp) this.addCameraTrauma(0.25);
           break;
         case 'enemy_emerging':
-          {
+          if (
+            e.data?.type !== 'crawler' &&
+            e.data?.type !== 'wasp' &&
+            e.data?.type !== 'spitter' &&
+            e.data?.type !== 'elite' &&
+            e.data?.type !== 'boss' &&
+            e.data?.type !== 'broodling'
+          ) {
             const elev = this.simulation.state.terrain.getElevation(e.data.pos.x, e.data.pos.y).height;
             this.vfx.spawnShockwaveRing(e.data.pos, 48, 0x84cc16, elev + 2, 0.35);
           }
           break;
         case 'enemy_attack_windup':
-          if (e.data?.pos && e.data?.aimDir) {
+          if (e.data?.pos && e.data?.aimDir && e.data?.variant === 'spore_bomb') {
             this.vfx.spawnEnemyAttackTelegraph(
               e.data.pos,
               e.data.z ?? 24,
               e.data.aimDir,
-              e.data.variant || 'stinger',
+              e.data.variant,
               e.data.duration || 0.6
             );
           }
@@ -6078,8 +6388,8 @@ export class ThreeApp {
           }
           break;
         case 'stage1_boss_death':
-          this.vfx.spawnEnemyInternalSplatterBurst(e.data.pos, e.data.z ?? 0, 'boss', 120, true);
-          this.vfx.spawnRealisticExplosion(e.data.pos, e.data.z ?? 0, 320, 'void', (e.data.z ?? 0) + 40);
+          this.vfx.spawnEnemyInternalSplatterBurst(e.data.pos, e.data.z ?? 0, 'boss', 240, true);
+          this.vfx.spawnRealisticExplosion(e.data.pos, e.data.z ?? 0, 520, 'void', (e.data.z ?? 0) + 80);
           break;
         case 'stage1_boss_tentacle_strike':
           if (e.data.phase === 'impact') {
@@ -6123,9 +6433,9 @@ export class ThreeApp {
           break;
         case 'stage1_boss_spine_launch':
           this.soundManager.playOrbitalStrike?.();
-          this.addCameraTrauma(0.45);
-          this.vfx.spawnRiftCraterEruption(e.data.pos, e.data.z ?? 120, 210);
-          this.vfx.spawnHeavenlyLightBeam(e.data.pos, e.data.z ?? 120, 1.1, 0x38bdf8);
+          this.addCameraTrauma(0.55);
+          this.vfx.spawnRiftCraterEruption(e.data.pos, e.data.z ?? 240, 360);
+          this.vfx.spawnHeavenlyLightBeam(e.data.pos, e.data.z ?? 240, 1.35, 0x38bdf8);
           break;
         case 'boss_crystal_impact':
           this.soundManager.playWave();
@@ -7341,15 +7651,17 @@ export class ThreeApp {
         wakeMesh.position.y = 40;
         crystalGroup.add(wakeMesh);
 
+        crystalGroup.scale.setScalar(1.45);
         grp.add(crystalGroup);
         this.scene.add(grp);
         rec = { group: grp, warningMesh, warningMat, crystalGroup };
         this.fallingBossCrystalMap.set(bc.id, rec);
       }
       if (rec) {
-        rec.crystalGroup.position.set(bc.targetPos.x, bc.z + 34, bc.targetPos.y);
+        rec.crystalGroup.position.set(bc.targetPos.x, bc.z + 48, bc.targetPos.y);
         rec.crystalGroup.rotation.y += dt * 4.5;
-        const prog = Math.max(0.1, Math.min(1.0, 1.0 - (bc.z - bc.targetZ) / 520));
+        const startH = Math.max(100, STAGE1_BOSS_CONFIG.dorsalSpineBarrage.fallStartHeight);
+        const prog = Math.max(0.1, Math.min(1.0, 1.0 - (bc.z - bc.targetZ) / startH));
         rec.warningMesh.scale.setScalar(bc.impactRadius * (0.62 + 0.42 * prog));
         rec.warningMat.uniforms.uProgress.value = 0.25 + prog * 0.7;
         rec.warningMat.uniforms.uAlpha.value = 0.4 + 0.55 * prog;
@@ -7402,6 +7714,7 @@ export class ThreeApp {
     this.targetPitch = 0.62;
     this.camCollisionDistFrac = 1.0;
     this.uiManager.update(this.simulation.state);
+    this.lastTime = performance.now();
     if (!skipPointerLock && !this.simulation.state.isPaused) {
       this.requestPointerLock();
     }
@@ -7438,14 +7751,18 @@ export class ThreeApp {
     this.targetPitch = 0.62;
     this.camCollisionDistFrac = 1.0;
     this.uiManager.update(this.simulation.state);
+    this.lastTime = performance.now();
     if (!skipPointerLock && !this.simulation.state.isPaused) {
       this.requestPointerLock();
     }
   }
 
   private clearRenderEntities(): void {
-    // 1. Clean up enemies including Stage 1 Titan Colossus components
-    for (const record of this.enemyMap.values()) {
+    // 1. Clean up enemies including Stage 1 Titan Colossus & pooled Stage 1 3D Rigs
+    for (const [id, record] of this.enemyMap.entries()) {
+      if (record.isMigrated3D && this.enemy3DManager) {
+        this.enemy3DManager.releaseEnemy(id, false);
+      }
       this.disposeEnemyRenderEntry(record);
     }
     this.enemyMap.clear();
@@ -7478,6 +7795,19 @@ export class ThreeApp {
 
     for (const mesh of this.projMap.values()) {
       this.scene.remove(mesh);
+      const poolKey = mesh.userData?.poolKey as string | undefined;
+      if (poolKey) {
+        let poolArr = this.projectileGroupPool.get(poolKey);
+        if (!poolArr) {
+          poolArr = [];
+          this.projectileGroupPool.set(poolKey, poolArr);
+        }
+        if (poolArr.length < 160) {
+          mesh.visible = false;
+          poolArr.push(mesh as THREE.Group);
+          continue;
+        }
+      }
       if (!mesh.userData?.isPooled) {
         mesh.traverse((child) => {
           if ((child as THREE.Mesh).isMesh) {
@@ -7492,24 +7822,6 @@ export class ThreeApp {
       }
     }
     this.projMap.clear();
-    for (const poolArr of this.projectileGroupPool.values()) {
-      for (let g = 0; g < poolArr.length; g++) {
-        const obj = poolArr[g];
-        if (!obj.userData?.isPooled) {
-          obj.traverse((child) => {
-            if ((child as THREE.Mesh).isMesh) {
-              const m = child as THREE.Mesh;
-              if (!m.userData?.isPooled && !m.userData?.isSharedGeo) m.geometry?.dispose();
-              if (!m.userData?.isPooled && !m.userData?.isSharedMat) {
-                if (Array.isArray(m.material)) m.material.forEach((mat) => mat.dispose());
-                else m.material?.dispose();
-              }
-            }
-          });
-        }
-      }
-    }
-    this.projectileGroupPool.clear();
 
     for (const record of this.recoveryFieldMap.values()) {
       this.disposeObject3D(record.group);
