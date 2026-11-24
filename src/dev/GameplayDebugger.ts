@@ -596,11 +596,12 @@ export class GameplayDebugger {
           </div>
         </div>
         <div class="dev-dbg-section">
-          <div class="dev-ed-panel-header">TRIGGER BOSS ATTACKS INDIVIDUALLY</div>
+          <div class="dev-ed-panel-header">TRIGGER RIFT STALKER SKILLS</div>
           <div class="dev-dbg-btn-grid">
-            <button id="dbg-atk-laser" class="sci-btn dev-ed-btn">⚡ Mouth Laser Sweep</button>
-            <button id="dbg-atk-tentacle" class="sci-btn dev-ed-btn">🦑 Tentacle Strike</button>
-            <button id="dbg-atk-elem" class="sci-btn dev-ed-btn">☄ Elemental Barrage</button>
+            <button id="dbg-atk-leap" class="sci-btn dev-ed-btn">🦗 Leap &amp; Dual Slash</button>
+            <button id="dbg-atk-sweep" class="sci-btn dev-ed-btn">🦂 Tail Sweep (30)</button>
+            <button id="dbg-atk-laser" class="sci-btn dev-ed-btn">⚡ Tracking Tail Laser</button>
+            <button id="dbg-atk-spines" class="sci-btn dev-ed-btn">💎 Dorsal Spine Rain</button>
           </div>
         </div>
         <div class="dev-dbg-section">
@@ -632,9 +633,10 @@ export class GameplayDebugger {
         this.showCollisionBounds = !this.showCollisionBounds;
         this.refreshDynamicContent();
       });
-      body.querySelector('#dbg-atk-laser')?.addEventListener('click', () => sim.devTriggerBossAttack('laser'));
-      body.querySelector('#dbg-atk-tentacle')?.addEventListener('click', () => sim.devTriggerBossAttack('tentacle'));
-      body.querySelector('#dbg-atk-elem')?.addEventListener('click', () => sim.devTriggerBossAttack('elemental'));
+      body.querySelector('#dbg-atk-leap')?.addEventListener('click', () => sim.devTriggerBossAttack('leap_slash'));
+      body.querySelector('#dbg-atk-sweep')?.addEventListener('click', () => sim.devTriggerBossAttack('tail_sweep'));
+      body.querySelector('#dbg-atk-laser')?.addEventListener('click', () => sim.devTriggerBossAttack('tail_laser'));
+      body.querySelector('#dbg-atk-spines')?.addEventListener('click', () => sim.devTriggerBossAttack('spine_barrage'));
 
       const setBossPct = (pct: number | 'one') => {
         const b = state.enemies.find((e) => e.isStage1Titan);

@@ -82,6 +82,8 @@ export class Simulation {
   private stage1BossCycle: number = 0;
   private bossEmergePhaseStage: number = 0;
   private lastSafeGroundedPos: { x: number; y: number; z: number } | null = null;
+  private safeGroundedHistory: Array<{ x: number; y: number; z: number }> = [];
+  private maxLegitTowerZReached: number = -Infinity;
   private stuckPrevPos: Vector2 | null = null;
   private stuckCheckTimer: number = 0;
   private unstuckCooldown: number = 0;
@@ -284,6 +286,7 @@ export class Simulation {
     this.updateHolographicDecoys(dt);
     this.updateDivineAngels(dt);
     this.updateFallingCrosses(dt);
+    this.updateBossSpineRain(dt);
 
     // 3. Player Movement & Dash
     this.updatePlayerMovement(dt, input);
@@ -356,6 +359,9 @@ export class Simulation {
     this.state.holographicDecoys = [];
     this.state.divineAngels = [];
     this.state.fallingCrosses = [];
+    this.state.fallingBossCrystals = [];
+    this.state.bossSpineRainTimer = 0;
+    this.state.bossSpineRainWaveTimer = 0;
     this.state.currencyDrops = [];
     this.state.itemDrops = [];
     this.enemySpawnTimer = 0;
@@ -459,6 +465,8 @@ export class Simulation {
     p.buffsBySource = { level: 0, pod: 0, elite: 0, event: 0 };
     this.isExecutingPrimaryLmb = false;
     this.lastSafeGroundedPos = null;
+    this.safeGroundedHistory = [];
+    this.maxLegitTowerZReached = -Infinity;
     this.stuckPrevPos = null;
     this.stuckCheckTimer = 0;
     this.unstuckCooldown = 0;
@@ -789,41 +797,60 @@ export class Simulation {
     }
   }
 
-  public devTriggerBossAttack(attack: 'laser' | 'tentacle' | 'elemental'): boolean {
+  public devTriggerBossAttack(
+    attack: 'leap_slash' | 'tail_sweep' | 'tail_laser' | 'spine_barrage' | 'laser' | 'tentacle' | 'elemental'
+  ): boolean {
     const boss = this.state.enemies.find((e) => e.isStage1Titan && e.titanState !== 'dying');
     if (!boss) return false;
     const p = this.state.player;
     const dx = p.pos.x - boss.pos.x;
     const dy = p.pos.y - boss.pos.y;
+    const dist = Math.hypot(dx, dy) || 1;
     boss.velocity.x = 0;
     boss.velocity.y = 0;
+    boss.isBossLeaping = false;
 
-    if (attack === 'laser') {
-      boss.titanState = 'laser_sweep';
-      boss.titanTimer = STAGE1_BOSS_CONFIG.laser.duration;
-      boss.titanLaserSweepDir = 1;
-      boss.titanLaserAngle = Math.atan2(dy, dx) - 0.75;
+    if (attack === 'tail_laser' || attack === 'laser') {
+      boss.titanState = 'tail_laser';
+      boss.titanSubPhase = 'charge';
+      boss.titanPhaseElapsed = 0;
+      boss.titanTimer = STAGE1_BOSS_CONFIG.tailLaser.chargeDuration;
+      boss.titanLaserAngle = Math.atan2(dy, dx);
+      boss.titanTailPitch = Math.atan2((p.z + 48) - (boss.z + 295), Math.max(120, dist));
       this.state.events.push({
-        type: 'stage1_boss_laser_sweep',
-        data: { id: boss.id, start: true, duration: STAGE1_BOSS_CONFIG.laser.duration, thickness: STAGE1_BOSS_CONFIG.laser.thickness }
+        type: 'stage1_boss_laser_charge',
+        data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.tailLaser.chargeDuration }
       });
-    } else if (attack === 'tentacle') {
-      boss.titanState = 'tentacle_strike';
-      boss.titanTentaclePhase = 'telegraph';
-      boss.titanTentacleTarget = { x: p.pos.x, y: p.pos.y };
-      boss.titanTimer = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration;
-      boss.titanTentacleHitApplied = false;
+    } else if (attack === 'leap_slash' || attack === 'tentacle') {
+      boss.titanState = 'leap_dual_slash';
+      boss.titanSubPhase = 'windup';
+      boss.titanPhaseElapsed = 0;
+      boss.titanTimer = STAGE1_BOSS_CONFIG.leapDualSlash.windupDuration;
+      boss.titanSlashHitMask = 0;
       this.state.events.push({
-        type: 'stage1_boss_tentacle_strike',
-        data: { id: boss.id, phase: 'telegraph', target: { ...boss.titanTentacleTarget } }
+        type: 'stage1_boss_rumble',
+        data: { pos: { ...boss.pos }, intensity: 0.25, z: boss.groundZ }
+      });
+    } else if (attack === 'tail_sweep') {
+      boss.titanState = 'tail_sweep_shards';
+      boss.titanSubPhase = 'windup';
+      boss.titanPhaseElapsed = 0;
+      boss.titanTimer = STAGE1_BOSS_CONFIG.tailSweepShards.windupDuration;
+      boss.titanShardsSpawned = 0;
+      boss.titanSweepDir = 1;
+      boss.titanSweepStartAngle = Math.atan2(dy, dx) - STAGE1_BOSS_CONFIG.tailSweepShards.sweepArcRad * 0.5;
+      this.state.events.push({
+        type: 'stage1_boss_tail_sweep',
+        data: { id: boss.id, phase: 'windup', pos: { ...boss.pos } }
       });
     } else {
-      boss.titanState = 'elemental_barrage';
-      boss.titanTimer = STAGE1_BOSS_CONFIG.elemental.chargeDuration;
-      boss.titanElementalCharged = false;
+      boss.titanState = 'dorsal_spine_barrage';
+      boss.titanSubPhase = 'charge';
+      boss.titanPhaseElapsed = 0;
+      boss.titanTimer = STAGE1_BOSS_CONFIG.dorsalSpineBarrage.chargeDuration;
       this.state.events.push({
-        type: 'stage1_boss_elemental_charge',
-        data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.elemental.chargeDuration }
+        type: 'stage1_boss_spine_charge',
+        data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.dorsalSpineBarrage.chargeDuration }
       });
     }
     return true;
@@ -831,6 +858,9 @@ export class Simulation {
 
   public devResetBossEncounter(): void {
     this.state.enemies = this.state.enemies.filter((e) => !e.isBoss && !e.isStage1Titan);
+    this.state.fallingBossCrystals = [];
+    this.state.bossSpineRainTimer = 0;
+    this.state.bossSpineRainWaveTimer = 0;
     if (this.state.artifact) {
       this.state.artifact.isBossSpawned = false;
       this.state.artifact.isBossDefeated = false;
@@ -1917,14 +1947,37 @@ export class Simulation {
       finalSample.isWalkable &&
       finalSample.category !== 'cliff' &&
       finalSample.category !== 'solid_obstacle' &&
+      finalSample.category !== 'border' &&
       Math.abs(p.z - finalElev) <= 4 &&
       this.unstuckCooldown <= 0
     ) {
+      if (finalSample.category === 'tower_ledge' || finalSample.sourceTag === 'node:tower_walkway') {
+        if (finalElev > this.maxLegitTowerZReached) {
+          this.maxLegitTowerZReached = finalElev;
+        }
+      }
       const blockedByObs = this.state.obstacles.some(
         (obs) => Math.hypot(p.pos.x - obs.pos.x, p.pos.y - obs.pos.y) < obs.radius * 0.78
       );
       if (!blockedByObs) {
-        this.lastSafeGroundedPos = { x: p.pos.x, y: p.pos.y, z: finalElev };
+        const mc = this.state.terrain.meshCollider;
+        const spotClear =
+          !mc ||
+          mc.checkHorizontalMove(p.pos, p.pos, finalElev + 4, 22, 88, 20, false).allowed;
+        if (spotClear) {
+          this.lastSafeGroundedPos = { x: p.pos.x, y: p.pos.y, z: finalElev };
+          const prevHist = this.safeGroundedHistory[this.safeGroundedHistory.length - 1];
+          if (
+            !prevHist ||
+            Math.hypot(p.pos.x - prevHist.x, p.pos.y - prevHist.y) >= 65 ||
+            Math.abs(finalElev - prevHist.z) >= 32
+          ) {
+            this.safeGroundedHistory.push({ x: p.pos.x, y: p.pos.y, z: finalElev });
+            if (this.safeGroundedHistory.length > 16) {
+              this.safeGroundedHistory.shift();
+            }
+          }
+        }
       }
     }
 
@@ -2165,23 +2218,60 @@ export class Simulation {
     wy: number,
     maxSlope: number,
     obstaclePad: number,
-    checkCardinals: boolean
+    checkCardinals: boolean,
+    referenceZ?: number,
+    maxAllowedZ?: number
   ): { valid: boolean; height: number } {
     const terrain = this.state.terrain;
     if (!terrain.isInsidePlayableBounds(wx, wy, 55)) {
       return { valid: false, height: 0 };
     }
 
-    const elev = terrain.getElevation(wx, wy);
-    if (!elev.isWalkable || elev.surfaceType === 'chasm') {
+    const refZ = referenceZ ?? (this.state.player.z + 24);
+    const elev = terrain.getElevation(wx, wy, refZ, 22);
+    if (
+      !elev.isWalkable ||
+      elev.surfaceType === 'chasm' ||
+      elev.category === 'cliff' ||
+      elev.category === 'solid_obstacle' ||
+      elev.category === 'border'
+    ) {
       return { valid: false, height: elev.height };
     }
     if (!terrain.isCustomTestMap && elev.height >= 680) {
       return { valid: false, height: elev.height };
     }
 
+    // Prevent Unstuck from ever teleporting the player upward onto elevated platforms/roofs/tower walkways
+    const elevCap = maxAllowedZ ?? (this.state.player.z + 24);
+    if (elev.height > elevCap) {
+      return { valid: false, height: elev.height };
+    }
+
+    // Prevent Unstuck from placing the player on any unvisited tower platform above their highest legitimate climb
+    const isTowerPlatform =
+      elev.category === 'tower_ledge' || elev.sourceTag === 'node:tower_walkway';
+    if (isTowerPlatform && elev.height > this.maxLegitTowerZReached + 16) {
+      return { valid: false, height: elev.height };
+    }
+
     const slope = terrain.getSurfaceSlope(wx, wy, 24);
     if (slope > maxSlope) {
+      return { valid: false, height: elev.height };
+    }
+
+    if (
+      terrain.meshCollider &&
+      !terrain.meshCollider.checkHorizontalMove(
+        { x: wx, y: wy },
+        { x: wx, y: wy },
+        elev.height + 4,
+        24,
+        88,
+        20,
+        false
+      ).allowed
+    ) {
       return { valid: false, height: elev.height };
     }
 
@@ -2199,8 +2289,14 @@ export class Simulation {
         if (!terrain.isInsidePlayableBounds(nx, ny, 45)) {
           return { valid: false, height: elev.height };
         }
-        const nElev = terrain.getElevation(nx, ny);
-        if (!nElev.isWalkable || nElev.surfaceType === 'chasm' || Math.abs(nElev.height - elev.height) > 24) {
+        const nElev = terrain.getElevation(nx, ny, elev.height + 16, 22);
+        if (
+          !nElev.isWalkable ||
+          nElev.surfaceType === 'chasm' ||
+          nElev.category === 'cliff' ||
+          nElev.category === 'solid_obstacle' ||
+          Math.abs(nElev.height - elev.height) > 24
+        ) {
           return { valid: false, height: elev.height };
         }
       }
@@ -2224,12 +2320,14 @@ export class Simulation {
     radii: number[],
     maxSlope: number,
     obstaclePad: number,
-    checkCardinals: boolean
+    checkCardinals: boolean,
+    referenceZ?: number,
+    maxAllowedZ?: number
   ): { x: number; y: number; z: number } | null {
     const angleCount = 16;
     for (const r of radii) {
       if (r === 0) {
-        const res = this.isUnstuckSpotValid(origin.x, origin.y, maxSlope, obstaclePad, checkCardinals);
+        const res = this.isUnstuckSpotValid(origin.x, origin.y, maxSlope, obstaclePad, checkCardinals, referenceZ, maxAllowedZ);
         if (res.valid) {
           return { x: origin.x, y: origin.y, z: res.height };
         }
@@ -2240,7 +2338,7 @@ export class Simulation {
         const angle = (i / angleCount) * Math.PI * 2;
         const cx = origin.x + Math.cos(angle) * r;
         const cy = origin.y + Math.sin(angle) * r;
-        const res = this.isUnstuckSpotValid(cx, cy, maxSlope, obstaclePad, checkCardinals);
+        const res = this.isUnstuckSpotValid(cx, cy, maxSlope, obstaclePad, checkCardinals, referenceZ, maxAllowedZ);
         if (res.valid) {
           return { x: cx, y: cy, z: res.height };
         }
@@ -2249,19 +2347,62 @@ export class Simulation {
     return null;
   }
 
-  /** Resets the player to the nearest valid walkable terrain and clears aerial/stuck motion state. */
+  /** Resets the player to the nearest valid walkable terrain at or below current elevation and clears stuck motion state. */
   public unstuckPlayer(): { x: number; y: number; z: number } {
     const p = this.state.player;
     const terrain = this.state.terrain;
-    const clampedOrigin = terrain.clampToPlayableBounds(p.pos, 55).pos;
-
-    const strictRadii = [0, 25, 50, 75, 100, 140, 180, 230, 290, 360, 440, 540, 660, 800, 960];
     const strictMaxSlope = terrain.isCustomTestMap ? 0.65 : 0.55;
-    let target = this.findNearestWalkablePos(clampedOrigin, strictRadii, strictMaxSlope, 26, true);
+
+    // If the player is already standing safely on open walkable ground, clear motion state in place (no teleporting)
+    if (
+      p.isGrounded &&
+      Math.abs(p.z - p.groundZ) <= 12 &&
+      this.isUnstuckSpotValid(p.pos.x, p.pos.y, strictMaxSlope, 22, true, p.z + 20, p.z + 20).valid
+    ) {
+      const inPlace = { x: p.pos.x, y: p.pos.y, z: p.groundZ };
+      p.z = p.groundZ;
+      p.vz = 0;
+      p.velocity.x = 0;
+      p.velocity.y = 0;
+      p.isJumping = false;
+      p.isGliding = false;
+      p.isDashing = false;
+      p.dashDurationTimer = 0;
+      return inPlace;
+    }
+
+    const clampedOrigin = terrain.clampToPlayableBounds(p.pos, 55).pos;
+    // Allow recovering back onto last legit level if the player fell underneath terrain (z < -40)
+    const fellUnderMap = p.z < -40;
+    const maxAllowedZ = fellUnderMap ? Infinity : p.z + 24;
+    const searchRefZ = fellUnderMap ? 1e6 : p.z + 24;
+
+    let target: { x: number; y: number; z: number } | null = null;
+
+    // 1. Prefer a recently visited, legitimately walked safe spot at or below current height
+    for (let i = this.safeGroundedHistory.length - 1; i >= 0; i--) {
+      const h = this.safeGroundedHistory[i];
+      if (!fellUnderMap && h.z > p.z + 24) continue;
+      if (Math.hypot(h.x - p.pos.x, h.y - p.pos.y) > 1200) continue;
+      if (this.isUnstuckSpotValid(h.x, h.y, strictMaxSlope, 24, true, h.z + 16, maxAllowedZ).valid) {
+        target = { ...h };
+        break;
+      }
+    }
+
+    // 2. Search nearby radial rings constrained strictly at or below current elevation
+    if (!target) {
+      const strictRadii = [0, 25, 50, 75, 100, 140, 180, 230, 290, 360, 440, 540, 660, 800, 960];
+      target = this.findNearestWalkablePos(clampedOrigin, strictRadii, strictMaxSlope, 26, true, searchRefZ, maxAllowedZ);
+    }
 
     if (!target) {
       const relaxedRadii = [0, 40, 90, 160, 260, 400, 600, 900, 1300];
-      target = this.findNearestWalkablePos(clampedOrigin, relaxedRadii, 0.95, 24, false);
+      target = this.findNearestWalkablePos(clampedOrigin, relaxedRadii, 0.95, 24, false, searchRefZ, maxAllowedZ);
+    }
+
+    if (!target && this.lastSafeGroundedPos && (fellUnderMap || this.lastSafeGroundedPos.z <= p.z + 24)) {
+      target = { ...this.lastSafeGroundedPos };
     }
 
     if (!target) {
@@ -2269,7 +2410,7 @@ export class Simulation {
         terrain.isCustomTestMap && terrain.testSpawnPos
           ? terrain.testSpawnPos
           : this.state.playerSpawnPos;
-      const fallbackHeight = terrain.calculateHeight(fallbackPos.x, fallbackPos.y);
+      const fallbackHeight = terrain.getElevation(fallbackPos.x, fallbackPos.y, 1e6, 22).height;
       target = { x: fallbackPos.x, y: fallbackPos.y, z: fallbackHeight };
     }
 
@@ -8246,12 +8387,12 @@ export class Simulation {
       const heightDiff = Math.abs(p.z - boss.z);
       const isDirectWalk = heightDiff < 32 && this.state.terrain.isDirectlyTraversable(boss.pos, p.pos, false);
 
-      let targetVx = 0;
-      let targetVy = 0;
+      let desiredVx = 0;
+      let desiredVy = 0;
 
       if (isDirectWalk) {
-        targetVx = (dx / dist) * speed;
-        targetVy = (dy / dist) * speed;
+        desiredVx = (dx / dist) * speed;
+        desiredVy = (dy / dist) * speed;
       } else {
         // Use terrain navigation graph to follow climbable ramps and navigate around sheer cliffs
         const navRes = this.state.terrain.getNavWaypointInfo(boss.pos, p.pos, false);
@@ -8259,12 +8400,14 @@ export class Simulation {
         const wdx = wp.x - boss.pos.x;
         const wdy = wp.y - boss.pos.y;
         const wdist = Math.hypot(wdx, wdy) || 1;
-        targetVx = (wdx / wdist) * speed;
-        targetVy = (wdy / wdist) * speed;
+        desiredVx = (wdx / wdist) * speed;
+        desiredVy = (wdy / wdist) * speed;
       }
 
-      boss.velocity.x = targetVx;
-      boss.velocity.y = targetVy;
+      // Smooth velocity steering prevents abrupt nav waypoint snaps & body jitter
+      const steerBlend = Math.min(1.0, dt * 7.5);
+      boss.velocity.x += (desiredVx - boss.velocity.x) * steerBlend;
+      boss.velocity.y += (desiredVy - boss.velocity.y) * steerBlend;
 
       // Determine facing direction based on movement angle
       if (Math.abs(boss.velocity.x) > Math.abs(boss.velocity.y) * 1.1) {
@@ -8295,248 +8438,485 @@ export class Simulation {
 
       // Do NOT interrupt pursuit or fire through the Tower if player is far away or on a blocked elevation layer
       const verticalReachable = Math.abs(p.z - boss.z) <= 520;
-      const inAttackRange = dist <= 1050 && verticalReachable;
+      const inAttackRange = dist <= 1100 && verticalReachable;
       const canAttack =
         (inAttackRange && boss.attackCooldownRemaining <= 0) ||
-        (dist <= 1350 && verticalReachable && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 3 === 2));
+        (dist <= 1350 && verticalReachable && boss.attackCooldownRemaining <= 0 && (this.stage1BossCycle % 4 === 3));
 
       if (canAttack || (boss.titanTimer <= 0 && inAttackRange)) {
         boss.velocity.x = 0;
         boss.velocity.y = 0;
         boss.attackCooldownRemaining = STAGE1_BOSS_CONFIG.attackCooldown;
 
-        const cycle = this.stage1BossCycle % 3;
+        const cycle = this.stage1BossCycle % 4;
         this.stage1BossCycle++;
 
         if (cycle === 0) {
-          // ATTACK 1 — Massive 80-unit Mouth Lightning Laser Sweep
-          boss.titanState = 'laser_sweep';
-          boss.titanTimer = STAGE1_BOSS_CONFIG.laser.duration;
-          boss.titanLaserSweepDir = this.state.rng.next() > 0.5 ? 1 : -1;
-          const pAngle = Math.atan2(dy, dx);
-          boss.titanLaserAngle = pAngle - 0.75 * boss.titanLaserSweepDir;
+          // SKILL 1 — Leap & Dual Slash
+          boss.titanState = 'leap_dual_slash';
+          boss.titanSubPhase = 'windup';
+          boss.titanPhaseElapsed = 0;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.leapDualSlash.windupDuration;
+          boss.titanSlashHitMask = 0;
           this.state.events.push({
-            type: 'stage1_boss_laser_sweep',
-            data: { id: boss.id, start: true, duration: STAGE1_BOSS_CONFIG.laser.duration, thickness: STAGE1_BOSS_CONFIG.laser.thickness }
+            type: 'stage1_boss_rumble',
+            data: { pos: { ...boss.pos }, intensity: 0.24, z: boss.groundZ }
           });
         } else if (cycle === 1) {
-          // ATTACK 2 — Independent Long-Range Tentacle Strikes (Reach 900)
-          boss.titanState = 'tentacle_strike';
-          boss.titanTentaclePhase = 'telegraph';
-          boss.titanTentacleTarget = { x: p.pos.x, y: p.pos.y };
-          boss.titanTimer = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration;
-          boss.titanTentacleHitApplied = false;
-
-          // Immediately orient boss toward player for unmistakable tentacle strike readout
-          if (Math.abs(dx) > Math.abs(dy) * 1.1) {
-            boss.titanFacing = dx > 0 ? 'right' : 'left';
-          } else {
-            boss.titanFacing = dy > 0 ? 'front' : 'back';
-          }
-
+          // SKILL 2 — Tail Sweep & 30-Shard Barrage
+          boss.titanState = 'tail_sweep_shards';
+          boss.titanSubPhase = 'windup';
+          boss.titanPhaseElapsed = 0;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.tailSweepShards.windupDuration;
+          boss.titanShardsSpawned = 0;
+          boss.titanSweepDir = this.state.rng.next() > 0.5 ? 1 : -1;
+          boss.titanSweepStartAngle =
+            Math.atan2(dy, dx) - boss.titanSweepDir * STAGE1_BOSS_CONFIG.tailSweepShards.sweepArcRad * 0.5;
           this.state.events.push({
-            type: 'stage1_boss_tentacle_strike',
-            data: { id: boss.id, phase: 'telegraph', target: { ...boss.titanTentacleTarget } }
+            type: 'stage1_boss_tail_sweep',
+            data: { id: boss.id, phase: 'windup', pos: { ...boss.pos } }
+          });
+        } else if (cycle === 2) {
+          // SKILL 3 — Tracking Tail Laser (locks 3D target directly onto player torso)
+          boss.titanState = 'tail_laser';
+          boss.titanSubPhase = 'charge';
+          boss.titanPhaseElapsed = 0;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.tailLaser.chargeDuration;
+          boss.titanLaserTarget = { x: p.pos.x, y: p.pos.y, z: p.z + 44 };
+          const emOrig = boss.titanLaserOrigin ?? { x: boss.pos.x, y: boss.pos.y, z: boss.z + 270 };
+          const hDist = Math.max(40, Math.hypot(p.pos.x - emOrig.x, p.pos.y - emOrig.y));
+          boss.titanLaserAngle = Math.atan2(p.pos.y - emOrig.y, p.pos.x - emOrig.x);
+          boss.titanTailPitch = Math.atan2((p.z + 44) - emOrig.z, hDist);
+          this.state.events.push({
+            type: 'stage1_boss_laser_charge',
+            data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.tailLaser.chargeDuration }
           });
         } else {
-          // ATTACK 3 — Ten Elemental Projectile Barrage
-          boss.titanState = 'elemental_barrage';
-          boss.titanTimer = STAGE1_BOSS_CONFIG.elemental.chargeDuration;
-          boss.titanElementalCharged = false;
+          // SKILL 4 — Dorsal Spine Barrage (3.0s Crystal Rain)
+          boss.titanState = 'dorsal_spine_barrage';
+          boss.titanSubPhase = 'charge';
+          boss.titanPhaseElapsed = 0;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.dorsalSpineBarrage.chargeDuration;
           this.state.events.push({
-            type: 'stage1_boss_elemental_charge',
-            data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.elemental.chargeDuration }
+            type: 'stage1_boss_spine_charge',
+            data: { id: boss.id, duration: STAGE1_BOSS_CONFIG.dorsalSpineBarrage.chargeDuration }
           });
         }
       }
       return;
     }
 
-    // 5. ATTACK 1 — MASSIVE 80-UNIT MOUTH LIGHTNING LASER SWEEP
-    if (boss.titanState === 'laser_sweep') {
+    // 5. SKILL 1 — RIFT STALKER LEAP & DUAL SLASH
+    if (boss.titanState === 'leap_dual_slash') {
+      const cfg = STAGE1_BOSS_CONFIG.leapDualSlash;
       boss.velocity.x = 0;
       boss.velocity.y = 0;
-      const laserDur = STAGE1_BOSS_CONFIG.laser.duration;
-      boss.titanTimer = (boss.titanTimer ?? laserDur) - dt;
-      const laserElapsed = laserDur - boss.titanTimer;
-      const laserNorm = Math.min(1.0, Math.max(0, laserElapsed / laserDur));
+      boss.titanPhaseElapsed = (boss.titanPhaseElapsed ?? 0) + dt;
 
-      const pAngle = Math.atan2(p.pos.y - boss.pos.y, p.pos.x - boss.pos.x);
-      const sweepDir = boss.titanLaserSweepDir ?? 1;
-      const currentLaserAngle = (pAngle - 0.75 * sweepDir) + (1.5 * sweepDir) * laserNorm;
-      boss.titanLaserAngle = currentLaserAngle;
+      if (boss.titanSubPhase === 'windup') {
+        boss.titanFacing = Math.abs(dx) > Math.abs(dy) * 1.1 ? (dx > 0 ? 'right' : 'left') : dy > 0 ? 'front' : 'back';
+        if (boss.titanPhaseElapsed >= cfg.windupDuration) {
+          // Probe valid terrain landing spot ~140u in front of player (strictly inside playable bounds & outside hollow tower)
+          const pAng = Math.atan2(boss.pos.y - p.pos.y, boss.pos.x - p.pos.x);
+          const standOff = dist < 175 ? 95 : 140;
+          const desiredSpot = { x: p.pos.x + Math.cos(pAng) * standOff, y: p.pos.y + Math.sin(pAng) * standOff };
+          const safeTarget = this.findBossLeapLandingSpot(boss, desiredSpot, p.groundZ);
+          const leapDist = Math.hypot(safeTarget.x - boss.pos.x, safeTarget.y - boss.pos.y);
 
-      // Update boss facing to match the sweeping head/mouth
-      const cosA = Math.cos(currentLaserAngle);
-      const sinA = Math.sin(currentLaserAngle);
-      if (Math.abs(cosA) > 0.6) {
-        boss.titanFacing = cosA > 0 ? 'right' : 'left';
-      } else {
-        boss.titanFacing = sinA > 0 ? 'front' : 'back';
-      }
-
-      // Hitbox: 80 units thickness check against player
-      const beamRange = STAGE1_BOSS_CONFIG.laser.range;
-      const beamEndX = boss.pos.x + cosA * beamRange;
-      const beamEndY = boss.pos.y + sinA * beamRange;
-      const distToBeam = distToSeg(p.pos.x, p.pos.y, boss.pos.x, boss.pos.y, beamEndX, beamEndY);
-
-      if (
-        distToBeam <= 56 + 24 &&
-        Math.abs(p.z - boss.z) < 160 &&
-        this.state.terrain.checkLineOfSight3D(
-          { x: boss.pos.x, y: boss.pos.y, z: boss.z + 180 },
-          { x: p.pos.x, y: p.pos.y, z: p.z + 52 }
-        )
-      ) {
-        // Continuous tick damage
-        if (!p.isDashing) {
-          this.damagePlayer(22 * dt, true, boss, 'beam');
-        }
-      }
-
-      this.state.events.push({
-        type: 'stage1_boss_laser_sweep',
-        data: {
-          id: boss.id,
-          pos: { ...boss.pos },
-          angle: currentLaserAngle,
-          thickness: STAGE1_BOSS_CONFIG.laser.thickness,
-          endPos: { x: beamEndX, y: beamEndY }
-        }
-      });
-
-      if (boss.titanTimer <= 0) {
-        boss.titanState = 'idle';
-        boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
-        this.state.events.push({
-          type: 'stage1_boss_laser_sweep',
-          data: { id: boss.id, start: false }
-        });
-      }
-      return;
-    }
-
-    // 6. ATTACK 2 — INDEPENDENT LONG-RANGE TENTACLE STRIKES
-    if (boss.titanState === 'tentacle_strike') {
-      boss.velocity.x = 0;
-      boss.velocity.y = 0;
-      boss.titanTimer = (boss.titanTimer ?? STAGE1_BOSS_CONFIG.tentacle.telegraphDuration) - dt;
-
-      const target = boss.titanTentacleTarget ?? { x: p.pos.x, y: p.pos.y };
-
-      // Keep boss facing toward the strike target so sprite animation aligns with the 3D tentacles
-      const fdx = target.x - boss.pos.x;
-      const fdy = target.y - boss.pos.y;
-      if (Math.abs(fdx) > Math.abs(fdy) * 1.1) {
-        boss.titanFacing = fdx > 0 ? 'right' : 'left';
-      } else {
-        boss.titanFacing = fdy > 0 ? 'front' : 'back';
-      }
-
-      if (boss.titanTentaclePhase === 'telegraph') {
-        // Track player smoothly during initial telegraph window, then lock target so player can react and dodge
-        const elapsed = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration - boss.titanTimer;
-        if (elapsed < STAGE1_BOSS_CONFIG.tentacle.lockDuration) {
-          target.x += (p.pos.x - target.x) * Math.min(1.0, dt * 6);
-          target.y += (p.pos.y - target.y) * Math.min(1.0, dt * 6);
-          boss.titanTentacleTarget = { x: target.x, y: target.y };
-        }
-
-        if (boss.titanTimer <= 0) {
-          // Enter strike phase
-          boss.titanTentaclePhase = 'strike';
-          boss.titanTimer = STAGE1_BOSS_CONFIG.tentacle.strikeDuration;
-          boss.titanTentacleHitApplied = false;
+          boss.isBossLeaping = true;
+          boss.bossLeapStart = { x: boss.pos.x, y: boss.pos.y, z: boss.z };
+          boss.bossLeapTarget = safeTarget;
+          boss.bossLeapElapsed = 0;
+          boss.bossLeapDuration = Math.max(cfg.leapMinDuration, Math.min(cfg.leapMaxDuration, 0.36 + leapDist / 1600));
+          boss.titanSubPhase = 'airborne';
+          boss.titanPhaseElapsed = 0;
 
           this.state.events.push({
-            type: 'stage1_boss_tentacle_strike',
-            data: { id: boss.id, phase: 'strike', pos: { ...boss.pos }, target: { ...target } }
+            type: 'stage1_boss_rumble',
+            data: { pos: { ...boss.pos }, intensity: 0.35, isFootstep: true, z: boss.groundZ }
           });
         }
-      } else if (boss.titanTentaclePhase === 'strike') {
-        const elapsed = STAGE1_BOSS_CONFIG.tentacle.strikeDuration - boss.titanTimer;
-        // Strike impact hits synchronized with 3D tentacles slamming the ground
-        if (elapsed >= STAGE1_BOSS_CONFIG.tentacle.impactTime && !boss.titanTentacleHitApplied) {
-          boss.titanTentacleHitApplied = true;
-          const strikeDist = Math.hypot(p.pos.x - target.x, p.pos.y - target.y);
-          const targetElev = this.state.terrain.getElevation(target.x, target.y, boss.z, 180).height;
-          if (strikeDist <= STAGE1_BOSS_CONFIG.tentacle.strikeRadius + 16 && Math.abs(p.z - targetElev) <= 160 && !p.isDashing) {
-            this.damagePlayer(STAGE1_BOSS_CONFIG.tentacle.damage, false, boss, 'melee');
+      } else if (boss.titanSubPhase === 'airborne' && boss.bossLeapStart && boss.bossLeapTarget) {
+        const dur = Math.max(0.35, boss.bossLeapDuration ?? cfg.leapMinDuration);
+        boss.bossLeapElapsed = (boss.bossLeapElapsed ?? 0) + dt;
+        const u = Math.min(1.0, boss.bossLeapElapsed / dur);
+        const s = boss.bossLeapStart;
+        const t = boss.bossLeapTarget;
+        const leapDist = Math.hypot(t.x - s.x, t.y - s.y);
+        const arcPeak = Math.min(340, Math.max(110, leapDist * 0.25 + Math.abs(t.z - s.z) * 0.35));
+
+        boss.pos.x = s.x + (t.x - s.x) * u;
+        boss.pos.y = s.y + (t.y - s.y) * u;
+        boss.z = s.z + (t.z - s.z) * u + 4 * arcPeak * u * (1 - u);
+
+        if (u >= 1.0) {
+          boss.pos.x = t.x;
+          boss.pos.y = t.y;
+          const landElev = this.state.terrain.getElevation(boss.pos.x, boss.pos.y, t.z + 30, 30).height;
+          boss.z = landElev;
+          boss.groundZ = landElev;
+          boss.isBossLeaping = false;
+          this.state.terrain.pushOutOfSteepTerrain(boss.pos, boss.z, 32);
+
+          boss.titanSubPhase = 'slash';
+          boss.titanPhaseElapsed = 0;
+          boss.titanSlashHitMask = 0;
+          this.state.events.push({
+            type: 'stage1_boss_rumble',
+            data: { pos: { ...boss.pos }, intensity: 0.55, isFinalBurst: true, z: boss.groundZ }
+          });
+        }
+      } else {
+        // Two consecutive synchronized frontal scythe slashes
+        const faceAng = Math.atan2(dy, dx);
+        const applySlash = (slashIdx: 1 | 2) => {
+          this.state.events.push({
+            type: 'stage1_boss_dual_slash',
+            data: { id: boss.id, slashIndex: slashIdx, pos: { ...boss.pos }, z: boss.z, angle: faceAng, radius: cfg.slashRange }
+          });
+          if (!p.isDashing && dist <= cfg.slashRange && Math.abs(p.z - boss.z) <= 160) {
+            let aDiff = Math.atan2(p.pos.y - boss.pos.y, p.pos.x - boss.pos.x) - faceAng;
+            while (aDiff < -Math.PI) aDiff += Math.PI * 2;
+            while (aDiff > Math.PI) aDiff -= Math.PI * 2;
+            if (Math.abs(aDiff) <= cfg.slashArcRad * 0.5) {
+              this.damagePlayer(cfg.slashDamage, false, boss, 'melee');
+            }
           }
+        };
 
-          this.state.events.push({
-            type: 'stage1_boss_tentacle_strike',
-            data: { id: boss.id, phase: 'impact', pos: { ...boss.pos }, target: { ...target } }
-          });
+        const mask = boss.titanSlashHitMask ?? 0;
+        if ((mask & 1) === 0 && boss.titanPhaseElapsed >= cfg.slash1Time) {
+          boss.titanSlashHitMask = mask | 1;
+          applySlash(1);
+        }
+        if (((boss.titanSlashHitMask ?? 0) & 2) === 0 && boss.titanPhaseElapsed >= cfg.slash2Time) {
+          boss.titanSlashHitMask = (boss.titanSlashHitMask ?? 0) | 2;
+          applySlash(2);
         }
 
-        if (boss.titanTimer <= 0) {
-          boss.titanTentaclePhase = 'retract';
-          boss.titanTimer = STAGE1_BOSS_CONFIG.tentacle.retractDuration;
-        }
-      } else if (boss.titanTentaclePhase === 'retract') {
-        if (boss.titanTimer <= 0) {
+        if (boss.titanPhaseElapsed >= cfg.slashPhaseDuration) {
           boss.titanState = 'idle';
+          boss.titanSubPhase = undefined;
           boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
         }
       }
       return;
     }
 
-    // 7. ATTACK 3 — TEN ELEMENTAL PROJECTILE BARRAGE
-    if (boss.titanState === 'elemental_barrage') {
+    // 6. SKILL 2 — RIFT STALKER TAIL SWEEP & 30-SHARD BARRAGE
+    if (boss.titanState === 'tail_sweep_shards') {
+      const cfg = STAGE1_BOSS_CONFIG.tailSweepShards;
       boss.velocity.x = 0;
       boss.velocity.y = 0;
-      boss.titanTimer = (boss.titanTimer ?? STAGE1_BOSS_CONFIG.elemental.chargeDuration) - dt;
+      boss.titanPhaseElapsed = (boss.titanPhaseElapsed ?? 0) + dt;
 
-      if (boss.titanTimer <= 0 && !boss.titanElementalCharged) {
-        boss.titanElementalCharged = true;
+      if (boss.titanSubPhase === 'windup') {
+        if (boss.titanPhaseElapsed >= cfg.windupDuration) {
+          boss.titanSubPhase = 'sweep';
+          boss.titanPhaseElapsed = 0;
+          boss.titanShardsSpawned = 0;
+          boss.titanSlashHitMask = 0;
+          this.state.events.push({
+            type: 'stage1_boss_tail_sweep',
+            data: {
+              id: boss.id,
+              phase: 'sweep',
+              pos: { ...boss.pos },
+              z: boss.z,
+              startAngle: boss.titanSweepStartAngle ?? Math.atan2(dy, dx),
+              sweepDir: boss.titanSweepDir ?? 1,
+              arcRad: cfg.sweepArcRad,
+              radius: cfg.meleeSweepRadius
+            }
+          });
+        }
+      } else if (boss.titanSubPhase === 'sweep') {
+        const u = Math.min(1.0, boss.titanPhaseElapsed / cfg.sweepDuration);
+        const total = cfg.projectileCount; // 30 shards
+        const targetSpawned = u >= 1.0 ? total : Math.floor(u * total);
+        const startAng = boss.titanSweepStartAngle ?? Math.atan2(dy, dx);
+        const dir = boss.titanSweepDir ?? 1;
+        const spawnedAlready = boss.titanShardsSpawned ?? 0;
 
-        // Launch all 10 elemental projectiles simultaneously targeting Commander's position with threatening spread
-        const originZ = boss.z + 440;
-        const pDist = Math.hypot(p.pos.x - boss.pos.x, p.pos.y - boss.pos.y) || 1;
-        const pAng = Math.atan2(p.pos.y - boss.pos.y, p.pos.x - boss.pos.x);
-        const count = STAGE1_BOSS_CONFIG.elemental.projectileCount;
-        const speed = STAGE1_BOSS_CONFIG.elemental.speed;
-        const totalArc = Math.PI * 0.38; // ~68-degree focused barrage arc centered directly on player
-
-        for (let k = 0; k < count; k++) {
-          const spreadFactor = ((k - (count - 1) * 0.5) / ((count - 1) * 0.5)); // -1.0 to 1.0
-          const ang = pAng + spreadFactor * (totalArc * 0.5);
-          const travelTime = pDist / speed;
-          const vz = (p.z + 52 - originZ) / Math.max(0.5, travelTime);
+        for (let k = spawnedAlready; k < targetSpawned; k++) {
+          const frac = total > 1 ? k / (total - 1) : 0.5;
+          const ang = startAng + dir * cfg.sweepArcRad * frac;
+          const originX = boss.pos.x + Math.cos(ang) * 115;
+          const originY = boss.pos.y + Math.sin(ang) * 115;
+          const originZ = boss.z + 155;
+          const travelTime = Math.max(0.45, dist / cfg.shardSpeed);
+          const vz = (p.z + 46 - originZ) / travelTime;
 
           this.state.projectiles.push({
             id: `proj_${this.nextProjId++}`,
-            type: 'elemental_ball',
-            pos: { x: boss.pos.x, y: boss.pos.y },
+            type: 'rift_shard',
+            pos: { x: originX, y: originY },
             z: originZ,
-            velocity: { x: Math.cos(ang) * speed, y: Math.sin(ang) * speed },
+            velocity: { x: Math.cos(ang) * cfg.shardSpeed, y: Math.sin(ang) * cfg.shardSpeed },
             vz,
-            speed,
-            damage: STAGE1_BOSS_CONFIG.elemental.damage,
+            speed: cfg.shardSpeed,
+            damage: cfg.shardDamage,
             pierceCount: 1,
-            maxDistance: STAGE1_BOSS_CONFIG.elemental.maxDistance,
+            maxDistance: cfg.maxDistance,
             distanceTraveled: 0,
             owner: 'enemy',
-            radius: STAGE1_BOSS_CONFIG.elemental.radius,
+            radius: cfg.shardRadius,
             hitEnemyIds: new Set(),
             originZ,
-            targetZ: p.z + 52
+            targetZ: p.z + 46
           });
         }
+        boss.titanShardsSpawned = targetSpawned;
 
-        this.state.events.push({
-          type: 'stage1_boss_elemental_launch',
-          data: { id: boss.id, pos: { ...boss.pos }, count }
-        });
+        // Close-range sweeping tail impact
+        if (((boss.titanSlashHitMask ?? 0) & 1) === 0 && u >= 0.45) {
+          boss.titanSlashHitMask = (boss.titanSlashHitMask ?? 0) | 1;
+          if (!p.isDashing && dist <= cfg.meleeSweepRadius && Math.abs(p.z - boss.z) <= 155) {
+            this.damagePlayer(cfg.meleeSweepDamage, false, boss, 'melee');
+          }
+        }
 
-        boss.titanState = 'idle';
-        boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+        if (u >= 1.0) {
+          boss.titanSubPhase = 'recover';
+          boss.titanPhaseElapsed = 0;
+        }
+      } else {
+        if (boss.titanPhaseElapsed >= cfg.recoveryDuration) {
+          boss.titanState = 'idle';
+          boss.titanSubPhase = undefined;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+        }
       }
       return;
     }
+
+    // 7. SKILL 3 — RIFT STALKER TRACKING TAIL LASER (Authoritative 3D Player-Tracking Target)
+    if (boss.titanState === 'tail_laser') {
+      const cfg = STAGE1_BOSS_CONFIG.tailLaser;
+      boss.velocity.x = 0;
+      boss.velocity.y = 0;
+      boss.titanPhaseElapsed = (boss.titanPhaseElapsed ?? 0) + dt;
+
+      const playerGoalX = p.pos.x;
+      const playerGoalY = p.pos.y;
+      const playerGoalZ = p.z + 44;
+      if (!boss.titanLaserTarget) {
+        boss.titanLaserTarget = { x: playerGoalX, y: playerGoalY, z: playerGoalZ };
+      }
+
+      if (boss.titanSubPhase === 'charge') {
+        // Charge phase smoothly locks onto player's live 3D torso
+        const lockBlend = Math.min(1.0, dt * 10.0);
+        boss.titanLaserTarget.x += (playerGoalX - boss.titanLaserTarget.x) * lockBlend;
+        boss.titanLaserTarget.y += (playerGoalY - boss.titanLaserTarget.y) * lockBlend;
+        boss.titanLaserTarget.z += (playerGoalZ - boss.titanLaserTarget.z) * lockBlend;
+      } else if (boss.titanSubPhase === 'active') {
+        // Active sweep persistently pursues player's 3D position at calibrated max pursuit speed
+        const tx = boss.titanLaserTarget.x;
+        const ty = boss.titanLaserTarget.y;
+        const tz = boss.titanLaserTarget.z;
+        const errX = playerGoalX - tx;
+        const errY = playerGoalY - ty;
+        const errZ = playerGoalZ - tz;
+        const xyDist = Math.hypot(errX, errY);
+        const maxXyStep = 520 * dt;
+        if (xyDist > maxXyStep && xyDist > 1e-4) {
+          boss.titanLaserTarget.x = tx + (errX / xyDist) * maxXyStep;
+          boss.titanLaserTarget.y = ty + (errY / xyDist) * maxXyStep;
+        } else {
+          boss.titanLaserTarget.x = playerGoalX;
+          boss.titanLaserTarget.y = playerGoalY;
+        }
+        const maxZStep = 380 * dt;
+        boss.titanLaserTarget.z = tz + Math.max(-maxZStep, Math.min(maxZStep, errZ));
+      }
+
+      const tgt = boss.titanLaserTarget;
+      const aimAng = Math.atan2(tgt.y - boss.pos.y, tgt.x - boss.pos.x);
+      let angleDiff = aimAng - (boss.titanLaserAngle ?? aimAng);
+      while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+      while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+      const bodyTurn = (boss.titanSubPhase === 'charge' ? 5.5 : cfg.trackingTurnRateRadPerSec * 1.4) * dt;
+      boss.titanLaserAngle =
+        (boss.titanLaserAngle ?? aimAng) + Math.max(-bodyTurn, Math.min(bodyTurn, angleDiff));
+
+      const origin = boss.titanLaserOrigin ?? {
+        x: boss.pos.x + Math.cos(boss.titanLaserAngle) * 72,
+        y: boss.pos.y + Math.sin(boss.titanLaserAngle) * 72,
+        z: boss.z + 270
+      };
+      const beamDx = tgt.x - origin.x;
+      const beamDy = tgt.y - origin.y;
+      const beamDz = tgt.z - origin.z;
+      const beam3DLen = Math.hypot(beamDx, beamDy, beamDz) || 1;
+      const ux = beamDx / beam3DLen;
+      const uy = beamDy / beam3DLen;
+      const uz = beamDz / beam3DLen;
+      const horizLen = Math.max(1, Math.hypot(beamDx, beamDy));
+      boss.titanTailPitch = Math.atan2(beamDz, horizLen);
+
+      if (boss.titanSubPhase === 'charge') {
+        if (boss.titanPhaseElapsed >= cfg.chargeDuration) {
+          boss.titanSubPhase = 'active';
+          boss.titanPhaseElapsed = 0;
+          this.state.events.push({
+            type: 'stage1_boss_laser_sweep',
+            data: { id: boss.id, start: true, duration: cfg.activeDuration, thickness: cfg.thickness }
+          });
+        }
+      } else if (boss.titanSubPhase === 'active') {
+        const cosA = Math.cos(boss.titanLaserAngle);
+        const sinA = Math.sin(boss.titanLaserAngle);
+        boss.titanFacing = Math.abs(cosA) > 0.6 ? (cosA > 0 ? 'right' : 'left') : sinA > 0 ? 'front' : 'back';
+
+        // 3D Segment-to-Player collision matching exact visual ray origin -> target extended to range
+        const pCenterZ = p.z + 40;
+        const relX = p.pos.x - origin.x;
+        const relY = p.pos.y - origin.y;
+        const relZ = pCenterZ - origin.z;
+        const proj = Math.max(0, Math.min(cfg.range, relX * ux + relY * uy + relZ * uz));
+        const closestX = origin.x + ux * proj;
+        const closestY = origin.y + uy * proj;
+        const closestZ = origin.z + uz * proj;
+        const horizGap = Math.hypot(p.pos.x - closestX, p.pos.y - closestY);
+        const vertGap = Math.abs(pCenterZ - closestZ);
+
+        if (
+          horizGap <= 62 &&
+          vertGap <= 72 &&
+          this.state.terrain.checkLineOfSight3D(origin, { x: p.pos.x, y: p.pos.y, z: p.z + 48 })
+        ) {
+          if (!p.isDashing) {
+            this.damagePlayer(cfg.dps * dt, true, boss, 'beam');
+          }
+        }
+
+        if (boss.titanPhaseElapsed >= cfg.activeDuration) {
+          boss.titanSubPhase = 'recover';
+          boss.titanPhaseElapsed = 0;
+          this.state.events.push({
+            type: 'stage1_boss_laser_sweep',
+            data: { id: boss.id, start: false }
+          });
+        }
+      } else {
+        if (boss.titanPhaseElapsed >= cfg.recoveryDuration) {
+          boss.titanState = 'idle';
+          boss.titanSubPhase = undefined;
+          boss.titanLaserTarget = undefined;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+        }
+      }
+      return;
+    }
+
+    // 8. SKILL 4 — RIFT STALKER DORSAL SPINE BARRAGE (Spines fold, launch crystals skyward -> 3.0s rain)
+    if (boss.titanState === 'dorsal_spine_barrage') {
+      const cfg = STAGE1_BOSS_CONFIG.dorsalSpineBarrage;
+      boss.velocity.x = 0;
+      boss.velocity.y = 0;
+      boss.titanPhaseElapsed = (boss.titanPhaseElapsed ?? 0) + dt;
+
+      if (boss.titanSubPhase === 'charge') {
+        if (boss.titanPhaseElapsed >= cfg.chargeDuration) {
+          boss.titanSubPhase = 'recover';
+          boss.titanPhaseElapsed = 0;
+
+          // Begin 3.0-second crystalline barrage rain across combat area (spines stay intact on creature!)
+          this.state.bossSpineRainTimer = cfg.rainDuration;
+          this.state.bossSpineRainWaveTimer = 0;
+          this.state.bossSpineRainCenter = { x: p.pos.x, y: p.pos.y };
+          this.spawnBossSpineRainWave();
+
+          this.state.events.push({
+            type: 'stage1_boss_spine_launch',
+            data: { id: boss.id, pos: { ...boss.pos }, z: boss.z + 205, duration: cfg.rainDuration }
+          });
+        }
+      } else {
+        if (boss.titanPhaseElapsed >= cfg.launchRecoveryDuration) {
+          boss.titanState = 'idle';
+          boss.titanSubPhase = undefined;
+          boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+        }
+      }
+      return;
+    }
+
+    // Legacy safety fallback if an older state tag ever occurs
+    if (boss.titanState === 'laser_sweep' || boss.titanState === 'tentacle_strike' || boss.titanState === 'elemental_barrage') {
+      boss.titanState = 'idle';
+      boss.titanTimer = STAGE1_BOSS_CONFIG.postAttackPause;
+    }
+  }
+
+  private spawnBossSpineRainWave(): void {
+    const cfg = STAGE1_BOSS_CONFIG.dorsalSpineBarrage;
+    const p = this.state.player;
+    // Update center partially toward player so barrage pressures active combat arena without unfair teleport hits
+    this.state.bossSpineRainCenter.x += (p.pos.x - this.state.bossSpineRainCenter.x) * 0.45;
+    this.state.bossSpineRainCenter.y += (p.pos.y - this.state.bossSpineRainCenter.y) * 0.45;
+
+    for (let i = 0; i < cfg.crystalsPerWave; i++) {
+      let tx: number;
+      let ty: number;
+      if (i === 0) {
+        const ang = this.state.rng.range(0, Math.PI * 2);
+        const r = this.state.rng.range(24, 110);
+        tx = p.pos.x + Math.cos(ang) * r;
+        ty = p.pos.y + Math.sin(ang) * r;
+      } else {
+        const ang = this.state.rng.range(0, Math.PI * 2);
+        const r = Math.sqrt(this.state.rng.next()) * cfg.arenaRadius;
+        tx = this.state.bossSpineRainCenter.x + Math.cos(ang) * r;
+        ty = this.state.bossSpineRainCenter.y + Math.sin(ang) * r;
+      }
+      const clamped = this.state.terrain.clampToPlayableBounds({ x: tx, y: ty }, 36).pos;
+      const targetZ = this.state.terrain.getElevation(clamped.x, clamped.y, p.z + 80, 90).height;
+      this.state.fallingBossCrystals.push({
+        id: `b_crystal_${this.nextProjId++}`,
+        targetPos: clamped,
+        targetZ,
+        z: targetZ + cfg.fallStartHeight,
+        fallSpeed: cfg.fallSpeed,
+        impactRadius: cfg.impactRadius,
+        impactDamage: cfg.impactDamage
+      });
+    }
+  }
+
+  private updateBossSpineRain(dt: number): void {
+    if (this.state.bossSpineRainTimer > 0) {
+      this.state.bossSpineRainTimer = Math.max(0, this.state.bossSpineRainTimer - dt);
+      this.state.bossSpineRainWaveTimer -= dt;
+      if (this.state.bossSpineRainWaveTimer <= 0 && this.state.bossSpineRainTimer > 0) {
+        this.state.bossSpineRainWaveTimer += STAGE1_BOSS_CONFIG.dorsalSpineBarrage.waveInterval;
+        this.spawnBossSpineRainWave();
+      }
+    }
+
+    if (this.state.fallingBossCrystals.length === 0) return;
+    const p = this.state.player;
+    const activeBoss = this.state.enemies.find((e) => e.isStage1Titan && e.health > 0);
+    const alive: typeof this.state.fallingBossCrystals = [];
+
+    for (let i = 0; i < this.state.fallingBossCrystals.length; i++) {
+      const fc = this.state.fallingBossCrystals[i];
+      fc.z -= fc.fallSpeed * dt;
+      if (fc.z <= fc.targetZ) {
+        const d = Math.hypot(p.pos.x - fc.targetPos.x, p.pos.y - fc.targetPos.y);
+        if (d <= fc.impactRadius + 16 && Math.abs(p.z - fc.targetZ) <= 135 && !p.isDashing) {
+          this.damagePlayer(fc.impactDamage, false, activeBoss, 'projectile');
+        }
+        this.state.events.push({
+          type: 'boss_crystal_impact',
+          data: { pos: { ...fc.targetPos }, z: fc.targetZ, radius: fc.impactRadius }
+        });
+      } else {
+        alive.push(fc);
+      }
+    }
+    this.state.fallingBossCrystals = alive;
   }
 
   /**

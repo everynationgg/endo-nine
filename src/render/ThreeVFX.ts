@@ -373,6 +373,41 @@ interface ActiveHealMote {
   maxLifetime: number;
 }
 
+interface ActiveRiftSlash3D {
+  group: THREE.Group;
+  shaderMats: THREE.ShaderMaterial[];
+  shards: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; rot: THREE.Vector3 }>;
+  elapsed: number;
+  maxLifetime: number;
+  startScale: number;
+  targetScale: number;
+}
+
+interface ActiveRiftCrater3D {
+  group: THREE.Group;
+  spikes: Array<{ mesh: THREE.Mesh; targetScaleY: number }>;
+  spikeMat: THREE.MeshStandardMaterial;
+  plumeMesh: THREE.Mesh;
+  plumeMat: THREE.ShaderMaterial;
+  rippleMesh: THREE.Mesh;
+  rippleMat: THREE.ShaderMaterial;
+  elapsed: number;
+  maxLifetime: number;
+}
+
+interface ActiveRiftWhipVortex3D {
+  group: THREE.Group;
+  whipPivot: THREE.Group;
+  whipMats: THREE.ShaderMaterial[];
+  rippleMat: THREE.ShaderMaterial;
+  fangs: Array<{ mesh: THREE.Mesh; targetScaleY: number }>;
+  fangMat: THREE.MeshStandardMaterial;
+  startYaw: number;
+  sweepDeltaYaw: number;
+  elapsed: number;
+  maxLifetime: number;
+}
+
 export class ThreeVFX {
   public group: THREE.Group;
   private rings: ActiveRing[] = [];
@@ -407,6 +442,9 @@ export class ThreeVFX {
   public activeSlashArcs: ActiveCrescentSlashArc[] = [];
   private activeTentacleImpacts: ActiveTentacleImpact[] = [];
   private activeLavaSwirls: ActiveLavaSwirlExplosion[] = [];
+  private activeRiftSlashes: ActiveRiftSlash3D[] = [];
+  private activeRiftCraters: ActiveRiftCrater3D[] = [];
+  private activeRiftWhips: ActiveRiftWhipVortex3D[] = [];
   private explosionClouds: ActiveExplosionCloud[] = [];
   private splatterDroplets: ActiveSplatterDroplet[] = [];
   private sharedSparkGeo!: THREE.BufferGeometry;
@@ -597,6 +635,9 @@ export class ThreeVFX {
       this.activeSlashArcs.length +
       this.activeTentacleImpacts.length +
       this.activeLavaSwirls.length +
+      this.activeRiftSlashes.length +
+      this.activeRiftCraters.length +
+      this.activeRiftWhips.length +
       this.explosionClouds.length +
       this.splatterDroplets.length
     );
@@ -650,6 +691,9 @@ export class ThreeVFX {
     this.activeSlashArcs = [];
     this.activeTentacleImpacts = [];
     this.activeLavaSwirls = [];
+    this.activeRiftSlashes = [];
+    this.activeRiftCraters = [];
+    this.activeRiftWhips = [];
     this.explosionClouds = [];
     this.splatterDroplets = [];
     this.whiteGhosts = [];
@@ -7569,5 +7613,460 @@ export class ThreeVFX {
       fx.ringB.rotation.z -= dt * 6.4 * fx.spinSign;
       fx.ringBMat.opacity = 0.78 * fade;
     }
+
+    // 0O. Update Rift Stalker 3D Volumetric Scythe Slashes
+    for (let i = this.activeRiftSlashes.length - 1; i >= 0; i--) {
+      const rs = this.activeRiftSlashes[i];
+      rs.elapsed += dt;
+      if (rs.elapsed >= rs.maxLifetime) {
+        this.group.remove(rs.group);
+        rs.group.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            m.geometry?.dispose();
+            const mats = Array.isArray(m.material) ? m.material : [m.material];
+            for (const mat of mats) this.releaseMaterial(mat);
+          }
+        });
+        this.activeRiftSlashes.splice(i, 1);
+        continue;
+      }
+      const p = rs.elapsed / rs.maxLifetime;
+      const sc = rs.startScale + (rs.targetScale - rs.startScale) * (1.0 - Math.pow(1.0 - p, 2.0));
+      rs.group.scale.set(sc, 1.0 + p * 0.25, sc);
+      const fade = Math.pow(1.0 - p, 1.15);
+      for (const sm of rs.shaderMats) {
+        sm.uniforms.uTime.value = rs.elapsed;
+        sm.uniforms.uProgress.value = p;
+        sm.uniforms.uAlpha.value = fade;
+      }
+      for (const sh of rs.shards) {
+        sh.mesh.position.addScaledVector(sh.vel, dt);
+        sh.vel.y -= 180 * dt;
+        sh.mesh.rotation.x += sh.rot.x * dt;
+        sh.mesh.rotation.y += sh.rot.y * dt;
+        sh.mesh.scale.setScalar(Math.max(0.05, 1.0 - p * 0.75));
+      }
+    }
+
+    // 0P. Update Rift Stalker 3D Crystal Crater Eruptions (Leap Landing & Crystal Rain Impact)
+    for (let i = this.activeRiftCraters.length - 1; i >= 0; i--) {
+      const rc = this.activeRiftCraters[i];
+      rc.elapsed += dt;
+      if (rc.elapsed >= rc.maxLifetime) {
+        this.group.remove(rc.group);
+        rc.group.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            if (!m.userData?.isSharedGeo) m.geometry?.dispose();
+          }
+        });
+        rc.spikeMat.dispose();
+        this.releaseMaterial(rc.plumeMat);
+        this.releaseMaterial(rc.rippleMat);
+        this.activeRiftCraters.splice(i, 1);
+        continue;
+      }
+      const p = rc.elapsed / rc.maxLifetime;
+      const erupt = Math.min(1.0, Math.pow(Math.min(1.0, p / 0.18), 0.55));
+      const fade = p > 0.55 ? Math.max(0, 1.0 - (p - 0.55) / 0.45) : 1.0;
+      for (const sp of rc.spikes) {
+        sp.mesh.scale.set(1.0, sp.targetScaleY * erupt * (0.35 + 0.65 * fade), 1.0);
+      }
+      rc.spikeMat.emissiveIntensity = 1.65 * fade;
+      rc.spikeMat.opacity = fade;
+      rc.plumeMesh.scale.set(0.65 + p * 0.9, 0.45 + erupt * 0.85, 0.65 + p * 0.9);
+      rc.plumeMesh.rotation.y += dt * 3.8;
+      rc.plumeMat.uniforms.uTime.value = rc.elapsed;
+      rc.plumeMat.uniforms.uProgress.value = p;
+      rc.plumeMat.uniforms.uAlpha.value = fade * 0.92;
+      rc.rippleMat.uniforms.uProgress.value = 0.08 + p * 0.9;
+      rc.rippleMat.uniforms.uAlpha.value = Math.pow(1.0 - p, 1.25);
+    }
+
+    // 0Q. Update Rift Stalker 3D Tail Whip Plasma Vortices
+    for (let i = this.activeRiftWhips.length - 1; i >= 0; i--) {
+      const rw = this.activeRiftWhips[i];
+      rw.elapsed += dt;
+      if (rw.elapsed >= rw.maxLifetime) {
+        this.group.remove(rw.group);
+        rw.group.traverse((child) => {
+          if ((child as THREE.Mesh).isMesh) {
+            const m = child as THREE.Mesh;
+            if (!m.userData?.isSharedGeo) m.geometry?.dispose();
+          }
+        });
+        rw.fangMat.dispose();
+        for (const wm of rw.whipMats) this.releaseMaterial(wm);
+        this.releaseMaterial(rw.rippleMat);
+        this.activeRiftWhips.splice(i, 1);
+        continue;
+      }
+      const p = rw.elapsed / rw.maxLifetime;
+      const sweepEase = 1.0 - Math.pow(1.0 - Math.min(1.0, p / 0.72), 2.0);
+      rw.whipPivot.rotation.y = rw.startYaw + rw.sweepDeltaYaw * sweepEase;
+      const fade = p > 0.62 ? Math.max(0, 1.0 - (p - 0.62) / 0.38) : 1.0;
+      for (const wm of rw.whipMats) {
+        wm.uniforms.uTime.value = rw.elapsed;
+        wm.uniforms.uProgress.value = p;
+        wm.uniforms.uAlpha.value = fade;
+      }
+      const fangGrow = Math.min(1.0, p / 0.25);
+      for (const f of rw.fangs) {
+        f.mesh.scale.set(1.0, f.targetScaleY * fangGrow * (0.4 + 0.6 * fade), 1.0);
+      }
+      rw.fangMat.opacity = fade;
+      rw.fangMat.emissiveIntensity = 1.75 * fade;
+      rw.rippleMat.uniforms.uProgress.value = 0.1 + p * 0.88;
+      rw.rippleMat.uniforms.uAlpha.value = fade * 0.9;
+    }
+  }
+
+  /** Creates an animated multi-tone turbulent volumetric plasma ShaderMaterial (never flat solid color). */
+  private acquireRiftPlasmaShader(
+    primaryHex: number,
+    secondaryHex: number,
+    coreHex: number,
+    seed: number
+  ): THREE.ShaderMaterial {
+    return this.acquireShader(
+      'rift_boss_plasma_3d',
+      () => ({
+        transparent: true,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        side: THREE.DoubleSide,
+        uniforms: {
+          uTime: { value: 0 },
+          uProgress: { value: 0 },
+          uAlpha: { value: 1 },
+          uPrimary: { value: new THREE.Color(0xffffff) },
+          uSecondary: { value: new THREE.Color(0xffffff) },
+          uCore: { value: new THREE.Color(0xffffff) },
+          uSeed: { value: 0 }
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          varying vec3 vNormalV;
+          varying vec3 vViewDir;
+          void main() {
+            vUv = uv;
+            vec4 mvPos = modelViewMatrix * vec4(position, 1.0);
+            vNormalV = normalize(normalMatrix * normal);
+            vViewDir = normalize(-mvPos.xyz);
+            gl_Position = projectionMatrix * mvPos;
+          }
+        `,
+        fragmentShader: `
+          uniform float uTime;
+          uniform float uProgress;
+          uniform float uAlpha;
+          uniform vec3 uPrimary;
+          uniform vec3 uSecondary;
+          uniform vec3 uCore;
+          uniform float uSeed;
+          varying vec2 vUv;
+          varying vec3 vNormalV;
+          varying vec3 vViewDir;
+          void main() {
+            float waveA = sin(vUv.x * 16.0 - uTime * 14.0 + uSeed) * cos(vUv.y * 12.0 + uTime * 9.0);
+            float waveB = sin((vUv.x + vUv.y) * 22.0 + uTime * 11.0 - uSeed * 1.7);
+            float turb = clamp(0.5 + 0.32 * waveA + 0.18 * waveB, 0.0, 1.0);
+            float edgeSoft = sin(clamp(vUv.y, 0.0, 1.0) * 3.14159);
+            float fresnel = pow(1.0 - abs(dot(normalize(vNormalV), normalize(vViewDir))), 1.4);
+            vec3 col = mix(uSecondary, uPrimary, turb);
+            col = mix(col, uCore, clamp(pow(turb, 2.2) * 0.85 + fresnel * 0.35, 0.0, 1.0));
+            float a = clamp((0.35 + 0.65 * turb) * (0.45 + 0.55 * edgeSoft) * uAlpha, 0.0, 1.0);
+            if (a < 0.015) discard;
+            gl_FragColor = vec4(col * 1.45, a);
+          }
+        `
+      }),
+      {
+        uTime: 0,
+        uProgress: 0,
+        uAlpha: 1.0,
+        uPrimary: new THREE.Color(primaryHex),
+        uSecondary: new THREE.Color(secondaryHex),
+        uCore: new THREE.Color(coreHex),
+        uSeed: seed
+      }
+    );
+  }
+
+  /** SKILL 1: 3D Volumetric Rift-Scythe Wave (crossed 3D curved plasma blades + flying crystal splinters). */
+  public spawnRiftScytheWave3D(
+    pos: Vector2,
+    elevation: number,
+    angle: number,
+    slashIndex: number = 1,
+    range: number = 260
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const group = new THREE.Group();
+    group.position.set(pos.x, baseElev + 46, pos.y);
+    group.rotation.y = Math.PI / 2 - angle;
+    this.group.add(group);
+
+    const innerRadius = range * 0.52;
+    const bladeWidth = 105;
+    const angleSpan = 2.35;
+    const tiltSign = slashIndex % 2 === 1 ? 1 : -1;
+
+    const shaderMats: THREE.ShaderMaterial[] = [];
+    const tilts = [0.34 * tiltSign, -0.24 * tiltSign, 0.0];
+    const heights = [0, 8, -6];
+
+    for (let l = 0; l < tilts.length; l++) {
+      const geo = this.createCrescentBladeGeometry(
+        innerRadius + l * 10,
+        bladeWidth - l * 22,
+        angleSpan - l * 0.14,
+        28
+      );
+      const mat = this.acquireRiftPlasmaShader(
+        l === 2 ? 0x38bdf8 : 0xe879f9,
+        0x7e22ce,
+        0xffffff,
+        slashIndex * 5.3 + l * 3.1
+      );
+      const mesh = new THREE.Mesh(geo, mat);
+      mesh.rotation.z = tilts[l];
+      mesh.position.y = heights[l];
+      mesh.renderOrder = 305 + l;
+      group.add(mesh);
+      shaderMats.push(mat);
+    }
+
+    // 3D volumetric outer ribbon arch giving vertical thickness in combat camera
+    const archGeo = this.createOrganicPlumeColumnGeo(12, 22, range * 1.45, 10, 6, 0.34, 1.5);
+    archGeo.rotateZ(Math.PI / 2);
+    archGeo.translate(0, 6, innerRadius + bladeWidth * 0.48);
+    const archMat = this.acquireRiftPlasmaShader(0xf43f5e, 0x9333ea, 0x38bdf8, slashIndex * 7.7);
+    const archMesh = new THREE.Mesh(archGeo, archMat);
+    archMesh.rotation.z = 0.22 * tiltSign;
+    group.add(archMesh);
+    shaderMats.push(archMat);
+
+    const shards: Array<{ mesh: THREE.Mesh; vel: THREE.Vector3; rot: THREE.Vector3 }> = [];
+    const shardMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0xc026d3,
+      emissiveIntensity: 1.45,
+      roughness: 0.22,
+      metalness: 0.55,
+      flatShading: true
+    });
+    for (let s = 0; s < 9; s++) {
+      const sGeo = this.createJaggedShardGeo(4.8, 24 + (s % 3) * 7, 5, 19 + s * 7);
+      const sm = new THREE.Mesh(sGeo, s === 0 ? shardMat : shardMat.clone());
+      const a = (s / 8 - 0.5) * angleSpan * 0.88;
+      const dist = innerRadius + bladeWidth * (0.35 + (s % 2) * 0.4);
+      sm.position.set(Math.sin(a) * dist, (s % 3 - 1) * 14, Math.cos(a) * dist);
+      sm.rotation.set(0.6, a, (s % 2 ? 1 : -1) * 0.45);
+      group.add(sm);
+      shards.push({
+        mesh: sm,
+        vel: new THREE.Vector3(Math.sin(a) * 140, 45 + (s % 3) * 35, Math.cos(a) * 140),
+        rot: new THREE.Vector3(4.5, 6.0, 3.2)
+      });
+    }
+
+    this.activeRiftSlashes.push({
+      group,
+      shaderMats,
+      shards,
+      elapsed: 0,
+      maxLifetime: 0.36,
+      startScale: 0.72,
+      targetScale: 1.24
+    });
+  }
+
+  /** SKILL 1 Landing & SKILL 4 Impact: 3D Crystalline Crater Eruption + Turbulent Plasma Plume. */
+  public spawnRiftCraterEruption(
+    pos: Vector2,
+    elevation: number = 0,
+    radius: number = 135
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const group = new THREE.Group();
+    group.position.set(pos.x, baseElev, pos.y);
+    this.group.add(group);
+
+    const spikeMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0xa855f7,
+      emissiveIntensity: 1.65,
+      roughness: 0.18,
+      metalness: 0.62,
+      flatShading: true,
+      transparent: true,
+      opacity: 1.0
+    });
+
+    const spikes: Array<{ mesh: THREE.Mesh; targetScaleY: number }> = [];
+    const count = Math.min(10, Math.max(6, Math.round(radius / 18)));
+    for (let k = 0; k < count; k++) {
+      const ang = (k / count) * Math.PI * 2 + (k % 2) * 0.22;
+      const dist = radius * (0.28 + (k % 3) * 0.22);
+      const h = 38 + (k % 4) * 18;
+      const r = 7.5 + (k % 3) * 2.5;
+      const geo = this.createJaggedShardGeo(r, h, 5, 41 + k * 13);
+      const mesh = new THREE.Mesh(geo, spikeMat);
+      const sx = pos.x + Math.cos(ang) * dist;
+      const sz = pos.y + Math.sin(ang) * dist;
+      const sh = this.getTerrainHeight(sx, sz, baseElev);
+      mesh.position.set(Math.cos(ang) * dist, sh - baseElev - 2.0, Math.sin(ang) * dist);
+      mesh.rotation.y = -ang;
+      mesh.rotation.x = 0.28 + (k % 3) * 0.14;
+      mesh.scale.set(1.0, 0.05, 1.0);
+      group.add(mesh);
+      spikes.push({ mesh, targetScaleY: 0.9 + (k % 3) * 0.25 });
+    }
+
+    const plumeGeo = this.createOrganicPlumeColumnGeo(radius * 0.14, radius * 0.32, radius * 0.72, 12, 6, 0.38, 1.6);
+    const plumeMat = this.acquireRiftPlasmaShader(0xf43f5e, 0x7e22ce, 0x7dd3fc, (pos.x + pos.y) * 0.01);
+    const plumeMesh = new THREE.Mesh(plumeGeo, plumeMat);
+    plumeMesh.position.y = 2.0;
+    plumeMesh.renderOrder = 304;
+    group.add(plumeMesh);
+
+    const rippleGeo = this.createTerrainConformingGrid(pos.x, pos.y, radius * 1.15, 14, 1.4, baseElev);
+    const rippleMat = this.createOrganicRippleShader(0x38bdf8, 0xe879f9, 12.0 + (pos.x % 17));
+    const rippleMesh = new THREE.Mesh(rippleGeo, rippleMat);
+    rippleMesh.position.set(-pos.x, -baseElev, -pos.y);
+    rippleMesh.renderOrder = 302;
+    group.add(rippleMesh);
+
+    this.activeRiftCraters.push({
+      group,
+      spikes,
+      spikeMat,
+      plumeMesh,
+      plumeMat,
+      rippleMesh,
+      rippleMat,
+      elapsed: 0,
+      maxLifetime: 0.72
+    });
+  }
+
+  /** SKILL 2: Volumetric Sweeping 3D Bio-Tentacle Whip Ribbons + Erupting Perimeter Crystal Fangs. */
+  public spawnRiftTailWhipSweep3D(
+    pos: Vector2,
+    elevation: number,
+    startAngle: number,
+    sweepDir: number,
+    arcRad: number,
+    radius: number = 235
+  ): void {
+    const baseElev = this.getTerrainHeight(pos.x, pos.y, elevation);
+    const group = new THREE.Group();
+    group.position.set(pos.x, baseElev, pos.y);
+    this.group.add(group);
+
+    const whipPivot = new THREE.Group();
+    whipPivot.position.y = 95;
+    group.add(whipPivot);
+
+    const whipMats: THREE.ShaderMaterial[] = [];
+    // 3 braided 3D volumetric plasma tentacles curving radially outward like the former boss's whip tentacles
+    const whipConfigs = [
+      { colA: 0xe879f9, colB: 0x7e22ce, core: 0xffffff, baseR: 16, tipR: 3.5, yOff: 0, twist: 1.5 },
+      { colA: 0x38bdf8, colB: 0x9333ea, core: 0xf0abfc, baseR: 11, tipR: 2.5, yOff: 18, twist: -2.0 },
+      { colA: 0xf43f5e, colB: 0x7e22ce, core: 0xfda4af, baseR: 9, tipR: 2.0, yOff: -16, twist: 2.4 }
+    ];
+    for (let i = 0; i < whipConfigs.length; i++) {
+      const wc = whipConfigs[i];
+      const pts: THREE.Vector3[] = [];
+      const segs = 18;
+      for (let s = 0; s <= segs; s++) {
+        const u = s / segs;
+        const r = 45 + u * (radius + 35);
+        const curveAng = -sweepDir * Math.sin(u * Math.PI * 0.85) * 0.42 + (i - 1) * 0.08 * u;
+        pts.push(
+          new THREE.Vector3(
+            Math.cos(curveAng) * r,
+            wc.yOff + Math.sin(u * Math.PI) * 32 + Math.sin(u * 9.0 + i) * 10,
+            Math.sin(curveAng) * r
+          )
+        );
+      }
+      const curve = new THREE.CatmullRomCurve3(pts);
+      const tubeGeo = new THREE.TubeGeometry(curve, 22, wc.baseR, 8, false);
+      const posAttr = tubeGeo.attributes.position as THREE.BufferAttribute;
+      for (let vi = 0; vi < posAttr.count; vi++) {
+        const segIdx = Math.floor(vi / 9);
+        const t = Math.min(1, segIdx / 22);
+        const taper = 1.0 - t * 0.78;
+        const centerPt = curve.getPointAt(t);
+        posAttr.setXYZ(
+          vi,
+          centerPt.x + (posAttr.getX(vi) - centerPt.x) * taper,
+          centerPt.y + (posAttr.getY(vi) - centerPt.y) * taper,
+          centerPt.z + (posAttr.getZ(vi) - centerPt.z) * taper
+        );
+      }
+      tubeGeo.computeVertexNormals();
+      const mat = this.acquireRiftPlasmaShader(wc.colA, wc.colB, wc.core, 3.1 + i * 2.4);
+      const mesh = new THREE.Mesh(tubeGeo, mat);
+      mesh.renderOrder = 308 + i;
+      whipPivot.add(mesh);
+      whipMats.push(mat);
+    }
+
+    const fangMat = new THREE.MeshStandardMaterial({
+      color: 0x38bdf8,
+      emissive: 0xe879f9,
+      emissiveIntensity: 1.75,
+      roughness: 0.2,
+      metalness: 0.58,
+      flatShading: true,
+      transparent: true,
+      opacity: 1.0
+    });
+    const fangs: Array<{ mesh: THREE.Mesh; targetScaleY: number }> = [];
+    const fangCount = 11;
+    for (let k = 0; k < fangCount; k++) {
+      const frac = fangCount > 1 ? k / (fangCount - 1) : 0.5;
+      const a = startAngle + sweepDir * arcRad * frac;
+      const dist = radius * 0.88;
+      const fx = pos.x + Math.cos(a) * dist;
+      const fz = pos.y + Math.sin(a) * dist;
+      const fh = this.getTerrainHeight(fx, fz, baseElev);
+      const geo = this.createJaggedShardGeo(8.5, 48 + (k % 3) * 14, 5, 71 + k * 9);
+      const mesh = new THREE.Mesh(geo, fangMat);
+      mesh.position.set(Math.cos(a) * dist, fh - baseElev - 2, Math.sin(a) * dist);
+      mesh.rotation.y = -a;
+      mesh.rotation.x = 0.25;
+      mesh.scale.set(1.0, 0.05, 1.0);
+      group.add(mesh);
+      fangs.push({ mesh, targetScaleY: 0.9 + (k % 3) * 0.2 });
+    }
+
+    const rippleGeo = this.createTerrainConformingGrid(pos.x, pos.y, radius * 1.15, 16, 1.6, baseElev);
+    const rippleMat = this.createOrganicRippleShader(0xc084fc, 0x38bdf8, 19.0);
+    const rippleMesh = new THREE.Mesh(rippleGeo, rippleMat);
+    rippleMesh.position.set(-pos.x, -baseElev, -pos.y);
+    rippleMesh.renderOrder = 301;
+    group.add(rippleMesh);
+
+    const threeStartYaw = -startAngle;
+    const sweepDeltaYaw = -sweepDir * arcRad;
+    whipPivot.rotation.y = threeStartYaw;
+
+    this.activeRiftWhips.push({
+      group,
+      whipPivot,
+      whipMats,
+      rippleMat,
+      fangs,
+      fangMat,
+      startYaw: threeStartYaw,
+      sweepDeltaYaw,
+      elapsed: 0,
+      maxLifetime: 0.56
+    });
   }
 }

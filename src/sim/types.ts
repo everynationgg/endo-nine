@@ -550,12 +550,31 @@ export interface EnemyState {
   recoveryDir?: Vector2;
   lastPos?: Vector2;
 
-  // Stage 1 Main Boss (Titan Colossus) Special Mechanics
+  // Stage 1 Main Boss (Rift Stalker replacing Titan in-place) Special Mechanics
   isStage1Titan?: boolean;
   isScriptedEventEnemy?: boolean;
   bossPursuitOutOfRangeTimer?: number;
-  titanState?: 'emerging' | 'idle' | 'walk' | 'leap' | 'laser_sweep' | 'tentacle_strike' | 'elemental_barrage' | 'dying';
+  titanState?:
+    | 'emerging'
+    | 'idle'
+    | 'walk'
+    | 'leap'
+    | 'laser_sweep'
+    | 'tentacle_strike'
+    | 'elemental_barrage'
+    | 'leap_dual_slash'
+    | 'tail_sweep_shards'
+    | 'tail_laser'
+    | 'dorsal_spine_barrage'
+    | 'dying';
   titanTimer?: number;
+  titanSubPhase?: 'windup' | 'airborne' | 'slash' | 'sweep' | 'charge' | 'active' | 'recover';
+  titanPhaseElapsed?: number;
+  titanSlashHitMask?: number;
+  titanShardsSpawned?: number;
+  titanSweepStartAngle?: number;
+  titanSweepDir?: number;
+  titanTailPitch?: number;
   // Boss Anti-Stuck Terrain Leap
   bossStuckTimer?: number;
   bossStuckAnchor?: Vector2;
@@ -571,6 +590,8 @@ export interface EnemyState {
   titanFacing?: 'front' | 'back' | 'left' | 'right';
   titanLaserAngle?: number;
   titanLaserSweepDir?: number;
+  titanLaserTarget?: { x: number; y: number; z: number };
+  titanLaserOrigin?: { x: number; y: number; z: number };
   titanTentacleTarget?: Vector2;
   titanTentaclePhase?: 'telegraph' | 'strike' | 'retract';
   titanTentacleProgress?: number;
@@ -611,8 +632,19 @@ export type ProjectileType =
   | 'spore_bomb'
   | 'frost_blade'
   | 'elemental_ball'
+  | 'rift_shard'
   | 'tentacle_shockwave'
   | 'stage1_titan_beam';
+
+export interface FallingBossCrystalState {
+  id: string;
+  targetPos: Vector2;
+  targetZ: number;
+  z: number;
+  fallSpeed: number;
+  impactRadius: number;
+  impactDamage: number;
+}
 
 export interface ProjectileState {
   id: string;
@@ -1025,6 +1057,12 @@ export interface SimEvent {
   | 'stage1_boss_tentacle_strike'
   | 'stage1_boss_elemental_charge'
   | 'stage1_boss_elemental_launch'
+  | 'stage1_boss_dual_slash'
+  | 'stage1_boss_tail_sweep'
+  | 'stage1_boss_laser_charge'
+  | 'stage1_boss_spine_charge'
+  | 'stage1_boss_spine_launch'
+  | 'boss_crystal_impact'
   | 'stage1_boss_rumble'
   | 'stage1_boss_death'
   | 'stage_earthquake'

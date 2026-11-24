@@ -3,6 +3,7 @@ import type { UIManager } from '../ui/UIManager';
 import { StageEditor } from './StageEditor';
 import { GameplayDebugger } from './GameplayDebugger';
 import { PerfMonitor } from './PerfMonitor';
+import { Commander3DTuningPanel } from './Commander3DTuningPanel';
 import type { StageConfig, StageProfileKey } from './StageConfig';
 import { cloneStageConfig, validateStageProfile } from './StageConfig';
 
@@ -12,6 +13,7 @@ export class DevToolkit {
   public stageEditor: StageEditor;
   public gameplayDebugger: GameplayDebugger;
   public perfMonitor: PerfMonitor;
+  public commander3DPanel: Commander3DTuningPanel | null = null;
 
   private dashboardEl: HTMLElement | null = null;
   private validationEl: HTMLElement | null = null;
@@ -44,6 +46,11 @@ export class DevToolkit {
     if (!e.shiftKey && e.key === 'F7') {
       e.preventDefault();
       this.perfMonitor.toggle();
+      return;
+    }
+    if (!e.shiftKey && e.key === 'F10' && import.meta.env.DEV) {
+      e.preventDefault();
+      this.commander3DPanel?.toggle();
     }
   };
 
@@ -54,6 +61,9 @@ export class DevToolkit {
     this.stageEditor = new StageEditor(app);
     this.gameplayDebugger = new GameplayDebugger(app);
     this.perfMonitor = new PerfMonitor(app);
+    if (import.meta.env.DEV) {
+      this.commander3DPanel = new Commander3DTuningPanel(app, uiManager);
+    }
 
     this.stageEditor.onReturnToDashboard = () => {
       void this.openDashboard();
@@ -70,6 +80,7 @@ export class DevToolkit {
     this.app.setPostRenderCallback((dt, now, info) => {
       this.gameplayDebugger.onFrameTick(now);
       this.perfMonitor.onFrame(dt, now, info);
+      this.commander3DPanel?.onFrameTick(now);
     });
 
     this.mountDashboardDOM();
@@ -143,6 +154,7 @@ export class DevToolkit {
         <div id="dev-dash-validation-box" class="dev-dash-val-box hidden"></div>
 
         <div class="dev-dash-footer">
+          ${import.meta.env.DEV ? '<button id="btn-dev-dash-3d-tuning" class="sci-btn" style="border-color: rgba(250, 204, 21, 0.5); color: #fef08a;">🎭 3D Commander Tuning [F10]</button>' : ''}
           <button id="btn-dev-dash-dialogue" class="sci-btn" style="border-color: rgba(167, 139, 250, 0.45); color: #ddd6fe;">🎙 Dialogue Tester [F9]</button>
           <button id="btn-dev-dash-back" class="sci-btn">← Return to Main Menu</button>
         </div>
@@ -236,6 +248,10 @@ export class DevToolkit {
       this.runStageValidationReport();
     });
 
+    el.querySelector('#btn-dev-dash-3d-tuning')?.addEventListener('click', () => {
+      this.commander3DPanel?.open();
+    });
+
     el.querySelector('#btn-dev-dash-dialogue')?.addEventListener('click', () => {
       this.uiManager.toggleDevDialogueTester(true);
     });
@@ -282,6 +298,7 @@ export class DevToolkit {
       <span id="dev-pt-snapshot-badge" class="dev-pt-snap">⏸ PAUSED — Mouse Free</span>
       <button id="btn-playtest-debugger" class="sci-btn dev-ed-btn">🧪 Debugger [F8]</button>
       <button id="btn-playtest-perf" class="sci-btn dev-ed-btn">📊 Perf [F7]</button>
+      ${import.meta.env.DEV ? '<button id="btn-playtest-3d-tuning" class="sci-btn dev-ed-btn">🎭 3D Anim [F10]</button>' : ''}
       <button id="btn-playtest-return" class="sci-btn dev-ed-btn">← Return to Editor (Shift+F8)</button>
       <button id="btn-playtest-dashboard" class="sci-btn dev-ed-btn">⚙ Dev Menu</button>
     `;
@@ -303,6 +320,10 @@ export class DevToolkit {
     bar.querySelector('#btn-playtest-perf')?.addEventListener('click', () => {
       this.app.exitPointerLock();
       this.perfMonitor.toggle();
+    });
+    bar.querySelector('#btn-playtest-3d-tuning')?.addEventListener('click', () => {
+      this.app.exitPointerLock();
+      this.commander3DPanel?.toggle();
     });
     bar.querySelector('#btn-playtest-return')?.addEventListener('click', () => {
       this.returnToEditorFromPlaytest();

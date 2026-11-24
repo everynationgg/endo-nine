@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { ColladaLoader } from 'three/examples/jsm/loaders/ColladaLoader.js';
 import { OBJLoader } from 'three/examples/jsm/loaders/OBJLoader.js';
@@ -595,6 +596,7 @@ async function parseAndPrepareTestMap(
   );
   applyFrozenWaterShader(root, waterFreezeProfile, waterTimeUniform, freezeUniforms);
   applyOverseerTowerShader(root, waterTimeUniform, { x: layout.artifactPos.x, z: layout.artifactPos.y }, freezeUniforms);
+  batchStaticMapMeshesByMaterial(root);
 
   return {
     root,
@@ -2698,6 +2700,109 @@ function detectSkydomeSide(geo: THREE.BufferGeometry): THREE.Side {
   }
 
   return outward > inward ? THREE.BackSide : THREE.FrontSide;
+}
+
+/**
+ * Merges hundreds/thousands of static opaque child meshes inside imported GLB maps
+ * into one world-space mesh per material + attribute layout so WebGL draw calls drop
+ * dramatically (~1,479 -> ~25-35) without changing visuals, shaders, or colliders.
+ */
+function batchStaticMapMeshesByMaterial(root: THREE.Group): void {
+  root.updateMatrixWorld(true);
+  const buckets = new Map<string, THREE.Mesh[]>();
+
+  root.traverse((obj) => {
+    const mesh = obj as THREE.Mesh;
+    if (!mesh.isMesh || !mesh.geometry) return;
+    mesh.castShadow = false;
+    mesh.receiveShadow = false;
+    if (!isObjectVisibleInTree(mesh)) return;
+    if ((mesh as any).isSkinnedMesh || (mesh as any).isInstancedMesh) return;
+    if (isWaterMesh(mesh) || isRedBossCrystalObject(mesh) || isRightCrystalObject(mesh) || isSkydomeObject(mesh)) {
+      return;
+    }
+    if (Array.isArray(mesh.material) || !mesh.material || mesh.material.transparent) return;
+
+    const attrKeys = Object.keys(mesh.geometry.attributes)
+      .filter((k) => k === 'position' || k === 'normal' || k === 'uv' || k === 'uv1' || k === 'color')
+      .sort()
+      .join('+');
+    if (!mesh.geometry.attributes.position) return;
+
+    const bucketKey = `${mesh.material.uuid}|${mesh.renderOrder}|${attrKeys}`;
+    let list = buckets.get(bucketKey);
+    if (!list) {
+      list = [];
+      buckets.set(bucketKey, list);
+    }
+    list.push(mesh);
+  });
+
+  if (buckets.size === 0) return;
+
+  const batchedGroup = new THREE.Group();
+  batchedGroup.name = 'StaticMapMergedBatches';
+  let mergedBatchCount = 0;
+  let mergedSourceCount = 0;
+
+  for (const [, list] of buckets.entries()) {
+    if (list.length < 2) continue;
+    const mat = list[0].material as THREE.Material;
+    const renderOrder = list[0].renderOrder;
+
+    const hasIndexed = list.some((m) => m.geometry.index !== null);
+    const hasNonIndexed = list.some((m) => m.geometry.index === null);
+    const convertNonIndexed = hasIndexed && hasNonIndexed;
+
+    const bakedGeos: THREE.BufferGeometry[] = [];
+    for (let i = 0; i < list.length; i++) {
+      const m = list[i];
+      let g = m.geometry.clone();
+      for (const attr of Object.keys(g.attributes)) {
+        if (attr !== 'position' && attr !== 'normal' && attr !== 'uv' && attr !== 'uv1' && attr !== 'color') {
+          g.deleteAttribute(attr);
+        }
+      }
+      if (convertNonIndexed && g.index) {
+        const nonIdx = g.toNonIndexed();
+        g.dispose();
+        g = nonIdx;
+      }
+      g.applyMatrix4(m.matrixWorld);
+      bakedGeos.push(g);
+    }
+
+    const merged = mergeGeometries(bakedGeos, false);
+    for (const g of bakedGeos) g.dispose();
+    if (!merged) continue;
+
+    merged.computeBoundingBox();
+    merged.computeBoundingSphere();
+
+    const batchMesh = new THREE.Mesh(merged, mat);
+    batchMesh.name = `MergedStaticBatch_${mergedBatchCount}`;
+    batchMesh.castShadow = false;
+    batchMesh.receiveShadow = false;
+    batchMesh.renderOrder = renderOrder;
+    batchMesh.frustumCulled = true;
+    batchedGroup.add(batchMesh);
+    mergedBatchCount++;
+
+    for (let i = 0; i < list.length; i++) {
+      const src = list[i];
+      src.parent?.remove(src);
+      src.geometry.dispose();
+      mergedSourceCount++;
+    }
+  }
+
+  if (mergedBatchCount > 0) {
+    root.add(batchedGroup);
+    root.updateMatrixWorld(true);
+    console.info(
+      `[TestMapLoader] Batched ${mergedSourceCount} static map meshes into ${mergedBatchCount} merged draw calls.`
+    );
+  }
 }
 
 function isSkydomeObject(obj: THREE.Object3D): boolean {

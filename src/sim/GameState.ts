@@ -21,7 +21,8 @@ import {
   DoctorDroneState,
   HolographicDecoyState,
   DivineAngelState,
-  FallingCrossState
+  FallingCrossState,
+  FallingBossCrystalState
 } from './types';
 import { HERO_COMMANDER, HERO_REGISTRY } from './HeroDefs';
 import { calculateStats, SeededRandom, ALL_BUFF_IDS } from './ItemDefs';
@@ -68,6 +69,10 @@ export class GameState {
   public holographicDecoys: HolographicDecoyState[] = [];
   public divineAngels: DivineAngelState[] = [];
   public fallingCrosses: FallingCrossState[] = [];
+  public fallingBossCrystals: FallingBossCrystalState[] = [];
+  public bossSpineRainTimer: number = 0;
+  public bossSpineRainWaveTimer: number = 0;
+  public bossSpineRainCenter: { x: number; y: number } = { x: 1800, y: 2600 };
   public pods: OrganicPodState[] = [];
   public worldEvents: WorldEventState[] = [];
   public completedEnhancementCategories: Set<WorldEventType> = new Set();
@@ -348,6 +353,9 @@ export class GameState {
     this.holographicDecoys = [];
     this.divineAngels = [];
     this.fallingCrosses = [];
+    this.fallingBossCrystals = [];
+    this.bossSpineRainTimer = 0;
+    this.bossSpineRainWaveTimer = 0;
     this.player.equippedSkills = heroId === 'doctor'
       ? {
         primary: { ...DOCTOR_DEFAULT_SKILLS.primary },

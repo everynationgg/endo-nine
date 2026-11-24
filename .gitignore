@@ -15,6 +15,7 @@ public/stages/.backups/
 # Scratch & debug captures
 scratch/
 exports/*.png
+exports/game_ready/*_Backup.glb
 
 # OS / editor artifacts
 .DS_Store

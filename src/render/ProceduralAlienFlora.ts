@@ -142,7 +142,147 @@ function appendOrganicTube(
   }
 }
 
-/** Appends a noise-sculpted asymmetric organic blob (for unique tree foliage lobes & boulders). */
+/**
+ * Appends an umbrella/parasol-shaped bioluminescent alien canopy with a broad scalloped dome,
+ * sweeping overarching brim, concave underside vault, and pronounced radial gill ribs.
+ */
+function appendUmbrellaCanopy(
+  b: MeshBufferBuilder,
+  center: THREE.Vector3,
+  radiusX: number,
+  radiusZ: number,
+  domeHeight: number,
+  tiltX: number,
+  tiltZ: number,
+  ribCount: number,
+  seed: number,
+  capTopCol: THREE.Color,
+  capMidCol: THREE.Color,
+  capGillCol: THREE.Color,
+  frostHighlight: THREE.Color
+): void {
+  const radSegs = Math.max(16, ribCount * 2);
+  const rings = 5; // concentric rings from hub to outer scalloped rim
+  const phase = (seed % 89) * 0.37;
+
+  // Tilt frame so secondary sub-canopies angle gracefully outward from their limb
+  const up = new THREE.Vector3(tiltX, 1, tiltZ).normalize();
+  const ref = Math.abs(up.x) > 0.85 ? new THREE.Vector3(0, 0, 1) : new THREE.Vector3(1, 0, 0);
+  const right = new THREE.Vector3().crossVectors(up, ref).normalize();
+  const fwd = new THREE.Vector3().crossVectors(right, up).normalize();
+
+  const buildShell = (isUnderside: boolean): void => {
+    const hubIdx = b.positions.length / 3;
+    const hubYLocal = isUnderside ? -domeHeight * 0.24 : domeHeight * 0.62;
+    const hubPos = center.clone().addScaledVector(up, hubYLocal);
+    const hubCol = isUnderside ? capGillCol.clone().lerp(new THREE.Color(0xffffff), 0.18) : capTopCol.clone();
+    b.positions.push(hubPos.x, hubPos.y, hubPos.z);
+    b.normals.push(isUnderside ? -up.x : up.x, isUnderside ? -up.y : up.y, isUnderside ? -up.z : up.z);
+    b.colors.push(hubCol.r, hubCol.g, hubCol.b);
+    b.extras.push(0, isUnderside ? -0.95 : 0.95, 0);
+
+    const ringStart = b.positions.length / 3;
+    const colScratch = new THREE.Color();
+
+    for (let r = 1; r <= rings; r++) {
+      const u = r / rings; // 0..1 radial from hub to outer rim
+      for (let s = 0; s <= radSegs; s++) {
+        const ang = (s / radSegs) * Math.PI * 2;
+        const scallopWave = Math.sin(ang * ribCount + phase);
+        const asym = 1 + 0.10 * Math.sin(ang * 2 + phase * 1.3) + 0.06 * Math.cos(ang * 3 - phase);
+        const rimScallop = 1 + 0.075 * Math.pow(u, 1.8) * scallopWave;
+        const radScale = u * asym * rimScallop;
+
+        const rx = Math.cos(ang) * radiusX * radScale;
+        const rz = Math.sin(ang) * radiusZ * radScale;
+
+        // Smooth overarching parasol dome curve + slight downturned brim lip
+        let yLocal: number;
+        const gillRidge = Math.pow(0.5 + 0.5 * Math.cos(ang * ribCount + phase), 1.8);
+        if (isUnderside) {
+          // Concave vaulted underside rising slightly before dipping to meet the rim lip,
+          // with sculpted radial gill struts underneath
+          const arch = Math.sin(u * Math.PI * 0.58) * domeHeight * 0.24 - Math.pow(u, 2.6) * domeHeight * 0.26;
+          const gillDrop = gillRidge * (1 - u * 0.35) * Math.sin(u * Math.PI) * domeHeight * 0.16;
+          yLocal = -domeHeight * 0.24 + arch - gillDrop;
+        } else {
+          // Broad arched parasol top with subtle radial rib undulations near rim
+          const crown = Math.cos(u * Math.PI * 0.5) * domeHeight * 0.62;
+          const brimDip = -Math.pow(u, 2.2) * domeHeight * 0.26;
+          const ribBump = gillRidge * Math.pow(u, 1.4) * domeHeight * 0.065;
+          yLocal = crown + brimDip + ribBump;
+        }
+
+        const worldPos = center
+          .clone()
+          .addScaledVector(right, rx)
+          .addScaledVector(fwd, rz)
+          .addScaledVector(up, yLocal);
+
+        b.positions.push(worldPos.x, worldPos.y, worldPos.z);
+
+        const nyApprox = isUnderside ? -0.78 : Math.max(0.25, 1 - u * 0.65);
+        const nVec = right
+          .clone()
+          .multiplyScalar(Math.cos(ang) * u * 0.55)
+          .addScaledVector(fwd, Math.sin(ang) * u * 0.55)
+          .addScaledVector(up, nyApprox)
+          .normalize();
+        b.normals.push(nVec.x, nVec.y, nVec.z);
+
+        if (isUnderside) {
+          colScratch
+            .copy(capGillCol)
+            .lerp(capMidCol, u * 0.65)
+            .lerp(capGillCol, gillRidge * 0.48 * (1 - u * 0.4));
+        } else {
+          colScratch.copy(capTopCol).lerp(capMidCol, Math.pow(u, 1.15));
+          if (u < 0.48) {
+            colScratch.lerp(frostHighlight, 0.10 * (1 - u * 2.0));
+          }
+        }
+        b.colors.push(colScratch.r, colScratch.g, colScratch.b);
+
+        // Encode canopy-relative direction so makeAlienCanopyMaterial activates underside gills & rim glow cleanly
+        const localDirY = isUnderside ? -(0.88 - u * 0.62) : (0.92 - u * 0.72);
+        b.extras.push(Math.cos(ang) * u, localDirY, Math.sin(ang) * u);
+      }
+    }
+
+    const stride = radSegs + 1;
+    // Inner fan around hub
+    for (let s = 0; s < radSegs; s++) {
+      const i1 = ringStart + s;
+      const i2 = ringStart + s + 1;
+      if (isUnderside) {
+        b.indices.push(hubIdx, i1, i2);
+      } else {
+        b.indices.push(hubIdx, i2, i1);
+      }
+    }
+    // Outer concentric quad rings
+    for (let r = 0; r < rings - 1; r++) {
+      for (let s = 0; s < radSegs; s++) {
+        const a = ringStart + r * stride + s;
+        const bIdx = a + stride;
+        const cIdx = bIdx + 1;
+        const dIdx = a + 1;
+        if (isUnderside) {
+          b.indices.push(a, bIdx, dIdx);
+          b.indices.push(dIdx, bIdx, cIdx);
+        } else {
+          b.indices.push(a, dIdx, bIdx);
+          b.indices.push(dIdx, cIdx, bIdx);
+        }
+      }
+    }
+  };
+
+  buildShell(false);
+  buildShell(true);
+}
+
+/** Appends a noise-sculpted asymmetric organic blob (for boulders and mineral mounds). */
 function appendWarpedBlob(
   b: MeshBufferBuilder,
   center: THREE.Vector3,
@@ -765,12 +905,14 @@ export function buildStage1ProceduralFlora(
     }
   };
 
-  // 1. Unique Procedural Alien Trees (each seed yields distinct curvature, limb topology & bioluminescent canopy)
+  // 1. Unique Umbrella-Shaped Bioluminescent Alien Trees matching Stage 1 visual direction
   const treePalettes = [
-    { barkA: 0x1d2838, barkB: 0x2c4257, leafBase: 0x1b6e82, leafTip: 0x5be4ff, light: 0x38bdf8 },
-    { barkA: 0x291a2d, barkB: 0x452242, leafBase: 0x731d47, leafTip: 0xfb7185, light: 0xf43f5e },
-    { barkA: 0x211d36, barkB: 0x362b5c, leafBase: 0x4c2482, leafTip: 0xc084fc, light: 0xa855f7 },
-    { barkA: 0x182b2a, barkB: 0x244644, leafBase: 0x146b5c, leafTip: 0x34d399, light: 0x2dd4bf }
+    // Signature Electric Cyan / Aqua Parasol
+    { barkA: 0x162436, barkB: 0x26445c, capTop: 0x0b5ea8, capMid: 0x00c8ff, capGill: 0x8ef9ff, light: 0x00d8ff },
+    // Bioluminescent Coral-Rose / Magenta Parasol
+    { barkA: 0x261a2e, barkB: 0x452847, capTop: 0x9e1b52, capMid: 0xf43f75, capGill: 0xffb3c8, light: 0xf43f75 },
+    // Electric Violet / Indigo Parasol
+    { barkA: 0x1e1836, barkB: 0x352a61, capTop: 0x431888, capMid: 0x8b5cf6, capGill: 0xdfb8ff, light: 0x9d4edd }
   ];
 
   let treeCount = 0;
@@ -790,18 +932,19 @@ export function buildStage1ProceduralFlora(
 
     const pal = treePalettes[Math.floor(rng.next() * treePalettes.length)];
     const treeSeed = seed + attempt * 31 + treeCount * 137;
-    const height = rng.range(185, 325);
-    const baseR = rng.range(9.5, 16.5);
-    const leanX = rng.range(-36, 36);
-    const leanZ = rng.range(-36, 36);
+    const height = rng.range(190, 325);
+    const baseR = rng.range(10.5, 17.5);
+    const leanX = rng.range(-42, 42);
+    const leanZ = rng.range(-42, 42);
     const twist = rng.range(-0.9, 0.9);
     const barkBaseCol = new THREE.Color(pal.barkA);
     const barkMidCol = new THREE.Color(pal.barkB);
     const barkVeinCol = new THREE.Color(pal.light);
     const barkVeinTuple: [number, number, number] = [barkVeinCol.r, barkVeinCol.g, barkVeinCol.b];
-    const frostHighlight = new THREE.Color(0x9bb8d6);
-    const leafBaseCol = new THREE.Color(pal.leafBase);
-    const leafTipCol = new THREE.Color(pal.leafTip);
+    const frostHighlight = new THREE.Color(0xa6c8eb);
+    const capTopCol = new THREE.Color(pal.capTop);
+    const capMidCol = new THREE.Color(pal.capMid);
+    const capGillCol = new THREE.Color(pal.capGill);
 
     // Sinuous multi-segment main trunk rooted -16u into soil
     const trunkPts: THREE.Vector3[] = [];
@@ -809,16 +952,16 @@ export function buildStage1ProceduralFlora(
     const segCount = 5;
     for (let s = 0; s < segCount; s++) {
       const t = s / (segCount - 1);
-      const waveX = Math.sin(t * Math.PI * 1.4 + treeSeed * 0.1) * 10 * t;
-      const waveZ = Math.cos(t * Math.PI * 1.2 + treeSeed * 0.2) * 10 * t;
+      const waveX = Math.sin(t * Math.PI * 1.4 + treeSeed * 0.1) * 12 * t;
+      const waveZ = Math.cos(t * Math.PI * 1.2 + treeSeed * 0.2) * 12 * t;
       trunkPts.push(
         new THREE.Vector3(
           wx + leanX * Math.pow(t, 1.15) + waveX,
-          sup.height - 16 + t * (height * 0.68),
+          sup.height - 16 + t * (height * 0.72),
           wy + leanZ * Math.pow(t, 1.15) + waveZ
         )
       );
-      trunkRadii.push(baseR * (1 - 0.68 * Math.pow(t, 0.85)));
+      trunkRadii.push(baseR * (1 - 0.62 * Math.pow(t, 0.85)));
     }
 
     appendOrganicTube(
@@ -828,7 +971,7 @@ export function buildStage1ProceduralFlora(
       7,
       (t, ang) => {
         const c = barkBaseCol.clone().lerp(barkMidCol, t);
-        if (Math.sin(ang + twist) > 0.45 && t > 0.25) c.lerp(frostHighlight, 0.18);
+        if (Math.sin(ang + twist) > 0.45 && t > 0.25) c.lerp(frostHighlight, 0.16);
         return c;
       },
       0.22,
@@ -837,11 +980,11 @@ export function buildStage1ProceduralFlora(
       () => barkVeinTuple
     );
 
-    // 3..5 Unique flaring buttress roots gripping crater rock/soil
+    // 3..5 Flaring buttress roots gripping crater rock/soil
     const rootCount = 3 + Math.floor(rng.next() * 3);
     for (let r = 0; r < rootCount; r++) {
       const rAng = (r / rootCount) * Math.PI * 2 + rng.range(-0.42, 0.42);
-      const rSpan = baseR * rng.range(1.9, 3.0);
+      const rSpan = baseR * rng.range(1.9, 3.1);
       const rx = wx + Math.cos(rAng) * rSpan;
       const rz = wy + Math.sin(rAng) * rSpan;
       const tipSup = col.querySupport(rx, rz, sup.height + 40, 60);
@@ -854,7 +997,7 @@ export function buildStage1ProceduralFlora(
           new THREE.Vector3(wx + Math.cos(rAng) * midR, sup.height + 6, wy + Math.sin(rAng) * midR),
           new THREE.Vector3(rx, tipY, rz)
         ],
-        [baseR * 0.45, baseR * 0.32, baseR * 0.14],
+        [baseR * 0.46, baseR * 0.32, baseR * 0.14],
         5,
         () => barkBaseCol,
         0.18,
@@ -864,104 +1007,115 @@ export function buildStage1ProceduralFlora(
       );
     }
 
-    // 3..6 Unique asymmetrical canopy limbs + organic bioluminescent foliage lobes
-    const limbCount = 3 + Math.floor(rng.next() * 4);
+    // Dominant primary umbrella parasol canopy atop the gnarled trunk with flaring cradle struts
     const trunkTop = trunkPts[trunkPts.length - 1];
-    for (let b = 0; b < limbCount; b++) {
-      const attachT = rng.range(0.55, 1.0);
-      const attachIdx = Math.min(trunkPts.length - 1, Math.floor(attachT * (trunkPts.length - 1)));
+    const primaryCapR = height * rng.range(0.36, 0.45);
+    const primaryDomeH = primaryCapR * rng.range(0.42, 0.52);
+    const primaryRibs = 9 + Math.floor(rng.next() * 4);
+    const crownCenter = new THREE.Vector3(trunkTop.x, trunkTop.y + primaryDomeH * 0.25, trunkTop.z);
+    const crownTiltX = leanX * 0.0028 + rng.range(-0.10, 0.10);
+    const crownTiltZ = leanZ * 0.0028 + rng.range(-0.10, 0.10);
+
+    // 3..4 short flaring branch struts anchoring into the underside gill hub
+    const cradleCount = 3 + Math.floor(rng.next() * 2);
+    for (let c = 0; c < cradleCount; c++) {
+      const cAng = (c / cradleCount) * Math.PI * 2 + twist;
+      const strutOrigin = trunkPts[Math.max(1, trunkPts.length - 2)];
+      const strutMid = new THREE.Vector3(
+        THREE.MathUtils.lerp(strutOrigin.x, crownCenter.x, 0.5) + Math.cos(cAng) * primaryCapR * 0.16,
+        THREE.MathUtils.lerp(strutOrigin.y, crownCenter.y, 0.5),
+        THREE.MathUtils.lerp(strutOrigin.z, crownCenter.z, 0.5) + Math.sin(cAng) * primaryCapR * 0.16
+      );
+      const strutTip = new THREE.Vector3(
+        crownCenter.x + Math.cos(cAng) * primaryCapR * 0.28,
+        crownCenter.y - primaryDomeH * 0.04,
+        crownCenter.z + Math.sin(cAng) * primaryCapR * 0.28
+      );
+      appendOrganicTube(
+        trunkBuilder,
+        [strutOrigin, strutMid, strutTip],
+        [baseR * 0.28, baseR * 0.20, baseR * 0.12],
+        5,
+        (t) => barkMidCol.clone().lerp(capGillCol, t * 0.55),
+        0.16,
+        treeSeed + 80 + c * 17,
+        true,
+        () => barkVeinTuple
+      );
+    }
+
+    appendUmbrellaCanopy(
+      blossomBuilder,
+      crownCenter,
+      primaryCapR * rng.range(0.95, 1.08),
+      primaryCapR * rng.range(0.95, 1.08),
+      primaryDomeH,
+      crownTiltX,
+      crownTiltZ,
+      primaryRibs,
+      treeSeed + 503,
+      capTopCol,
+      capMidCol,
+      capGillCol,
+      frostHighlight
+    );
+
+    // 1..2 Secondary tiered side-umbrella canopies branching from lower limbs
+    const subCanopyCount = rng.next() < 0.72 ? 2 : 1;
+    const baseSubAng = rng.range(0, Math.PI * 2);
+    for (let b = 0; b < subCanopyCount; b++) {
+      const attachIdx = b === 0 ? Math.max(1, segCount - 3) : Math.max(1, segCount - 2);
       const origin = trunkPts[attachIdx];
-      const bAng = (b / limbCount) * Math.PI * 2 + rng.range(-0.55, 0.55) + twist;
-      const reach = rng.range(36, 78);
-      const rise = rng.range(28, 72);
-      const bendY = rng.range(-10, 18);
+      const bAng = baseSubAng + b * rng.range(2.2, 3.6);
+      const reach = primaryCapR * rng.range(0.75, 1.05);
+      const rise = height * rng.range(0.14, 0.24) - b * 14;
       const limbMid = new THREE.Vector3(
         origin.x + Math.cos(bAng) * reach * 0.52,
-        origin.y + rise * 0.55 + bendY,
+        origin.y + rise * 0.48,
         origin.z + Math.sin(bAng) * reach * 0.52
       );
       const limbTip = new THREE.Vector3(
-        origin.x + Math.cos(bAng + rng.range(-0.3, 0.3)) * reach,
+        origin.x + Math.cos(bAng + rng.range(-0.18, 0.18)) * reach,
         origin.y + rise,
-        origin.z + Math.sin(bAng + rng.range(-0.3, 0.3)) * reach
+        origin.z + Math.sin(bAng + rng.range(-0.18, 0.18)) * reach
       );
-      const rStart = baseR * rng.range(0.28, 0.40);
+      const rStart = baseR * rng.range(0.28, 0.36);
       appendOrganicTube(
         trunkBuilder,
         [origin, limbMid, limbTip],
-        [rStart, rStart * 0.62, rStart * 0.25],
+        [rStart, rStart * 0.65, rStart * 0.34],
         5,
-        (t) => barkMidCol.clone().lerp(leafBaseCol, t * 0.45),
-        0.20,
-        treeSeed + 100 + b * 23,
+        (t) => barkMidCol.clone().lerp(capGillCol, t * 0.5),
+        0.18,
+        treeSeed + 140 + b * 29,
         true,
         () => barkVeinTuple
       );
 
-      // Unique noise-warped bioluminescent canopy cluster at each limb tip (and sub-lobe)
-      const clusterRadius = rng.range(26, 48);
-      appendWarpedBlob(
+      const subR = primaryCapR * rng.range(0.52, 0.70);
+      const subH = subR * rng.range(0.42, 0.54);
+      appendUmbrellaCanopy(
         blossomBuilder,
-        limbTip,
-        clusterRadius * rng.range(0.95, 1.35),
-        clusterRadius * rng.range(0.52, 0.85),
-        clusterRadius * rng.range(0.95, 1.35),
-        1,
-        treeSeed + b * 41,
-        0.34,
-        (dir, _y, nVal) => {
-          const c = leafBaseCol.clone().lerp(leafTipCol, Math.max(0, Math.min(1, 0.35 + dir.y * 0.45 + (nVal - 1) * 0.9)));
-          if (dir.y > 0.52) c.lerp(frostHighlight, 0.24);
-          return c;
-        },
-        false,
-        true
+        new THREE.Vector3(limbTip.x, limbTip.y + subH * 0.2, limbTip.z),
+        subR * rng.range(0.95, 1.08),
+        subR * rng.range(0.95, 1.08),
+        subH,
+        Math.cos(bAng) * 0.22,
+        Math.sin(bAng) * 0.22,
+        8 + (b % 3),
+        treeSeed + b * 71 + 7,
+        capTopCol,
+        capMidCol,
+        capGillCol,
+        frostHighlight
       );
-
-      if (rng.next() < 0.6) {
-        const subOffset = new THREE.Vector3(
-          Math.cos(bAng + 0.7) * rng.range(14, 28),
-          rng.range(-8, 16),
-          Math.sin(bAng + 0.7) * rng.range(14, 28)
-        );
-        const subR = clusterRadius * rng.range(0.55, 0.78);
-        appendWarpedBlob(
-          blossomBuilder,
-          limbTip.clone().add(subOffset),
-          subR * 1.15,
-          subR * 0.65,
-          subR * 1.15,
-          1,
-          treeSeed + b * 71 + 7,
-          0.36,
-          (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.45 + dir.y * 0.4)),
-          false,
-          true
-        );
-      }
     }
 
-    // Crown cluster atop trunk
-    const crownR = rng.range(30, 52);
-    appendWarpedBlob(
-      blossomBuilder,
-      new THREE.Vector3(trunkTop.x, trunkTop.y + crownR * 0.55, trunkTop.z),
-      crownR * 1.2,
-      crownR * 0.75,
-      crownR * 1.2,
-      1,
-      treeSeed + 503,
-      0.32,
-      (dir) => leafBaseCol.clone().lerp(leafTipCol, Math.max(0, 0.5 + dir.y * 0.45)),
-      false,
-      true
-    );
-
-    addGroundAO(wx, wy, sup.height, baseR * 4.4, 0.52);
+    addGroundAO(wx, wy, sup.height, baseR * 4.6, 0.52);
 
     if (treeCount % 4 === 0 && lightAnchors.length < 28) {
       lightAnchors.push({
-        pos: new THREE.Vector3(trunkTop.x, trunkTop.y + 12, trunkTop.z),
+        pos: new THREE.Vector3(crownCenter.x, crownCenter.y - 8, crownCenter.z),
         color: pal.light
       });
     }

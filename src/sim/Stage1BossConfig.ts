@@ -8,7 +8,15 @@ export interface BossSocketUV {
   v: number; // 0 (top) to 1 (bottom)
 }
 
-export type BossAnimName = 'walk' | 'laser' | 'tentacle' | 'elemental';
+export type BossAnimName =
+  | 'walk'
+  | 'laser'
+  | 'tentacle'
+  | 'elemental'
+  | 'leap_dual_slash'
+  | 'tail_sweep_shards'
+  | 'tail_laser'
+  | 'dorsal_spine_barrage';
 export type BossFacing = 'front' | 'back' | 'left' | 'right';
 
 export interface BossSpriteEntry {
@@ -20,19 +28,72 @@ export interface BossSpriteEntry {
 }
 
 export const STAGE1_BOSS_CONFIG = {
-  name: 'COLOSSAL BIO-CULTIVATOR',
-  title: 'STAGE 1 TITAN',
-  // 2x entity scaling (876W x 876H) matching 2x character & enemy scale without rescaling the map
+  name: 'STAGE 1 BOSS',
+  title: 'STAGE 1 BOSS',
+  // 2x entity scaling matching Stage 1 crater & hero scale
   baseHeight: 876,
   baseWidth: 876,
   footOffset: 62,
   radius: 142,
-  speed: 105, // Scaled for 2x entity stature & hero stride speed
+  speed: 112,
   touchDamage: 40,
   maxHealth: 8000, // Stage 1 Boss HP
-  attackCooldown: 1.63, // +35% attack speed (was 2.2s)
-  initialCooldown: 1.67, // +35% attack speed (was 2.25s)
-  postAttackPause: 0.33, // +35% faster recovery between attacks (was 0.45s)
+  attackCooldown: 1.63,
+  initialCooldown: 1.67,
+  postAttackPause: 0.33,
+
+  // SKILL 1 — Rift Stalker: Leap & Dual Slash
+  leapDualSlash: {
+    windupDuration: 0.42,
+    leapMinDuration: 0.44,
+    leapMaxDuration: 0.56,
+    slashPhaseDuration: 0.68,
+    slash1Time: 0.14,
+    slash2Time: 0.40,
+    slashRange: 260,
+    slashArcRad: Math.PI * 0.75,
+    slashDamage: 36
+  },
+
+  // SKILL 2 — Rift Stalker: Tail Sweep & 30-Shard Barrage
+  tailSweepShards: {
+    windupDuration: 0.50,
+    sweepDuration: 0.60,
+    recoveryDuration: 0.38,
+    projectileCount: 30,
+    sweepArcRad: Math.PI * 0.85,
+    shardSpeed: 540,
+    shardDamage: 24,
+    shardRadius: 18,
+    maxDistance: 1250,
+    meleeSweepRadius: 235,
+    meleeSweepDamage: 34
+  },
+
+  // SKILL 3 — Rift Stalker: Tracking Tail Laser
+  tailLaser: {
+    chargeDuration: 0.72,
+    activeDuration: 2.96,
+    recoveryDuration: 0.32,
+    thickness: 80,
+    range: 950,
+    trackingTurnRateRadPerSec: 2.15,
+    dps: 22
+  },
+
+  // SKILL 4 — Rift Stalker: Dorsal Spine Barrage (3.0s Crystal Rain)
+  dorsalSpineBarrage: {
+    chargeDuration: 0.75,
+    launchRecoveryDuration: 0.55,
+    rainDuration: 3.0,
+    waveInterval: 0.25,
+    crystalsPerWave: 3,
+    arenaRadius: 560,
+    fallStartHeight: 520,
+    fallSpeed: 1080,
+    impactRadius: 115,
+    impactDamage: 34
+  },
 
   // Attack 1: Massive 80-unit Mouth Lightning Laser
   laser: {

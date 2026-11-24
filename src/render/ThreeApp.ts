@@ -10,14 +10,16 @@ import { UIManager, GraphicsQuality } from '../ui/UIManager';
 import { ThreeTerrain } from './ThreeTerrain';
 import { loadTestMapFromFile, loadTestMapFromUrl, TestMapScaleMode, LoadedTestMap, RedCrystalMaterialEntry } from './TestMapLoader';
 import { ThreeVFX } from './ThreeVFX';
-import { Commander3DModel } from './Commander3DModel';
+import { ExperimentalCommander3D } from './ExperimentalCommander3D';
+import { ExperimentalDoctor3D } from './ExperimentalDoctor3D';
 import { CommanderSpriteAnimator } from './CommanderSpriteAnimator';
-import { Stage1Boss3DModel } from './Stage1Boss3DModel';
+import { RiftStalker3DModel } from './RiftStalker3DModel';
 import { SimEvent, Vector2, HeroId, EnemyType } from '../sim/types';
 import { STAGE1_BOSS_CONFIG } from '../sim/Stage1BossConfig';
 import { ENEMY_VISUAL_CATALOG, EnemyVisualDef } from '../sim/EnemyVisualDefs';
 import { DOCTOR_CONFIG } from '../sim/DoctorConfig';
 import { buildStage1ProceduralFlora } from './ProceduralAlienFlora';
+import { createCelestialShortcutBridge, CelestialShortcutBridgeController } from './CelestialShortcutBridge';
 import { SeededRandom } from '../sim/ItemDefs';
 import type { NarrativeObserver } from '../narrative/NarrativeObserver';
 import type { DialogueDirector } from '../narrative/DialogueDirector';
@@ -345,9 +347,9 @@ interface EnemyRenderEntry {
   lastTiltY?: number;
   cachedSlopeX?: number;
   cachedSlopeZ?: number;
-  // Stage 1 Titan Boss components
+  // Stage 1 Boss (Rift Stalker 3D) components
   isTitan?: boolean;
-  titan3D?: Stage1Boss3DModel;
+  titan3D?: RiftStalker3DModel;
   titanMesh?: THREE.Mesh;
   titanMaterial?: THREE.ShaderMaterial;
   titanAnimTime?: number;
@@ -360,28 +362,11 @@ interface EnemyRenderEntry {
   titanLaserHelixTubes?: THREE.Mesh[];
   titanLaserHelixSpinePts?: THREE.Vector3[][];
   titanLaserImpactDome?: THREE.Mesh;
-  titanLaserImpactDisc?: THREE.Mesh;
   titanLaserImpactRing?: THREE.Mesh;
-  titanLaserJitterTimer?: number;
+  titanLaserImpactSparkTimer?: number;
   titanElementalOrbs?: THREE.Group[];
   titanElementalMat?: THREE.ShaderMaterial;
   titanElementalHaloMat?: THREE.ShaderMaterial;
-  titanTentacleGroup?: THREE.Group;
-  titanTentacleMarkerGroup?: THREE.Group;
-  titanTentacleMarkerRing?: THREE.Mesh;
-  titanTentacleMarkerFill?: THREE.Mesh;
-  titanTentacleMarkerCore?: THREE.Mesh;
-  titanTentacleMarkerChevrons?: THREE.Group;
-  titanTentacleRingOrigXZ?: Float32Array;
-  titanTentacleFillOrigXZ?: Float32Array;
-  titanTentacleCoreOrigXZ?: Float32Array;
-  titanTentacleChevronAngle?: number;
-  titanTentacleMeshes?: THREE.Mesh[];
-  titanTentacleSpines?: THREE.Line[];
-  titanTentacleSpinePts?: THREE.Vector3[][];
-  titanTentacleSpineLinePts?: THREE.Vector3[][];
-  titanTentacleStingers?: THREE.Mesh[];
-  titanTentacleImpactRings?: THREE.Mesh[];
 }
 
 interface ObstacleRenderEntry {
@@ -498,8 +483,11 @@ export class ThreeApp {
   private playerGroup: THREE.Group;
   private playerSprite: THREE.Sprite;
   public spriteAnimator!: CommanderSpriteAnimator;
-  public commander3D!: Commander3DModel;
+  private loadedHeroSpriteSheets = new Set<HeroId>();
+  public experimentalCommander3D!: ExperimentalCommander3D;
+  public experimentalDoctor3D!: ExperimentalDoctor3D;
   public use3DCommander: boolean = false;
+  public onExperimental3DStateChanged: (() => void) | null = null;
   private playerShadow: THREE.Mesh;
   private playerResolveAura: THREE.Mesh;
   private jetPlumeL: THREE.Sprite;
@@ -553,6 +541,17 @@ export class ThreeApp {
     motesGroup: THREE.Group;
   }> = new Map();
   private fallingCrossMap: Map<string, { group: THREE.Group; warningMesh: THREE.Mesh; warningMat: THREE.ShaderMaterial; crossGroup: THREE.Group }> = new Map();
+  private fallingBossCrystalMap: Map<
+    string,
+    { group: THREE.Group; warningMesh: THREE.Mesh; warningMat: THREE.ShaderMaterial; crystalGroup: THREE.Group }
+  > = new Map();
+  private readonly scratchBossCrystalIds = new Set<string>();
+  private sharedBossCrystalGeo?: THREE.BufferGeometry;
+  private sharedBossSideCrystalGeo?: THREE.BufferGeometry;
+  private sharedBossCrystalWakeGeo?: THREE.BufferGeometry;
+  private sharedBossWarnGeo?: THREE.BufferGeometry;
+  private sharedBossCrystalMat?: THREE.MeshStandardMaterial;
+  private sharedBossCrystalWakeMat?: THREE.ShaderMaterial;
   private sharedDroneRes?: {
     hullGeo: THREE.BufferGeometry;
     capGeo: THREE.BufferGeometry;
@@ -654,6 +653,7 @@ export class ThreeApp {
   private sharedElementalWakeMat: THREE.ShaderMaterial | null = null;
   private readonly titanMouthScratch = new THREE.Vector3();
   private readonly titanEndScratch = new THREE.Vector3();
+  private readonly titanTargetScratch = new THREE.Vector3();
   private readonly titanBeamVecScratch = new THREE.Vector3();
   private readonly titanBeamDirScratch = new THREE.Vector3();
   private readonly titanV1Scratch = new THREE.Vector3();
@@ -716,6 +716,8 @@ export class ThreeApp {
   private shipSparkBasePos: THREE.Vector3 | null = null;
   private shipSparkPhases: Float32Array | null = null;
   private summitBeaconMesh: THREE.Mesh | null = null;
+  private celestialBridge: CelestialShortcutBridgeController | null = null;
+  private readonly celestialPlayerPosScratch = new THREE.Vector3();
   private floraLightUpdateAccum: number = 0;
   private cameraTrauma: number = 0;
   private earthquakeTimer: number = 0;
@@ -851,97 +853,40 @@ export class ThreeApp {
     this.playerSprite.visible = !this.use3DCommander;
     this.playerGroup.add(this.playerSprite);
 
-    // Modular 2.5D Sprite Animation Controller
-    this.spriteAnimator = new CommanderSpriteAnimator(
-      this.playerSprite,
-      {
-        front: this.textures['commander_front'],
-        back: this.textures['commander_back'],
-        left: this.textures['commander_left'],
-        right: this.textures['commander_right']
-      },
-      {
-        front: this.textures['commander_run_front'],
-        back: this.textures['commander_run_back'],
-        left: this.textures['commander_run_left'],
-        right: this.textures['commander_run_right']
-      },
-      {
-        front: this.textures['commander_jump_front'],
-        back: this.textures['commander_jump_back'],
-        left: this.textures['commander_jump_left'],
-        right: this.textures['commander_jump_right']
-      },
-      {
-        front: this.textures['commander_glide_front'],
-        back: this.textures['commander_glide_back'],
-        left: this.textures['commander_glide_left'],
-        right: this.textures['commander_glide_right']
-      },
-      {
-        front: this.textures['commander_attack_front'],
-        back: this.textures['commander_attack_back'],
-        left: this.textures['commander_attack_left'],
-        right: this.textures['commander_attack_right']
-      },
-      {
-        front: this.textures['commander_ult_front'],
-        back: this.textures['commander_ult_back'],
-        left: this.textures['commander_ult_left'],
-        right: this.textures['commander_ult_right']
-      }
-    );
-
-    this.spriteAnimator.setDoctorSheets({
-      run: {
-        front: this.textures['doctor_run_front'],
-        back: this.textures['doctor_run_back'],
-        left: this.textures['doctor_run_left'],
-        right: this.textures['doctor_run_right']
-      },
-      jump: {
-        front: this.textures['doctor_jump_front'],
-        back: this.textures['doctor_jump_back'],
-        left: this.textures['doctor_jump_left'],
-        right: this.textures['doctor_jump_right']
-      },
-      glide: {
-        front: this.textures['doctor_glide_front'],
-        back: this.textures['doctor_glide_back'],
-        left: this.textures['doctor_glide_left'],
-        right: this.textures['doctor_glide_right']
-      },
-      attack: {
-        front: this.textures['doctor_attack_front'],
-        back: this.textures['doctor_attack_back'],
-        left: this.textures['doctor_attack_left'],
-        right: this.textures['doctor_attack_right']
-      },
-      rmb: {
-        front: this.textures['doctor_rmb_front'],
-        back: this.textures['doctor_rmb_back'],
-        left: this.textures['doctor_rmb_left'],
-        right: this.textures['doctor_rmb_right']
-      },
-      dash: {
-        front: this.textures['doctor_dash_front'],
-        back: this.textures['doctor_dash_back'],
-        left: this.textures['doctor_dash_left'],
-        right: this.textures['doctor_dash_right']
-      },
-      ult: {
-        front: this.textures['doctor_ult_front'],
-        back: this.textures['doctor_ult_back'],
-        left: this.textures['doctor_ult_left'],
-        right: this.textures['doctor_ult_right']
-      }
+    // Modular 2.5D Sprite Animation Controller (directional sheets lazy-loaded per active hero)
+    this.spriteAnimator = new CommanderSpriteAnimator(this.playerSprite, {
+      front: this.textures['commander_front'],
+      back: this.textures['commander_back'],
+      left: this.textures['commander_left'],
+      right: this.textures['commander_right']
     });
+    this.ensureHeroSpriteSheetsLoaded(this.simulation.state.selectedHeroId);
 
-    // Fully Animated 3D Commander Character Model (2x entity scale)
-    this.commander3D = new Commander3DModel();
-    this.commander3D.group.scale.setScalar(2.0);
-    this.commander3D.group.visible = this.use3DCommander;
-    this.playerGroup.add(this.commander3D.group);
+    // Experimental Localhost-Only Rigged Tripo 3D Commander (lazy-loaded on dev toggle)
+    this.experimentalCommander3D = new ExperimentalCommander3D(this.vfx, (reason) => {
+      this.use3DCommander = false;
+      this.playerSprite.visible = true;
+      if (this.uiManager?.settings) {
+        this.uiManager.settings.use3DCommander = false;
+        this.uiManager.syncSettingsUI();
+      }
+      this.uiManager?.showPickupNotification(`3D Commander fallback to 2D: ${reason}`);
+      this.onExperimental3DStateChanged?.();
+    });
+    this.playerGroup.add(this.experimentalCommander3D.group);
+
+    this.experimentalDoctor3D = new ExperimentalDoctor3D(this.vfx, (reason) => {
+      this.use3DCommander = false;
+      this.playerSprite.visible = true;
+      if (this.uiManager?.settings) {
+        this.uiManager.settings.use3DCommander = false;
+        this.uiManager.syncSettingsUI();
+      }
+      this.uiManager?.showPickupNotification(`3D Doctor fallback to 2D: ${reason}`);
+      this.onExperimental3DStateChanged?.();
+    });
+    this.playerGroup.add(this.experimentalDoctor3D.group);
+    RiftStalker3DModel.preload();
 
     // Resolve / Sanctuary swirling bio-flame mist aura (zero RingGeometry)
     const auraGeo = new THREE.PlaneGeometry(118, 118);
@@ -1092,9 +1037,7 @@ export class ThreeApp {
       this.invertCameraPan = settings.invertCameraPan;
       this.invertCameraPitch = settings.invertCameraPitch;
       this.mouseSensitivity = settings.mouseSensitivity;
-      this.use3DCommander = settings.use3DCommander;
-      if (this.playerSprite) this.playerSprite.visible = !this.use3DCommander;
-      if (this.commander3D) this.commander3D.group.visible = this.use3DCommander;
+      this.setUse3DCommander(settings.use3DCommander);
       this.setGraphicsQuality(settings.graphicsQuality || 'medium');
       this.soundManager.setMasterVolume(settings.masterVolume);
       this.soundManager.setMuted(settings.isMuted);
@@ -1104,9 +1047,7 @@ export class ThreeApp {
     this.invertCameraPan = this.uiManager.settings.invertCameraPan;
     this.invertCameraPitch = this.uiManager.settings.invertCameraPitch;
     this.mouseSensitivity = this.uiManager.settings.mouseSensitivity;
-    this.use3DCommander = this.uiManager.settings.use3DCommander;
-    if (this.playerSprite) this.playerSprite.visible = !this.use3DCommander;
-    if (this.commander3D) this.commander3D.group.visible = this.use3DCommander;
+    this.setUse3DCommander(this.uiManager.settings.use3DCommander);
     this.setGraphicsQuality(this.uiManager.settings.graphicsQuality || 'medium');
 
     // Start render loop immediately
@@ -1116,38 +1057,18 @@ export class ThreeApp {
 
   private loadTextures(): void {
     const list = [
-      // Commander directional sprites & running/jumping/gliding/attack/ultimate sheets
+      // Base hero directional portraits (heavy action sprite sheets load lazily per selected hero)
       'commander_front', 'commander_back', 'commander_left', 'commander_right',
-      'commander_run_front', 'commander_run_back', 'commander_run_left', 'commander_run_right',
-      'commander_jump_front', 'commander_jump_back', 'commander_jump_left', 'commander_jump_right',
-      'commander_glide_front', 'commander_glide_back', 'commander_glide_left', 'commander_glide_right',
-      'commander_attack_front', 'commander_attack_back', 'commander_attack_left', 'commander_attack_right',
-      'commander_ult_front', 'commander_ult_back', 'commander_ult_left', 'commander_ult_right',
-      // Doctor directional sprites & normalized multi-frame sheets
       'doctor_front', 'doctor_back', 'doctor_left', 'doctor_right',
-      'doctor_run_front', 'doctor_run_back', 'doctor_run_left', 'doctor_run_right',
-      'doctor_jump_front', 'doctor_jump_back', 'doctor_jump_left', 'doctor_jump_right',
-      'doctor_glide_front', 'doctor_glide_back', 'doctor_glide_left', 'doctor_glide_right',
-      'doctor_attack_front', 'doctor_attack_back', 'doctor_attack_left', 'doctor_attack_right',
-      'doctor_rmb_front', 'doctor_rmb_back', 'doctor_rmb_left', 'doctor_rmb_right',
-      'doctor_dash_front', 'doctor_dash_back', 'doctor_dash_left', 'doctor_dash_right',
-      'doctor_ult_front', 'doctor_ult_back', 'doctor_ult_left', 'doctor_ult_right',
       // Stage 1 Enemies
       'void_crawler', 'toxic_spitter', 'void_wasp', 'void_goliath', 'brood_overseer',
       'enemy_crawler', 'enemy_spitter', 'enemy_elite', 'enemy_boss',
-      // Stage 1 Main Boss (Titan Colossus) Sprite Sheets
-      'boss_walk_front', 'boss_walk_back', 'boss_walk_left', 'boss_walk_right',
-      'boss_laser_front', 'boss_laser_back', 'boss_laser_left', 'boss_laser_right',
-      'boss_tentacle_front', 'boss_tentacle_back', 'boss_tentacle_left', 'boss_tentacle_right',
-      'boss_elemental_front', 'boss_elemental_back', 'boss_elemental_left', 'boss_elemental_right',
       // Stage 1 Environment
       'overseer_monolith', 'organic_pod_closed', 'organic_pod_opened', 'alien_mushrooms',
-      'organic_pod', 'overseer_artifact', 'alien_mushroom', 'crystal_cluster', 'alien_rock', 'alien_flora',
+      'organic_pod', 'overseer_artifact', 'alien_mushroom', 'alien_rock',
       'tree_crimson_canopy', 'tree_crimson_veins', 'tree_coral',
       'crystal_violet', 'crystal_cyan', 'crystal_amber', 'crystal_crimson',
-      'rock_var_1', 'rock_var_2', 'rock_var_3', 'rock_var_4', 'rock_var_5', 'rock_var_6', 'rock_var_7', 'rock_var_8',
-      'shoreline_1', 'shoreline_2', 'shoreline_3', 'shoreline_4', 'shoreline_5', 'shoreline_6',
-      // Decals & VFX & Graphics Overhaul Textures
+      // Decals & VFX Textures
       'shadow', 'jet_plume', 'currency_shard', 'loot_orb',
       'caustic_fluid', 'rune_circle', 'energy_flare', 'rock_texture', 'totem_carving', 'void_hive_texture'
     ];
@@ -1174,55 +1095,65 @@ export class ThreeApp {
         basePath = `/assets/environment/extracted/rock_crystal_sheet3_1.png`;
       } else if (name === 'crystal_crimson') {
         basePath = `/assets/environment/extracted/rock_crystal_sheet3_2.png`;
-      } else if (name.startsWith('rock_var_')) {
-        const num = parseInt(name.replace('rock_var_', ''), 10);
-        basePath = `/assets/environment/extracted/rock_crystal_sheet1_${num + 1}.png`;
-      } else if (name.startsWith('shoreline_')) {
-        const num = parseInt(name.replace('shoreline_', ''), 10);
-        basePath = `/assets/environment/extracted/shoreline_asset_${num}.png`;
-      } else if (name.startsWith('boss_')) {
-        basePath = `/assets/stage1_boss/${name}.png`;
       }
       const tex = this.textureLoader.load(basePath + cb);
       tex.colorSpace = THREE.SRGBColorSpace;
       tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = THREE.LinearMipmapLinearFilter;
+      tex.generateMipmaps = true;
       if (
-        name.startsWith('commander_run_') ||
-        name.startsWith('commander_jump_') ||
-        name.startsWith('commander_glide_') ||
-        name.startsWith('commander_attack_') ||
-        name.startsWith('commander_ult_') ||
-        name.startsWith('doctor_run_') ||
-        name.startsWith('doctor_jump_') ||
-        name.startsWith('doctor_glide_') ||
-        name.startsWith('doctor_attack_') ||
-        name.startsWith('doctor_rmb_') ||
-        name.startsWith('doctor_dash_') ||
-        name.startsWith('doctor_ult_')
+        name.startsWith('void_') ||
+        name.startsWith('toxic_') ||
+        name.startsWith('brood_') ||
+        name.startsWith('enemy_')
       ) {
-        tex.minFilter = THREE.LinearFilter;
-        tex.generateMipmaps = false;
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-      } else if (name.startsWith('boss_')) {
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.generateMipmaps = true;
         tex.anisotropy = enemyAniso;
-        tex.wrapS = THREE.ClampToEdgeWrapping;
-        tex.wrapT = THREE.ClampToEdgeWrapping;
-      } else {
-        tex.minFilter = THREE.LinearMipmapLinearFilter;
-        tex.generateMipmaps = true;
-        if (
-          name.startsWith('void_') ||
-          name.startsWith('toxic_') ||
-          name.startsWith('brood_') ||
-          name.startsWith('enemy_')
-        ) {
-          tex.anisotropy = enemyAniso;
-        }
       }
       this.textures[name] = tex;
+    }
+  }
+
+  private ensureHeroSpriteSheetsLoaded(heroId: HeroId): void {
+    if (this.loadedHeroSpriteSheets.has(heroId)) return;
+    this.loadedHeroSpriteSheets.add(heroId);
+    const cb = `?v=2.1`;
+    const loadSheet = (key: string, folder: string) => {
+      if (this.textures[key]) return this.textures[key];
+      const tex = this.textureLoader.load(`/assets/${folder}/${key}.png${cb}`);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      tex.magFilter = THREE.LinearFilter;
+      tex.minFilter = THREE.LinearFilter;
+      tex.generateMipmaps = false;
+      tex.wrapS = THREE.ClampToEdgeWrapping;
+      tex.wrapT = THREE.ClampToEdgeWrapping;
+      this.textures[key] = tex;
+      return tex;
+    };
+
+    if (heroId === 'doctor') {
+      const states = ['run', 'jump', 'glide', 'attack', 'rmb', 'dash', 'ult'] as const;
+      const dirs = ['front', 'back', 'left', 'right'] as const;
+      const mapSet: any = {};
+      for (const st of states) {
+        mapSet[st] = {};
+        for (const d of dirs) {
+          mapSet[st][d] = loadSheet(`doctor_${st}_${d}`, 'doctor');
+        }
+      }
+      this.spriteAnimator.setDoctorSheets(mapSet);
+    } else {
+      const dirs = ['front', 'back', 'left', 'right'] as const;
+      const pack = (st: string) => ({
+        front: loadSheet(`commander_${st}_${dirs[0]}`, 'commander'),
+        back: loadSheet(`commander_${st}_${dirs[1]}`, 'commander'),
+        left: loadSheet(`commander_${st}_${dirs[2]}`, 'commander'),
+        right: loadSheet(`commander_${st}_${dirs[3]}`, 'commander')
+      });
+      this.spriteAnimator.setCommanderRunSheets(pack('run'));
+      this.spriteAnimator.setCommanderJumpSheets(pack('jump'));
+      this.spriteAnimator.setCommanderGlideSheets(pack('glide'));
+      this.spriteAnimator.setCommanderAttackSheets(pack('attack'));
+      this.spriteAnimator.setCommanderUltSheets(pack('ult'));
     }
   }
 
@@ -1279,7 +1210,7 @@ export class ThreeApp {
       this.soundManager.unlock();
       if (this.isEditorMode || this.simulation.state.isPaused) return;
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('.interactive, button, .buff-card, .screen-modal, input, select, #dev-editor-root, #dev-gameplay-debugger, #dev-perf-overlay, #dev-playtest-bar')) return;
+      if (target && target.closest('.interactive, button, .buff-card, .screen-modal, input, select, #dev-editor-root, #dev-gameplay-debugger, #dev-perf-overlay, #dev-playtest-bar, #dev-commander-3d-panel, #dev-commander-3d-pill')) return;
       if (this.simulation.state.isPausedForBuffChoice || this.simulation.state.isGameOver || this.simulation.state.isStageCleared) return;
 
       const heroSelectOpen = this.isScreenOpen('screen-hero-select');
@@ -1300,7 +1231,7 @@ export class ThreeApp {
       if (this.isEditorMode || this.simulation.state.isPaused) return;
       if (this.isDevModeSession && !this.isPointerLocked) {
         const t = e.target as HTMLElement | null;
-        if (t && t.closest('#dev-editor-root, #dev-gameplay-debugger, #dev-perf-overlay, #dev-playtest-bar, .screen-modal, button, input, select')) {
+        if (t && t.closest('#dev-editor-root, #dev-gameplay-debugger, #dev-perf-overlay, #dev-playtest-bar, #dev-commander-3d-panel, #dev-commander-3d-pill, .screen-modal, button, input, select')) {
           return;
         }
       }
@@ -1356,7 +1287,7 @@ export class ThreeApp {
     window.addEventListener('wheel', (e) => {
       if (this.isEditorMode || this.simulation.state.isPaused) return;
       const target = e.target as HTMLElement | null;
-      if (target && target.closest('.interactive, .screen-modal, #dev-gameplay-debugger, #dev-perf-overlay')) return;
+      if (target && target.closest('.interactive, .screen-modal, #dev-gameplay-debugger, #dev-perf-overlay, #dev-commander-3d-panel, #dev-commander-3d-pill')) return;
       this.targetDistance = Math.max(220, Math.min(860, this.targetDistance + Math.sign(e.deltaY) * 36));
     }, { passive: true });
   }
@@ -2707,7 +2638,7 @@ export class ThreeApp {
       this.terrain.update(dt, now, this.camera);
       this.updateHorizonClouds(now);
       this.updateTestMapEnvironment(dt, now);
-      if (this.useComposer) {
+      if (this.useComposer && this.bloomPass?.enabled) {
         this.composer.render();
       } else {
         this.renderer.render(this.scene, this.camera);
@@ -2901,7 +2832,7 @@ export class ThreeApp {
     }
 
     // 8. Render Scene via Post-Processing Composer (Bloom + ACES Filmic Output) or direct Low-preset pass
-    if (this.useComposer) {
+    if (this.useComposer && this.bloomPass?.enabled) {
       this.composer.render();
     } else {
       this.renderer.render(this.scene, this.camera);
@@ -2929,20 +2860,46 @@ export class ThreeApp {
     const p = this.simulation.state.player;
     const now = performance.now();
 
-    if (this.use3DCommander) {
+    const active3D = this.isExperimental3DActive();
+    const activeDoc3D = this.isExperimentalDoctor3DActive();
+    if (active3D || activeDoc3D) {
       this.playerSprite.visible = false;
-      this.commander3D.group.visible = true;
-      this.commander3D.update(
-        dt,
-        p,
-        inputSnapshot,
-        this.inputManager.mouseWorldPos,
-        now
-      );
-      this.playerResolveAura.visible = false; // 3D model handles its own 3D forcefield dome
+      if (active3D) {
+        if (this.experimentalDoctor3D) this.experimentalDoctor3D.group.visible = false;
+        this.experimentalCommander3D.group.visible = true;
+        this.experimentalCommander3D.update(
+          dt,
+          p,
+          inputSnapshot,
+          this.inputManager.mouseWorldPos,
+          now
+        );
+      } else if (activeDoc3D) {
+        if (this.experimentalCommander3D) this.experimentalCommander3D.group.visible = false;
+        this.experimentalDoctor3D.group.visible = true;
+        this.experimentalDoctor3D.update(
+          dt,
+          p,
+          inputSnapshot,
+          this.inputManager.mouseWorldPos,
+          now
+        );
+      }
+
+      const auraMat = this.playerResolveAura.material as THREE.ShaderMaterial;
+      const showSanctuaryAura = !!p.inSanctuaryCross && p.defenseBonusTimer <= 0;
+      this.playerResolveAura.visible = p.defenseBonusTimer > 0 || showSanctuaryAura;
+      if (auraMat.uniforms?.uTime) auraMat.uniforms.uTime.value = now * 0.001;
+      if (showSanctuaryAura) {
+        auraMat.uniforms?.uColor?.value.setHex(0x10b981);
+        this.playerResolveAura.rotation.y += dt * 1.4;
+      } else if (p.defenseBonusTimer > 0) {
+        auraMat.uniforms?.uColor?.value.setHex(0xffd700);
+      }
     } else {
       this.playerSprite.visible = true;
-      this.commander3D.group.visible = false;
+      if (this.experimentalCommander3D) this.experimentalCommander3D.group.visible = false;
+      if (this.experimentalDoctor3D) this.experimentalDoctor3D.group.visible = false;
 
       // Update 2.5D Sprite Animation Controller (Idle, Run, Attack, Dash, Hit, Death)
       this.spriteAnimator.update(dt, p, inputSnapshot);
@@ -3140,7 +3097,7 @@ export class ThreeApp {
     (this.playerShadow.material as THREE.MeshBasicMaterial).opacity = shadowAlpha;
 
     // Legacy Jetpack Gliding Flames (Disabled for 2.5D Commander since blue boot flames are integrated into commander_glide_* sheets)
-    if (p.isGliding && (p.heroId !== 'commander' || this.use3DCommander)) {
+    if (p.isGliding && (p.heroId !== 'commander' || this.isExperimental3DActive())) {
       this.jetPlumeL.visible = true;
       this.jetPlumeR.visible = true;
       const flicker = 0.85 + Math.random() * 0.3;
@@ -3762,10 +3719,6 @@ export class ThreeApp {
         this.scene.remove(record.titanLaserGroup);
         disposeOwnedChildren(record.titanLaserGroup);
       }
-      if (record.titanTentacleGroup) {
-        this.scene.remove(record.titanTentacleGroup);
-        disposeOwnedChildren(record.titanTentacleGroup);
-      }
       if (record.titanElementalOrbs) {
         for (const orb of record.titanElementalOrbs) {
           this.scene.remove(orb);
@@ -3802,9 +3755,9 @@ export class ThreeApp {
       let record = this.enemyMap.get(e.id);
       if (!record) {
         if (e.isStage1Titan) {
-          // Dedicated Stage 1 Titan Colossus Setup (Articulated 3D Organic Mesh + Volumetric Shaders)
+          // Stage 1 Boss: Rift Stalker 3D Articulated Rig & Volumetric Tracking Laser Setup
           const { map: tSkinTex, emissiveMap: tEmissiveTex } = this.getTentacleTextures();
-          const boss3D = new Stage1Boss3DModel(tSkinTex, tEmissiveTex);
+          const boss3D = new RiftStalker3DModel(this.simulation.state.terrain);
           this.scene.add(boss3D.group);
 
           // Titan Volumetric 3D Bio-Plasma Beam Group (Attack 1: Laser Sweep)
@@ -3876,31 +3829,14 @@ export class ThreeApp {
             helixSpinePts.push(pts);
           }
 
-          // 5. Boiling 3D Turbulent Impact Plasma Plume & Ground Mist Gusts (zero sphere/circle/ring)
-          const impactDomeGeo = this.vfx.createOrganicPlumeColumnGeo(16, 48, 52, 14, 6, 0.34, 1.4);
-          impactDomeGeo.translate(0, 26, 0);
+          // 5. Boiling 3D Turbulent Impact Plasma Plume & Organic Ripple Wave (zero flat solid shapes)
+          const impactDomeGeo = this.vfx.createOrganicPlumeColumnGeo(16, 48, 56, 14, 6, 0.34, 1.4);
+          impactDomeGeo.translate(0, 28, 0);
           const impactDomeMat = this.createBioPlasmaMaterial(0xffffff, 0xf43f5e, 0x9333ea, 2.2, 0.9, false, true);
           const impactDome = new THREE.Mesh(impactDomeGeo, impactDomeMat);
           impactDome.frustumCulled = false;
           impactDome.renderOrder = 304;
           laserGrp.add(impactDome);
-
-          const flareTex = this.textures['energy_flare'];
-          const impactGeo = new THREE.PlaneGeometry(168, 168);
-          const impactMat = new THREE.MeshBasicMaterial({
-            map: flareTex || null,
-            color: flareTex ? 0xe879f9 : 0xdc2626,
-            transparent: true,
-            opacity: flareTex ? 0.88 : 0.35,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false,
-            side: THREE.DoubleSide
-          });
-          const impactDisc = new THREE.Mesh(impactGeo, impactMat);
-          impactDisc.rotation.x = -Math.PI / 2;
-          impactDisc.frustumCulled = false;
-          impactDisc.renderOrder = 302;
-          laserGrp.add(impactDisc);
 
           const impactRingGeo = new THREE.PlaneGeometry(195, 195);
           const impactRingMat = this.vfx.createOrganicRippleShader(0xf43f5e, 0xe879f9, 17.0);
@@ -3913,13 +3849,13 @@ export class ThreeApp {
           laserGrp.visible = false;
           this.scene.add(laserGrp);
 
-          // Titan Elemental Orbs (Attack 3: 10 3D turbulent bio-plasma plumes on live dorsal tentacle tips)
+          // Dorsal Spine Charge Plumes (Skill 4: 4 3D turbulent bio-plasma plumes anchored to Rift Stalker dorsal sockets)
           const elementalOrbs: THREE.Group[] = [];
           const elemCoreGeo = this.vfx.createOrganicPlumeColumnGeo(7, 15, 26, 12, 5, 0.36, 1.5);
           const elemHaloGeo = this.vfx.createOrganicPlumeColumnGeo(12, 23, 38, 12, 5, 0.42, -1.4);
-          const elemOrbMat = this.createBioPlasmaMaterial(0xffffff, 0xf472b6, 0x7e22ce, 1.35, 0.98, false, false);
+          const elemOrbMat = this.createBioPlasmaMaterial(0xffffff, 0x38bdf8, 0x7e22ce, 1.35, 0.98, false, false);
           const elemHaloMat = this.createBioPlasmaMaterial(0xf5d0fe, 0xe879f9, 0x9333ea, 1.7, 0.92, true, true);
-          for (let k = 0; k < 10; k++) {
+          for (let k = 0; k < 4; k++) {
             const orbGrp = new THREE.Group();
             orbGrp.name = `titan_orb_grp_${k}`;
             orbGrp.userData = { isTitanPart: true };
@@ -3938,141 +3874,6 @@ export class ThreeApp {
             this.scene.add(orbGrp);
             elementalOrbs.push(orbGrp);
           }
-
-          // Titan Tentacle Strike Group (Attack 2: 4 Articulated Volumetric Tapered Tentacles + Ground Telegraph Reticle)
-          const tentacleGrp = new THREE.Group();
-          tentacleGrp.name = 'titan_tentacle_grp';
-          tentacleGrp.userData = { isTitanPart: true };
-
-          // Ground Telegraph Reticle Group
-          const markerGrp = new THREE.Group();
-          markerGrp.name = 'titan_tentacle_marker_grp';
-
-          const strikeRad = STAGE1_BOSS_CONFIG.tentacle.strikeRadius;
-          const { geo: markerRingGeo, origXZ: ringOrigXZ } = this.createConformalRingGeo(0, strikeRad, 24, 1);
-          const markerRingMat = this.vfx.createOrganicRippleShader(0xc084fc, 0xf43f5e, 11.0);
-          markerRingMat.uniforms.uProgress.value = 0.65;
-          markerRingMat.uniforms.uAlpha.value = 0.85;
-          const markerRingMesh = new THREE.Mesh(markerRingGeo, markerRingMat);
-          markerGrp.add(markerRingMesh);
-
-          const { geo: markerFillGeo, origXZ: fillOrigXZ } = this.createConformalRingGeo(0, strikeRad * 0.88, 24, 1);
-          const markerFillMat = this.vfx.createOrganicRippleShader(0xd946ef, 0xbe123c, 27.0);
-          markerFillMat.uniforms.uProgress.value = 0.35;
-          markerFillMat.uniforms.uAlpha.value = 0.32;
-          const markerFillMesh = new THREE.Mesh(markerFillGeo, markerFillMat);
-          markerGrp.add(markerFillMesh);
-
-          const { geo: markerCoreGeo, origXZ: coreOrigXZ } = this.createConformalRingGeo(0, 18, 12, 0);
-          const markerCoreMat = this.vfx.createOrganicRippleShader(0xfda4af, 0xffffff, 5.0);
-          markerCoreMat.uniforms.uProgress.value = 0.15;
-          markerCoreMat.uniforms.uAlpha.value = 0.65;
-          const markerCoreMesh = new THREE.Mesh(markerCoreGeo, markerCoreMat);
-          markerGrp.add(markerCoreMesh);
-
-          // 4 Orbiting Bio-Seismic Tremor Tendril Flame Shards (zero triangle arrows)
-          const chevronGrp = new THREE.Group();
-          const chevGeo = this.vfx.createJaggedShardGeo(4.2, 16, 5, 91);
-          chevGeo.rotateX(-Math.PI / 2);
-          const chevMat = new THREE.MeshBasicMaterial({
-            color: 0xf43f5e,
-            transparent: true,
-            opacity: 0.85,
-            side: THREE.DoubleSide,
-            blending: THREE.AdditiveBlending,
-            depthWrite: false
-          });
-          for (let c = 0; c < 4; c++) {
-            const chevMesh = new THREE.Mesh(chevGeo, chevMat);
-            const ang = (c / 4) * Math.PI * 2;
-            const dist = strikeRad * 0.72;
-            chevMesh.position.set(Math.cos(ang) * dist, 1.8, Math.sin(ang) * dist);
-            chevMesh.rotation.y = Math.atan2(-Math.cos(ang), -Math.sin(ang));
-            chevronGrp.add(chevMesh);
-          }
-          markerGrp.add(chevronGrp);
-          tentacleGrp.add(markerGrp);
-
-          // 4 Volumetric Tapered 3D Alien Tentacles
-          const tentacleMeshes: THREE.Mesh[] = [];
-          const tentacleSpines: THREE.Line[] = [];
-          const tentacleStingers: THREE.Mesh[] = [];
-          const tentacleImpactRings: THREE.Mesh[] = [];
-
-          const tentacleMat = new THREE.MeshStandardMaterial({
-            map: tSkinTex,
-            emissiveMap: tEmissiveTex,
-            emissive: 0xd946ef,
-            emissiveIntensity: 0.85,
-            roughness: 0.28,
-            metalness: 0.35,
-            side: THREE.DoubleSide
-          });
-
-          const spineMat = new THREE.LineBasicMaterial({
-            color: 0xff2a6d,
-            transparent: true,
-            opacity: 0.95,
-            blending: THREE.AdditiveBlending
-          });
-
-          const stingerGeo = this.vfx.createJaggedShardGeo(3.6, 28, 5, 41);
-          stingerGeo.rotateX(Math.PI / 2); // Orient forward along +Z axis
-          const stingerMat = new THREE.MeshStandardMaterial({
-            color: 0x9f1239,
-            emissive: 0xf43f5e,
-            emissiveIntensity: 1.1,
-            roughness: 0.20,
-            metalness: 0.45
-          });
-
-          const tentacleImpactRingGeo = new THREE.PlaneGeometry(24, 24);
-          tentacleImpactRingGeo.rotateX(-Math.PI / 2);
-          const tentacleImpactRingMat = new THREE.MeshBasicMaterial({
-            map: this.textures['energy_flare'] || null,
-            color: 0xf43f5e,
-            transparent: true,
-            opacity: 0.85,
-            blending: THREE.AdditiveBlending,
-            side: THREE.DoubleSide,
-            depthWrite: false
-          });
-
-          for (let a = 0; a < 4; a++) {
-            // Fleshy volumetric tube (28 segments x 10 radial for ultra smooth curve)
-            const tGeo = this.createTentacleBufferGeo(28, 10);
-            const tMesh = new THREE.Mesh(tGeo, tentacleMat);
-            tMesh.frustumCulled = false;
-            tMesh.renderOrder = 310;
-            tentacleGrp.add(tMesh);
-            tentacleMeshes.push(tMesh);
-
-            // Glowing dorsal bio-vein arc
-            const spGeo = new THREE.BufferGeometry();
-            const spLine = new THREE.Line(spGeo, spineMat);
-            spLine.frustumCulled = false;
-            spLine.renderOrder = 312;
-            tentacleGrp.add(spLine);
-            tentacleSpines.push(spLine);
-
-            // Chitinous razor stinger tip
-            const stMesh = new THREE.Mesh(stingerGeo, stingerMat);
-            stMesh.frustumCulled = false;
-            stMesh.renderOrder = 311;
-            tentacleGrp.add(stMesh);
-            tentacleStingers.push(stMesh);
-
-            // Ground impact ring
-            const impMesh = new THREE.Mesh(tentacleImpactRingGeo, tentacleImpactRingMat);
-            impMesh.frustumCulled = false;
-            impMesh.renderOrder = 305;
-            impMesh.visible = false;
-            tentacleGrp.add(impMesh);
-            tentacleImpactRings.push(impMesh);
-          }
-
-          tentacleGrp.visible = false;
-          this.scene.add(tentacleGrp);
 
           // Titan Soft Contact Shadow Decal (shared geometry + material)
           const titanShadow = new THREE.Mesh(this.sharedUnitPlaneGeo, this.getSharedEnemyShadowMat());
@@ -4114,26 +3915,11 @@ export class ThreeApp {
             titanLaserHelixTubes: helixTubes,
             titanLaserHelixSpinePts: helixSpinePts,
             titanLaserImpactDome: impactDome,
-            titanLaserImpactDisc: impactDisc,
             titanLaserImpactRing: impactRing,
-            titanLaserJitterTimer: 0,
+            titanLaserImpactSparkTimer: 0,
             titanElementalOrbs: elementalOrbs,
             titanElementalMat: elemOrbMat,
-            titanElementalHaloMat: elemHaloMat,
-            titanTentacleGroup: tentacleGrp,
-            titanTentacleMarkerGroup: markerGrp,
-            titanTentacleMarkerRing: markerRingMesh,
-            titanTentacleMarkerFill: markerFillMesh,
-            titanTentacleMarkerCore: markerCoreMesh,
-            titanTentacleMarkerChevrons: chevronGrp,
-            titanTentacleRingOrigXZ: ringOrigXZ,
-            titanTentacleFillOrigXZ: fillOrigXZ,
-            titanTentacleCoreOrigXZ: coreOrigXZ,
-            titanTentacleChevronAngle: 0,
-            titanTentacleMeshes: tentacleMeshes,
-            titanTentacleSpines: tentacleSpines,
-            titanTentacleStingers: tentacleStingers,
-            titanTentacleImpactRings: tentacleImpactRings
+            titanElementalHaloMat: elemHaloMat
           };
           this.enemyMap.set(e.id, record);
         } else {
@@ -4320,27 +4106,43 @@ export class ThreeApp {
           }
         }
 
-        // ATTACK 1: Volumetric 3D Bio-Plasma Beam with Swirling Helical Tendrils & Terrain Impact Dome
+        // SKILL 3: Rift Stalker Tracking Tail Laser (Aimed directly from Tail Emitter -> Authoritative 3D Player Target)
         if (record.titanLaserGroup) {
-          if (e.titanState === 'laser_sweep' && record.titan3D) {
+          const isTailLaser = e.titanState === 'tail_laser' && (e.titanSubPhase === 'charge' || e.titanSubPhase === 'active');
+          if (isTailLaser && record.titan3D) {
             record.titanLaserGroup.visible = true;
-            record.titan3D.getMouthWorldPos(this.titanMouthScratch);
+            record.titan3D.getTailEmitterWorldPos(this.titanMouthScratch);
 
-            const beamAngle = e.titanLaserAngle ?? 0;
-            const beamRange = STAGE1_BOSS_CONFIG.laser.range;
-            const rawEndX = e.pos.x + Math.cos(beamAngle) * beamRange;
-            const rawEndY = e.pos.y + Math.sin(beamAngle) * beamRange;
-            const targetZ = this.simulation.state.player.z + 52;
+            const pPos = this.simulation.state.player.pos;
+            const pZ = this.simulation.state.player.z + 44;
+            const lTgt = e.titanLaserTarget;
+            this.titanTargetScratch.set(
+              lTgt ? lTgt.x : pPos.x,
+              lTgt ? lTgt.z : pZ,
+              lTgt ? lTgt.y : pPos.y
+            );
 
-            // 3D Terrain Obstruction Raycast: check if beam impacts terrain or cliffs
+            this.titanBeamDirScratch.subVectors(this.titanTargetScratch, this.titanMouthScratch);
+            if (this.titanBeamDirScratch.lengthSq() < 1e-4) {
+              const beamAngle = e.titanLaserAngle ?? 0;
+              this.titanBeamDirScratch.set(Math.cos(beamAngle), -0.1, Math.sin(beamAngle));
+            }
+            this.titanBeamDirScratch.normalize();
+
+            const beamRange = STAGE1_BOSS_CONFIG.tailLaser.range;
+            const rawEndX = this.titanMouthScratch.x + this.titanBeamDirScratch.x * beamRange;
+            const rawEndElev = this.titanMouthScratch.y + this.titanBeamDirScratch.y * beamRange;
+            const rawEndY = this.titanMouthScratch.z + this.titanBeamDirScratch.z * beamRange;
+
+            // Terrain obstruction raycast along exact 3D vector
             const raySteps = 32;
-            this.titanEndScratch.set(rawEndX, targetZ, rawEndY);
-              for (let r = 1; r <= raySteps; r++) {
-                const rt = r / raySteps;
-                const rx = this.titanMouthScratch.x + (rawEndX - this.titanMouthScratch.x) * rt;
-                const ry = this.titanMouthScratch.z + (rawEndY - this.titanMouthScratch.z) * rt;
-                const rz = this.titanMouthScratch.y + (targetZ - this.titanMouthScratch.y) * rt;
-                const th = this.simulation.state.terrain.getFastVisualHeight(rx, ry, undefined, 56);
+            this.titanEndScratch.set(rawEndX, rawEndElev, rawEndY);
+            for (let r = 1; r <= raySteps; r++) {
+              const rt = r / raySteps;
+              const rx = this.titanMouthScratch.x + (rawEndX - this.titanMouthScratch.x) * rt;
+              const rz = this.titanMouthScratch.y + (rawEndElev - this.titanMouthScratch.y) * rt;
+              const ry = this.titanMouthScratch.z + (rawEndY - this.titanMouthScratch.z) * rt;
+              const th = this.simulation.state.terrain.getFastVisualHeight(rx, ry, undefined, 56);
               if (r > 2 && rz <= th) {
                 this.titanEndScratch.set(rx, th + 0.5, ry);
                 break;
@@ -4358,367 +4160,140 @@ export class ThreeApp {
             }
             this.titanV2Scratch.crossVectors(this.titanBeamDirScratch, this.titanV1Scratch).normalize();
 
-            const beamPulse = 1.0 + 0.08 * Math.sin(elapsedSec * 28.0);
+            const isCharge = e.titanSubPhase === 'charge';
+            const chargeProg = isCharge
+              ? Math.min(1.0, (e.titanPhaseElapsed ?? 0) / Math.max(0.1, STAGE1_BOSS_CONFIG.tailLaser.chargeDuration))
+              : 1.0;
 
-            // Orient Volumetric Inner Core & Outer Plasma Sheath along beam axis
-            if (record.titanLaserBeamCore) {
-              record.titanLaserBeamCore.position.lerpVectors(this.titanMouthScratch, this.titanEndScratch, 0.5);
-              record.titanLaserBeamCore.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
-              record.titanLaserBeamCore.scale.set(beamPulse, beamLen, beamPulse);
-              (record.titanLaserBeamCore.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
-            }
-            if (record.titanLaserBeamAura) {
-              record.titanLaserBeamAura.position.lerpVectors(this.titanMouthScratch, this.titanEndScratch, 0.5);
-              record.titanLaserBeamAura.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
-              record.titanLaserBeamAura.scale.set(beamPulse, beamLen, beamPulse);
-              (record.titanLaserBeamAura.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
-            }
-
-            // Maw Nozzle Funnel & Molten Core Orb at 3D Boss Jaw
-            if (record.titanLaserMouthFunnel) {
-              record.titanLaserMouthFunnel.position.copy(this.titanMouthScratch);
-              record.titanLaserMouthFunnel.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
-              record.titanLaserMouthFunnel.scale.setScalar(beamPulse);
-              (record.titanLaserMouthFunnel.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
-            }
-            if (record.titanLaserMouthOrb) {
-              record.titanLaserMouthOrb.position.copy(this.titanMouthScratch);
-              record.titanLaserMouthOrb.scale.setScalar(0.95 + 0.14 * Math.sin(elapsedSec * 22.0));
-              (record.titanLaserMouthOrb.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
-            }
-
-            // Twin 3D Articulated Helical Bio-Energy Tendrils Coiling Along Beam
-            if (record.titanLaserHelixTubes && record.titanLaserHelixSpinePts) {
-              for (let a = 0; a < record.titanLaserHelixTubes.length; a++) {
-                const pts = record.titanLaserHelixSpinePts[a];
-                const basePhase = a * Math.PI;
-                for (let s = 0; s <= 26; s++) {
-                  const u = s / 26;
-                  const t = u * 0.985;
-                  const env = Math.sin(Math.min(1.0, u * 1.15) * Math.PI);
-                  const rad = 14.0 + 10.0 * env + 3.0 * Math.sin(u * 14.0 - elapsedSec * 12.0 + a);
-                  const ang = basePhase + u * Math.PI * 9.0 - elapsedSec * 15.0;
-                  pts[s]
-                    .copy(this.titanMouthScratch)
-                    .addScaledVector(this.titanBeamVecScratch, t)
-                    .addScaledVector(this.titanV1Scratch, Math.cos(ang) * rad)
-                    .addScaledVector(this.titanV2Scratch, Math.sin(ang) * rad);
-                }
-                this.updateTentacleGeo(record.titanLaserHelixTubes[a].geometry, pts, 6.0, 10);
+            if (isCharge) {
+              const orbScale = (0.35 + 1.15 * Math.pow(chargeProg, 0.7)) * (1.0 + 0.14 * Math.sin(elapsedSec * 28.0));
+              if (record.titanLaserMouthOrb) {
+                record.titanLaserMouthOrb.visible = true;
+                record.titanLaserMouthOrb.position.copy(this.titanMouthScratch);
+                record.titanLaserMouthOrb.scale.setScalar(orbScale);
+                (record.titanLaserMouthOrb.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
               }
-            }
+              if (record.titanLaserMouthFunnel) {
+                record.titanLaserMouthFunnel.visible = true;
+                record.titanLaserMouthFunnel.position.copy(this.titanMouthScratch);
+                record.titanLaserMouthFunnel.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
+                record.titanLaserMouthFunnel.scale.setScalar(0.32 + 0.85 * chargeProg);
+                (record.titanLaserMouthFunnel.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              // Crisp lock-on plasma sight tendril showing player target lock during charge
+              if (record.titanLaserBeamCore) {
+                record.titanLaserBeamCore.visible = true;
+                record.titanLaserBeamCore.position.lerpVectors(this.titanMouthScratch, this.titanEndScratch, 0.5);
+                record.titanLaserBeamCore.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
+                const lockW = 0.14 + 0.12 * chargeProg;
+                record.titanLaserBeamCore.scale.set(lockW, beamLen, lockW);
+                (record.titanLaserBeamCore.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserBeamAura) record.titanLaserBeamAura.visible = false;
+              if (record.titanLaserImpactDome) record.titanLaserImpactDome.visible = false;
+              if (record.titanLaserImpactRing) record.titanLaserImpactRing.visible = false;
+              if (record.titanLaserHelixTubes) {
+                for (let a = 0; a < record.titanLaserHelixTubes.length; a++) {
+                  record.titanLaserHelixTubes[a].visible = false;
+                }
+              }
+            } else {
+              const beamPulse = 1.0 + 0.08 * Math.sin(elapsedSec * 28.0);
 
-            // Boiling 3D Hemispherical Impact Dome & Ground Shockwaves at strike termination
-            if (record.titanLaserImpactDome) {
-              record.titanLaserImpactDome.position.copy(this.titanEndScratch);
-              record.titanLaserImpactDome.scale.setScalar(0.92 + 0.14 * Math.sin(elapsedSec * 20.0));
-              (record.titanLaserImpactDome.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
-            }
-            if (record.titanLaserImpactDisc) {
-              record.titanLaserImpactDisc.position.set(this.titanEndScratch.x, this.titanEndScratch.y + 0.45, this.titanEndScratch.z);
-              record.titanLaserImpactDisc.rotation.z += dt * 4.5;
-            }
-            if (record.titanLaserImpactRing) {
-              record.titanLaserImpactRing.position.set(this.titanEndScratch.x, this.titanEndScratch.y + 0.55, this.titanEndScratch.z);
-              record.titanLaserImpactRing.rotation.z -= dt * 3.5;
-              record.titanLaserImpactRing.scale.setScalar(0.95 + 0.1 * Math.sin(elapsedSec * 16.0));
+              if (record.titanLaserBeamCore) {
+                record.titanLaserBeamCore.visible = true;
+                record.titanLaserBeamCore.position.lerpVectors(this.titanMouthScratch, this.titanEndScratch, 0.5);
+                record.titanLaserBeamCore.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
+                record.titanLaserBeamCore.scale.set(beamPulse, beamLen, beamPulse);
+                (record.titanLaserBeamCore.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserBeamAura) {
+                record.titanLaserBeamAura.visible = true;
+                record.titanLaserBeamAura.position.lerpVectors(this.titanMouthScratch, this.titanEndScratch, 0.5);
+                record.titanLaserBeamAura.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
+                record.titanLaserBeamAura.scale.set(beamPulse, beamLen, beamPulse);
+                (record.titanLaserBeamAura.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserMouthFunnel) {
+                record.titanLaserMouthFunnel.visible = true;
+                record.titanLaserMouthFunnel.position.copy(this.titanMouthScratch);
+                record.titanLaserMouthFunnel.quaternion.setFromUnitVectors(this.titanUpScratch, this.titanBeamDirScratch);
+                record.titanLaserMouthFunnel.scale.setScalar(beamPulse);
+                (record.titanLaserMouthFunnel.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserMouthOrb) {
+                record.titanLaserMouthOrb.visible = true;
+                record.titanLaserMouthOrb.position.copy(this.titanMouthScratch);
+                record.titanLaserMouthOrb.scale.setScalar(0.95 + 0.14 * Math.sin(elapsedSec * 22.0));
+                (record.titanLaserMouthOrb.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserHelixTubes && record.titanLaserHelixSpinePts) {
+                for (let a = 0; a < record.titanLaserHelixTubes.length; a++) {
+                  record.titanLaserHelixTubes[a].visible = true;
+                  const pts = record.titanLaserHelixSpinePts[a];
+                  const basePhase = a * Math.PI;
+                  for (let s = 0; s <= 26; s++) {
+                    const u = s / 26;
+                    const t = u * 0.985;
+                    const env = Math.sin(Math.min(1.0, u * 1.15) * Math.PI);
+                    const rad = 14.0 + 10.0 * env + 3.0 * Math.sin(u * 14.0 - elapsedSec * 12.0 + a);
+                    const ang = basePhase + u * Math.PI * 9.0 - elapsedSec * 15.0;
+                    pts[s]
+                      .copy(this.titanMouthScratch)
+                      .addScaledVector(this.titanBeamVecScratch, t)
+                      .addScaledVector(this.titanV1Scratch, Math.cos(ang) * rad)
+                      .addScaledVector(this.titanV2Scratch, Math.sin(ang) * rad);
+                  }
+                  this.updateTentacleGeo(record.titanLaserHelixTubes[a].geometry, pts, 6.0, 10);
+                }
+              }
+              if (record.titanLaserImpactDome) {
+                record.titanLaserImpactDome.visible = true;
+                record.titanLaserImpactDome.position.copy(this.titanEndScratch);
+                record.titanLaserImpactDome.scale.setScalar(0.92 + 0.16 * Math.sin(elapsedSec * 20.0));
+                (record.titanLaserImpactDome.material as THREE.ShaderMaterial).uniforms.uTime.value = elapsedSec;
+              }
+              if (record.titanLaserImpactRing) {
+                record.titanLaserImpactRing.visible = true;
+                record.titanLaserImpactRing.position.set(this.titanEndScratch.x, this.titanEndScratch.y + 0.55, this.titanEndScratch.z);
+                record.titanLaserImpactRing.rotation.z -= dt * 3.5;
+                record.titanLaserImpactRing.scale.setScalar(0.95 + 0.12 * Math.sin(elapsedSec * 16.0));
+                const irMat = record.titanLaserImpactRing.material as THREE.ShaderMaterial;
+                if (irMat.uniforms?.uTime) irMat.uniforms.uTime.value = elapsedSec;
+              }
+              record.titanLaserImpactSparkTimer = (record.titanLaserImpactSparkTimer ?? 0) + dt;
+              if (record.titanLaserImpactSparkTimer >= 0.09) {
+                record.titanLaserImpactSparkTimer = 0;
+                this.vfx.spawnBlasterImpactSpark(
+                  { x: this.titanEndScratch.x, y: this.titanEndScratch.z },
+                  this.titanEndScratch.y + 4
+                );
+              }
             }
           } else {
             record.titanLaserGroup.visible = false;
           }
         }
 
-        // ATTACK 2: Articulated Tentacle Strike (4 High-Reach Bio-Tentacles extending up to 900 units to player)
-        if (record.titanTentacleGroup) {
-          if (e.titanState === 'tentacle_strike' && record.titan3D) {
-            record.titanTentacleGroup.visible = true;
-            const target = e.titanTentacleTarget ?? e.pos;
-            const tZ = this.simulation.state.terrain.getElevation(target.x, target.y).height;
-            const phase = e.titanTentaclePhase || 'telegraph';
-            const timer = e.titanTimer ?? 0;
-            const nowSec = elapsedSec;
-
-            // 1. UPDATE GROUND TELEGRAPH RETICLE (Conformal to 3D terrain slopes)
-            if (record.titanTentacleMarkerGroup) {
-              const isTelegraph = (phase === 'telegraph');
-              record.titanTentacleMarkerGroup.visible = isTelegraph;
-              if (isTelegraph) {
-                record.titanTentacleMarkerGroup.position.set(target.x, tZ, target.y);
-                const teleElapsed = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration - timer;
-
-                // Conform outer danger ring, inner core ring & fill disc to actual terrain slopes
-                if (record.titanTentacleMarkerRing && record.titanTentacleRingOrigXZ) {
-                  this.updateConformalMarkerGeo(record.titanTentacleMarkerRing.geometry, record.titanTentacleRingOrigXZ, target.x, target.y, tZ, 1.6);
-                }
-                if (record.titanTentacleMarkerFill && record.titanTentacleFillOrigXZ) {
-                  this.updateConformalMarkerGeo(record.titanTentacleMarkerFill.geometry, record.titanTentacleFillOrigXZ, target.x, target.y, tZ, 1.0);
-                }
-                if (record.titanTentacleMarkerCore && record.titanTentacleCoreOrigXZ) {
-                  this.updateConformalMarkerGeo(record.titanTentacleMarkerCore.geometry, record.titanTentacleCoreOrigXZ, target.x, target.y, tZ, 1.9);
-                }
-
-                // Rotate and conform each inward-pointing danger chevron individually to terrain surface
-                if (record.titanTentacleMarkerChevrons) {
-                  record.titanTentacleChevronAngle = (record.titanTentacleChevronAngle ?? 0) + dt * 3.5;
-                  const chevDist = STAGE1_BOSS_CONFIG.tentacle.strikeRadius * 0.72;
-                  const chevs = record.titanTentacleMarkerChevrons.children;
-                  for (let c = 0; c < chevs.length; c++) {
-                    const ang = (c / Math.max(1, chevs.length)) * Math.PI * 2 + record.titanTentacleChevronAngle;
-                    const lx = Math.cos(ang) * chevDist;
-                    const lz = Math.sin(ang) * chevDist;
-                    const ch = this.simulation.state.terrain.getFastVisualHeight(target.x + lx, target.y + lz, tZ, 56);
-                    chevs[c].position.set(lx, (ch - tZ) + 2.2, lz);
-                    // -Z local axis points inward (-lx, -lz) toward reticle center
-                    chevs[c].rotation.y = Math.atan2(lx, lz);
-                  }
-                }
-
-                // Pulse turbulent crimson-magenta danger mist during lock-on phase (elapsed >= 0.35s)
-                const isLocked = teleElapsed >= 0.35;
-                if (record.titanTentacleMarkerRing && record.titanTentacleMarkerFill) {
-                  const ringMat = record.titanTentacleMarkerRing.material as THREE.ShaderMaterial;
-                  const fillMat = record.titanTentacleMarkerFill.material as THREE.ShaderMaterial;
-                  const prog = Math.min(1.0, teleElapsed / Math.max(0.1, STAGE1_BOSS_CONFIG.tentacle.telegraphDuration));
-                  if (ringMat.uniforms?.uPrimary) {
-                    ringMat.uniforms.uProgress.value = 0.25 + prog * 0.65;
-                    fillMat.uniforms.uProgress.value = 0.15 + prog * 0.55;
-                    if (isLocked) {
-                      const flash = Math.sin(nowSec * 24) > 0;
-                      ringMat.uniforms.uPrimary.value.setHex(flash ? 0xff2255 : 0xf43f5e);
-                      fillMat.uniforms.uPrimary.value.setHex(flash ? 0xff2255 : 0xbe123c);
-                      fillMat.uniforms.uAlpha.value = 0.45 + Math.sin(nowSec * 20) * 0.18;
-                    } else {
-                      ringMat.uniforms.uPrimary.value.setHex(0xc084fc);
-                      fillMat.uniforms.uPrimary.value.setHex(0xd946ef);
-                      fillMat.uniforms.uAlpha.value = 0.28 + Math.sin(nowSec * 10) * 0.12;
-                    }
-                  }
-                }
-              }
-            }
-
-            // 2. COMPUTE 4 INDEPENDENT ARTICULATED VOLUMETRIC EXTENDING TENTACLES
-            if (record.titanTentacleMeshes) {
-              // Lower-mid Flank & Dorsal Carapace Sockets anchored directly on the 3D boss carapace
-              const tentacleConfigs = [
-                // Outer Left Tentacle: Sweeps wide left flank with sinuous S-bend
-                { groundOffX: -42, groundOffY: -18, whipHeight: 105, lateralFlare: -175, sCurve: -68, coilWave: 1.0 },
-                // Inner Left Tentacle: Arches from left dorsal flank
-                { groundOffX: -16, groundOffY: 26, whipHeight: 135, lateralFlare: -78, sCurve: 48, coilWave: -0.9 },
-                // Inner Right Tentacle: Arches from right dorsal flank
-                { groundOffX: 16, groundOffY: 26, whipHeight: 135, lateralFlare: 78, sCurve: -48, coilWave: 0.9 },
-                // Outer Right Tentacle: Sweeps wide right flank with sinuous S-bend
-                { groundOffX: 42, groundOffY: -18, whipHeight: 105, lateralFlare: 175, sCurve: 68, coilWave: -1.0 }
-              ];
-
-              // Extension progress E in [0, 1] and tip hover height (poised in front of danger zone during telegraph)
-              let extProgress = 0;
-              let tipHoverY = 0;
-              let isImpaled = false;
-
-              if (phase === 'telegraph') {
-                const teleElapsed = STAGE1_BOSS_CONFIG.tentacle.telegraphDuration - timer;
-                const teleNorm = Math.min(1.0, Math.max(0, teleElapsed / STAGE1_BOSS_CONFIG.tentacle.telegraphDuration));
-                // Surges visibly across battlefield out to 78% of reach, coiling right over the danger perimeter!
-                extProgress = 0.34 + 0.44 * (1.0 - Math.pow(1.0 - teleNorm, 1.8));
-                tipHoverY = 42.0 + 10.0 * Math.sin(nowSec * 6.0);
-              } else if (phase === 'strike') {
-                const strikeElapsed = STAGE1_BOSS_CONFIG.tentacle.strikeDuration - timer;
-                const strikeNorm = Math.min(1.0, Math.max(0, strikeElapsed / STAGE1_BOSS_CONFIG.tentacle.strikeDuration));
-                // Explosively lashes the final gap into the ground by strikeNorm = 0.45
-                if (strikeNorm < 0.45) {
-                  const t = strikeNorm / 0.45;
-                  const ease = t * t * (3 - 2 * t);
-                  extProgress = 0.78 + 0.22 * ease;
-                  tipHoverY = 42.0 * (1.0 - ease);
-                } else {
-                  extProgress = 1.0;
-                  tipHoverY = 0;
-                  isImpaled = true;
-                }
-              } else if (phase === 'retract') {
-                const retractElapsed = STAGE1_BOSS_CONFIG.tentacle.retractDuration - timer;
-                const retractNorm = Math.min(1.0, Math.max(0, retractElapsed / STAGE1_BOSS_CONFIG.tentacle.retractDuration));
-                // First 0.18s: remains impaled in cracked ground, trembling with violent bio-force
-                if (retractNorm < 0.28) {
-                  extProgress = 1.0;
-                  isImpaled = true;
-                } else {
-                  const t = (retractNorm - 0.28) / 0.72;
-                  extProgress = 1.0 - (t * t);
-                  tipHoverY = 24.0 * Math.sin(t * Math.PI * 0.5);
-                }
-              }
-
-              const spineSegments = 28;
-              for (let a = 0; a < 4; a++) {
-                const cfg = tentacleConfigs[a];
-                const mesh = record.titanTentacleMeshes[a];
-                const spineLine = record.titanTentacleSpines?.[a];
-                const stinger = record.titanTentacleStingers?.[a];
-                const impactRing = record.titanTentacleImpactRings?.[a];
-
-                if (!mesh) continue;
-
-                // Root socket anchored directly on the 3D boss carapace
-                const rootWorld = record.titan3D.getCarapaceStrikeSocket(a, this.tentacleRootScratch);
-
-                // Ground landing point
-                const targetGroundX = target.x + cfg.groundOffX;
-                const targetGroundY = target.y + cfg.groundOffY;
-                const targetGroundZ = this.simulation.state.terrain.getElevation(targetGroundX, targetGroundY).height;
-                const targetWorld = this.tentacleTargetScratch.set(targetGroundX, targetGroundZ + tipHoverY, targetGroundY);
-
-                // Direction towards target
-                const fullVec = this.tentacleFullVecScratch.subVectors(targetWorld, rootWorld);
-                const horizDir = this.tentacleHorizDirScratch.set(fullVec.x, 0, fullVec.z).normalize();
-                const horizPerp = this.tentacleHorizPerpScratch.set(-horizDir.z, 0, horizDir.x);
-
-                // Lazily allocate reusable 29-point spine buffers per tentacle
-                if (!record.titanTentacleSpinePts) {
-                  record.titanTentacleSpinePts = [];
-                  record.titanTentacleSpineLinePts = [];
-                }
-                let spinePoints = record.titanTentacleSpinePts[a];
-                if (!spinePoints || spinePoints.length !== spineSegments + 1) {
-                  spinePoints = [];
-                  for (let s = 0; s <= spineSegments; s++) spinePoints.push(new THREE.Vector3());
-                  record.titanTentacleSpinePts[a] = spinePoints;
-                }
-                let spineLinePoints = record.titanTentacleSpineLinePts![a];
-                if (!spineLinePoints || spineLinePoints.length !== spineSegments + 1) {
-                  spineLinePoints = [];
-                  for (let s = 0; s <= spineSegments; s++) spineLinePoints.push(new THREE.Vector3());
-                  record.titanTentacleSpineLinePts![a] = spineLinePoints;
-                }
-
-                // Low-slung cobra-coil apex during telegraph (stays inside combat camera!), high overhead whip during strike!
-                const apexHeight = phase === 'telegraph'
-                  ? Math.max(rootWorld.y, targetWorld.y) + 28 + 14 * Math.sin(nowSec * 6 + a)
-                  : isImpaled
-                    ? Math.max(rootWorld.y, targetWorld.y) + cfg.whipHeight * 0.42
-                    : Math.max(rootWorld.y, targetWorld.y) + cfg.whipHeight;
-
-                for (let s = 0; s <= spineSegments; s++) {
-                  const u = s / spineSegments; // 0 (root) to 1 (current tip)
-                  const effU = u * extProgress; // Fraction along full trajectory
-
-                  // Base interpolation between root and target
-                  const curPos = this.tentacleCurPosScratch.lerpVectors(rootWorld, targetWorld, effU);
-
-                  // Graceful whip arch peaking across the span
-                  const arcEnvelope = Math.pow(Math.sin(effU * Math.PI), 0.78);
-                  curPos.y += (apexHeight - curPos.y) * arcEnvelope;
-
-                  // Wide lateral kraken claw flare (sweeps wide around boss flanks, whips inward to spearhead)
-                  curPos.addScaledVector(horizPerp, cfg.lateralFlare * arcEnvelope);
-
-                  // Sinuous double-bend S-curve so tentacles look truly serpentine and curved (never rigid rods)
-                  const sCurveEnv = Math.sin(effU * Math.PI * 2.0) * Math.sin(effU * Math.PI);
-                  curPos.addScaledVector(horizPerp, cfg.sCurve * sCurveEnv);
-                  curPos.y += Math.abs(cfg.sCurve) * 0.35 * Math.sin(effU * Math.PI * 2.0);
-
-                  // Living predator sinusoidal undulation waves
-                  const waveFreq = 8.0;
-                  const wavePhase = nowSec * waveFreq - u * 5.5 + a * 1.57;
-                  const waveAmp = (s > 0 && s < spineSegments) ? (22.0 * Math.sin(u * Math.PI)) : 0;
-                  curPos.addScaledVector(horizPerp, Math.sin(wavePhase) * waveAmp * cfg.coilWave);
-                  curPos.y += Math.cos(wavePhase * 0.9) * (waveAmp * 0.45);
-
-                  // Impaled trembling vibration in earth
-                  if (isImpaled && s >= spineSegments - 4) {
-                    const tremor = (Math.random() - 0.5) * 3.0;
-                    curPos.x += tremor;
-                    curPos.z += tremor;
-                  }
-
-                  // Ensure spine glides cleanly above terrain bumps without burying until actual ground contact at tip
-                  if (s < spineSegments || !isImpaled) {
-                    const terrH = this.simulation.state.terrain.getFastVisualHeight(curPos.x, curPos.z, undefined, 56);
-                    const minClearance = phase === 'telegraph' ? 14.0 : 4.0;
-                    if (curPos.y < terrH + minClearance) {
-                      curPos.y = terrH + minClearance;
-                    }
-                  } else {
-                    curPos.y = targetGroundZ + 0.2;
-                  }
-
-                  spinePoints[s].copy(curPos);
-
-                  // Outer glowing bio-vein highlight strictly outside tapered flesh radius
-                  const curRad = (21.0 * Math.pow(1.0 - u * 0.92, 1.35) + 1.6) * (1.0 + 0.08 * Math.sin(u * Math.PI * 16.0));
-                  const crestPt = spineLinePoints[s].copy(curPos);
-                  crestPt.y += curRad + 2.0;
-                  crestPt.addScaledVector(horizPerp, Math.sin(nowSec * 3 + u * 6) * 1.2);
-                }
-
-                // Update volumetric tapered tube geometry (21.0 base radius -> 2.4 razor tip)
-                this.updateTentacleGeo(mesh.geometry, spinePoints, 21.0, 10);
-                mesh.visible = true;
-
-                // Update dorsal glowing vein line in-place once allocated
-                if (spineLine) {
-                  const linePos = spineLine.geometry.getAttribute('position') as THREE.BufferAttribute | undefined;
-                  if (linePos && linePos.count === spineLinePoints.length) {
-                    for (let s = 0; s < spineLinePoints.length; s++) {
-                      const lp = spineLinePoints[s];
-                      linePos.setXYZ(s, lp.x, lp.y, lp.z);
-                    }
-                    linePos.needsUpdate = true;
-                  } else {
-                    spineLine.geometry.setFromPoints(spineLinePoints);
-                  }
-                  spineLine.geometry.computeBoundingSphere();
-                  spineLine.visible = true;
-                }
-
-                // Update tip razor stinger (+Z oriented via ConeGeometry rotation)
-                if (stinger) {
-                  const lastPt = spinePoints[spineSegments];
-                  const prevPt = spinePoints[spineSegments - 1];
-                  stinger.position.copy(lastPt);
-                  this.tentacleStingerDirScratch.subVectors(lastPt, prevPt).normalize();
-                  stinger.quaternion.setFromUnitVectors(this.titanPosZScratch, this.tentacleStingerDirScratch);
-                  stinger.visible = true;
-                }
-
-                // Update small crisp ground impact crater ring at each impaled stinger
-                if (impactRing) {
-                  impactRing.visible = isImpaled;
-                  if (isImpaled) {
-                    impactRing.position.set(targetGroundX, targetGroundZ + 1.1, targetGroundY);
-                    impactRing.rotation.z += dt * 4.0;
-                    const ringPulse = 0.65 + 0.35 * Math.sin(nowSec * 14 + a);
-                    (impactRing.material as THREE.MeshBasicMaterial).opacity = ringPulse;
-                  }
-                }
-              }
-            }
-          } else {
-            record.titanTentacleGroup.visible = false;
-          }
-        }
-
-        // ATTACK 3: Ten 3D Turbulent Bio-Plasma Orbs Charging on Live Dorsal Tentacle Tips
+        // SKILL 4 Charge Flare on Live Dorsal Crystal Spine Sockets
         if (record.titanElementalOrbs && record.titan3D) {
-          if (e.titanState === 'elemental_barrage') {
-            const chargeDur = STAGE1_BOSS_CONFIG.elemental.chargeDuration;
-            const chargeProg = Math.min(1.0, Math.max(0, (chargeDur - (e.titanTimer ?? 0)) / chargeDur));
-            const baseScale = (0.18 + 0.98 * Math.pow(chargeProg, 0.72)) * (1.0 + 0.08 * Math.sin(elapsedSec * 16.0));
+          if (e.titanState === 'dorsal_spine_barrage' && e.titanSubPhase === 'charge') {
+            const chargeDur = STAGE1_BOSS_CONFIG.dorsalSpineBarrage.chargeDuration;
+            const chargeProg = Math.min(1.0, Math.max(0, (e.titanPhaseElapsed ?? 0) / chargeDur));
+            const baseScale = (0.28 + 0.96 * Math.pow(chargeProg, 0.72)) * (1.0 + 0.12 * Math.sin(elapsedSec * 18.0));
 
             if (record.titanElementalMat) record.titanElementalMat.uniforms.uTime.value = elapsedSec;
             if (record.titanElementalHaloMat) record.titanElementalHaloMat.uniforms.uTime.value = elapsedSec;
 
-            for (let k = 0; k < 10; k++) {
+            for (let k = 0; k < record.titanElementalOrbs.length; k++) {
               const orb = record.titanElementalOrbs[k];
-              record.titan3D.getTentacleTipWorldPos(k, orb.position);
+              record.titan3D.getDorsalSpineWorldPos(k, orb.position);
               orb.scale.setScalar(baseScale);
-              orb.rotation.y += dt * 2.8;
-              orb.rotation.x += dt * 1.4;
+              orb.rotation.y += dt * 3.0;
               orb.visible = true;
             }
           } else {
-            for (let k = 0; k < 10; k++) {
+            for (let k = 0; k < record.titanElementalOrbs.length; k++) {
               record.titanElementalOrbs[k].visible = false;
             }
           }
@@ -4890,10 +4465,91 @@ export class ThreeApp {
     this.mouseSensitivity = Math.max(0.2, Math.min(3.0, sens));
   }
 
+  public isExperimental3DActive(): boolean {
+    return (
+      import.meta.env.DEV &&
+      this.use3DCommander &&
+      this.simulation.state.player.heroId === 'commander' &&
+      Boolean(this.experimentalCommander3D?.isReady)
+    );
+  }
+
+  public isExperimentalDoctor3DActive(): boolean {
+    return (
+      import.meta.env.DEV &&
+      this.use3DCommander &&
+      this.simulation.state.player.heroId === 'doctor' &&
+      Boolean(this.experimentalDoctor3D?.isReady)
+    );
+  }
+
+  public getActiveHeroId(): HeroId {
+    return this.simulation.state.player.heroId;
+  }
+
   public setUse3DCommander(use3D: boolean): void {
-    this.use3DCommander = use3D;
-    this.playerSprite.visible = !use3D;
-    this.commander3D.group.visible = use3D;
+    const devAllowed = import.meta.env.DEV && use3D;
+    this.use3DCommander = devAllowed;
+
+    if (!devAllowed) {
+      this.experimentalCommander3D?.deactivateAndPause();
+      this.experimentalDoctor3D?.deactivateAndPause();
+      if (this.playerSprite) this.playerSprite.visible = true;
+      this.onExperimental3DStateChanged?.();
+      return;
+    }
+
+    const heroId = this.simulation.state.player.heroId;
+    if (heroId === 'doctor') {
+      this.experimentalCommander3D?.deactivateAndPause();
+      if (this.experimentalDoctor3D.isReady) {
+        if (this.playerSprite) this.playerSprite.visible = false;
+        this.experimentalDoctor3D.group.visible = true;
+        this.onExperimental3DStateChanged?.();
+      } else {
+        if (this.playerSprite) this.playerSprite.visible = true;
+        this.experimentalDoctor3D.group.visible = false;
+        if (!this.experimentalDoctor3D.isLoading && !this.experimentalDoctor3D.hasLoadError) {
+          this.uiManager?.showPickupNotification('Loading Experimental 3D Doctor (Localhost)...');
+        }
+        void this.experimentalDoctor3D.ensureLoaded().then((ok) => {
+          if (!ok || !this.use3DCommander) return;
+          const stillDoc = this.simulation.state.player.heroId === 'doctor';
+          if (this.playerSprite) this.playerSprite.visible = !stillDoc;
+          this.experimentalDoctor3D.group.visible = stillDoc;
+          if (stillDoc) {
+            this.uiManager?.showPickupNotification('Experimental 3D Doctor Ready [F10 Tuning]');
+          }
+          this.onExperimental3DStateChanged?.();
+        });
+      }
+      return;
+    }
+
+    this.experimentalDoctor3D?.deactivateAndPause();
+    const isCommander = heroId === 'commander';
+    if (this.experimentalCommander3D.isReady) {
+      if (this.playerSprite) this.playerSprite.visible = !isCommander;
+      this.experimentalCommander3D.group.visible = isCommander;
+      this.onExperimental3DStateChanged?.();
+    } else {
+      // Keep original 2D Commander visible while lazy-loading GLB
+      if (this.playerSprite) this.playerSprite.visible = true;
+      this.experimentalCommander3D.group.visible = false;
+      if (!this.experimentalCommander3D.isLoading && !this.experimentalCommander3D.hasLoadError) {
+        this.uiManager?.showPickupNotification('Loading Experimental 3D Commander (Localhost)...');
+      }
+      void this.experimentalCommander3D.ensureLoaded().then((ok) => {
+        if (!ok || !this.use3DCommander) return;
+        const stillCommander = this.simulation.state.player.heroId === 'commander';
+        if (this.playerSprite) this.playerSprite.visible = !stillCommander;
+        this.experimentalCommander3D.group.visible = stillCommander;
+        if (stillCommander) {
+          this.uiManager?.showPickupNotification('Experimental 3D Commander Ready [F10 Tuning]');
+        }
+        this.onExperimental3DStateChanged?.();
+      });
+    }
   }
 
   public setGraphicsQuality(quality: GraphicsQuality): void {
@@ -4903,13 +4559,13 @@ export class ThreeApp {
     const h = typeof window !== 'undefined' ? window.innerHeight : 1080;
 
     if (quality === 'low') {
-      this.renderer.setPixelRatio(1.0);
+      this.renderer.setPixelRatio(Math.min(dpr, 0.85));
       this.useComposer = false;
       this.bloomPass.enabled = false;
       this.animateClouds = false;
       this.maxDynamicLights = 4;
     } else if (quality === 'high') {
-      this.renderer.setPixelRatio(Math.min(dpr, 1.5));
+      this.renderer.setPixelRatio(Math.min(dpr, 1.35));
       this.useComposer = true;
       this.bloomPass.enabled = true;
       this.bloomPass.strength = 0.32;
@@ -4919,7 +4575,7 @@ export class ThreeApp {
       this.animateClouds = true;
       this.maxDynamicLights = 10;
     } else {
-      this.renderer.setPixelRatio(Math.min(dpr, 1.25));
+      this.renderer.setPixelRatio(Math.min(dpr, 1.0));
       this.useComposer = true;
       this.bloomPass.enabled = true;
       this.bloomPass.strength = 0.24;
@@ -5174,6 +4830,33 @@ export class ThreeApp {
         flareSpr.scale.set(16, 16, 1);
         grp.add(flareSpr);
       }
+    } else if (projType === 'rift_shard') {
+      // Multi-layered 3D Crystalline Rift Lance + flanking spikes + swirling volumetric bio-plasma sheath
+      const shardGeo = this.vfx.createJaggedShardGeo(6.8, 34, 6, 73);
+      shardGeo.rotateX(Math.PI / 2);
+      const shardMat = new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x9333ea,
+        emissiveIntensity: 1.75,
+        roughness: 0.16,
+        metalness: 0.62,
+        flatShading: true
+      });
+      grp.add(markShared(new THREE.Mesh(shardGeo, shardMat)));
+
+      const wingGeo = this.vfx.createJaggedShardGeo(3.6, 20, 5, 37);
+      wingGeo.rotateX(Math.PI / 2);
+      for (const sgn of [-1, 1]) {
+        const wing = markShared(new THREE.Mesh(wingGeo, shardMat));
+        wing.position.set(sgn * 4.5, 0, -4);
+        wing.rotation.y = sgn * 0.24;
+        grp.add(wing);
+      }
+
+      const glowGeo = this.vfx.createOrganicPlumeColumnGeo(3.6, 8.2, 28, 10, 5, 0.38, 1.6);
+      glowGeo.rotateX(Math.PI / 2);
+      const plasmaSheathMat = this.createVolumetricBeamMaterial(0xf5d0fe, 0x38bdf8, 1.85, 0.82, 16.0);
+      grp.add(markShared(new THREE.Mesh(glowGeo, plasmaSheathMat)));
     } else if (projType === 'seismic_shard') {
       const shardGeo = this.vfx.createJaggedShardGeo(9.5, 28, 6, 59);
       shardGeo.rotateX(Math.PI / 2);
@@ -5639,13 +5322,19 @@ export class ThreeApp {
   }
 
   private processEvents(events: SimEvent[]): void {
+    const active3D = this.isExperimental3DActive();
+    const activeDoc3D = this.isExperimentalDoctor3DActive();
     for (let i = 0; i < events.length; i++) {
       const e = events[i];
       switch (e.type) {
         case 'pulse_fired':
-          if (this.use3DCommander) {
-            this.soundManager.playPulse();
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(e.data?.duration || 0.24, e.data?.to);
+          } else if (activeDoc3D) {
+            if (e.data?.variant !== 'drone_overcharge') {
+              this.soundManager.playPulse();
+              this.experimentalDoctor3D.triggerLMB(e.data?.duration || 0.24, e.data?.to, e.data?.hand);
+            }
           } else {
             if (this.simulation.state.player.heroId !== 'commander' && e.data?.variant !== 'drone_overcharge') {
               this.soundManager.playPulse();
@@ -5679,8 +5368,8 @@ export class ThreeApp {
           break;
         case 'beam_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(0.26, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5688,8 +5377,8 @@ export class ThreeApp {
           break;
         case 'chill_beam_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(0.26, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5702,8 +5391,8 @@ export class ThreeApp {
           break;
         case 'piercing_laser_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(0.26, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5717,8 +5406,8 @@ export class ThreeApp {
           break;
         case 'extended_slash_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerRMB(0.32, e.data?.angle);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5733,8 +5422,8 @@ export class ThreeApp {
           break;
         case 'scissor_slash_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerRMB(0.38, e.data?.angle, e.data?.focusPos);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5749,8 +5438,8 @@ export class ThreeApp {
           break;
         case 'frost_burst_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerRMB(0.36);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5778,8 +5467,8 @@ export class ThreeApp {
           break;
         case 'scatter_fired':
           this.soundManager.playPulse();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(0.26, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -5823,15 +5512,15 @@ export class ThreeApp {
           break;
         case 'wave_fired':
           this.soundManager.playWave();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerRMB(0.38, e.data?.angle, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
           break;
         case 'recovery_field_deployed':
           this.soundManager.playDash();
-          if (!this.use3DCommander) {
+          if (!active3D) {
             this.spriteAnimator.triggerDash();
             this.vfx.spawnDashGhost(
               this.simulation.state.player.pos,
@@ -5842,7 +5531,9 @@ export class ThreeApp {
           this.vfx.spawnShockwaveRing(e.data.pos, e.data.radius, 0x10b981, e.data.z, 0.8);
           break;
         case 'ultimate_fired':
-          if (!this.use3DCommander && this.simulation.state.player.heroId === 'commander') {
+          if (active3D) {
+            this.experimentalCommander3D.triggerUltimate(0.85, e.data?.target || e.data?.pos);
+          } else if (this.simulation.state.player.heroId === 'commander') {
             this.spriteAnimator.triggerUltimate(
               e.data?.duration || 0.60,
               e.data?.facing,
@@ -5945,7 +5636,11 @@ export class ThreeApp {
           break;
         case 'dash_used':
           this.soundManager.playDash();
-          if (!this.use3DCommander) {
+          if (active3D) {
+            this.experimentalCommander3D.triggerDash(e.data?.duration || 0.24, e.data?.dir);
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerDash(e.data?.duration || 0.26, e.data?.dir);
+          } else {
             this.spriteAnimator.triggerDash(
               e.data?.duration || 0.24,
               e.data?.facing
@@ -5992,7 +5687,9 @@ export class ThreeApp {
           break;
         case 'scalpel_thrown':
           this.soundManager.playPulse();
-          if (!this.use3DCommander) {
+          if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerLMB(0.30, e.data?.to);
+          } else if (!this.use3DCommander) {
             this.spriteAnimator.triggerAttack(
               0.30,
               e.data?.facing || this.simulation.state.player.facing,
@@ -6002,7 +5699,9 @@ export class ThreeApp {
           break;
         case 'grenade_thrown':
           this.soundManager.playWave();
-          if (!this.use3DCommander) {
+          if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerRMB(0.42, undefined, e.data?.to);
+          } else if (!this.use3DCommander) {
             this.spriteAnimator.triggerSecondary(
               0.36,
               e.data?.facing || this.simulation.state.player.facing
@@ -6041,7 +5740,9 @@ export class ThreeApp {
           break;
         case 'decoy_spawned':
           this.soundManager.playWave();
-          if (!this.use3DCommander) {
+          if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerRMB(0.38, undefined, e.data?.pos);
+          } else if (!this.use3DCommander) {
             this.spriteAnimator.triggerSecondary(
               0.36,
               e.data?.facing || this.simulation.state.player.facing
@@ -6073,7 +5774,9 @@ export class ThreeApp {
           break;
         case 'sanctuary_cross_deployed':
           this.soundManager.playOrbitalStrike();
-          if (!this.use3DCommander && this.simulation.state.player.heroId === 'doctor') {
+          if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerUltimate(DOCTOR_CONFIG.sacredField.castAnimDuration, e.data?.pos);
+          } else if (!this.use3DCommander && this.simulation.state.player.heroId === 'doctor') {
             this.spriteAnimator.triggerUltimate(
               DOCTOR_CONFIG.sacredField.castAnimDuration,
               e.data?.facing || this.simulation.state.player.facing,
@@ -6094,7 +5797,9 @@ export class ThreeApp {
           break;
         case 'rain_crosses_started':
           this.soundManager.playOrbitalStrike();
-          if (!this.use3DCommander && this.simulation.state.player.heroId === 'doctor') {
+          if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerUltimate(DOCTOR_CONFIG.sacredField.castAnimDuration, e.data?.pos);
+          } else if (!this.use3DCommander && this.simulation.state.player.heroId === 'doctor') {
             this.spriteAnimator.triggerUltimate(
               DOCTOR_CONFIG.sacredField.castAnimDuration,
               e.data?.facing || this.simulation.state.player.facing,
@@ -6120,23 +5825,46 @@ export class ThreeApp {
           this.vfx.spawnShockwaveRing(e.data.pos, (e.data.armHalfLength || 440) * 0.85, 0x34d399, e.data.z || 0, 0.65);
           break;
         case 'player_hit':
-          if (!this.use3DCommander) {
+          if (active3D) {
+            this.experimentalCommander3D.triggerHit(0.18);
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerHit(0.20);
+          } else {
             this.spriteAnimator.triggerHit();
           }
           break;
         case 'game_over':
-          if (!this.use3DCommander) {
+          if (active3D) {
+            this.experimentalCommander3D.triggerDeath();
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerDeath();
+          } else {
             this.spriteAnimator.triggerDeath();
           }
           break;
         case 'jump_started':
           this.soundManager.playJump();
+          if (active3D) {
+            this.experimentalCommander3D.triggerJump(Boolean(e.data?.isAirJump));
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerJump(Boolean(e.data?.isAirJump));
+          }
           break;
         case 'glide_started':
           this.soundManager.playGlide();
+          if (active3D) {
+            this.experimentalCommander3D.triggerGlideStart();
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerGlideStart();
+          }
           break;
         case 'landed':
           this.soundManager.playLand();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLand();
+          } else if (activeDoc3D) {
+            this.experimentalDoctor3D.triggerLand();
+          }
           this.vfx.spawnLandingRing(this.simulation.state.player.pos, e.data.z);
           break;
         case 'damage_dealt':
@@ -6170,8 +5898,8 @@ export class ThreeApp {
           break;
         case 'chain_spark':
           this.soundManager.playChainSpark();
-          if (this.use3DCommander) {
-            this.commander3D.triggerAttack();
+          if (active3D) {
+            this.experimentalCommander3D.triggerLMB(0.24, e.data?.to);
           } else {
             this.spriteAnimator.triggerAttack();
           }
@@ -6209,7 +5937,7 @@ export class ThreeApp {
         case 'level_up':
           this.soundManager.playItemAcquired();
           this.uiManager.showPickupNotification(`Rank Up! Level ${e.data.level}`);
-          this.commander3D.triggerRallyVFX();
+          this.vfx.spawnHeavenlyLightBeam(this.simulation.state.player.pos, this.simulation.state.player.z, 0.75, 0x38bdf8);
           break;
         case 'item_acquired':
         case 'buff_selected':
@@ -6300,6 +6028,9 @@ export class ThreeApp {
           }
           break;
         case 'boss_spawned':
+          if (e.data?.isStage1Boss && this.celestialBridge && !this.celestialBridge.isActive) {
+            this.celestialBridge.activate();
+          }
           this.soundManager.playThreatAlert();
           this.addCameraTrauma(0.75);
           this.vfx.spawnShockwaveRing(
@@ -6312,6 +6043,9 @@ export class ThreeApp {
           this.uiManager.showPickupNotification(`⚠ ALERT: ${e.data.name} HAS EMERGED! SLAY IT TO ESCAPE!`);
           break;
         case 'stage1_boss_emerge':
+          if (this.celestialBridge && !this.celestialBridge.isActive) {
+            this.celestialBridge.activate();
+          }
           this.soundManager.playThreatAlert();
           this.addCameraTrauma(0.55);
           this.vfx.spawnShockwaveRing(e.data.pos, 160, 0xe11d48, e.data.groundZ, 2.5);
@@ -6340,7 +6074,7 @@ export class ThreeApp {
             this.vfx.spawnLandingRing(e.data.pos, e.data.z);
           } else if (e.data.isFinalBurst) {
             this.vfx.spawnTitanFootstepPuff(e.data.pos, e.data.z);
-            this.vfx.spawnShockwaveRing(e.data.pos, 260, 0xe11d48, e.data.z, 1.8);
+            this.vfx.spawnRiftCraterEruption(e.data.pos, e.data.z ?? 0, 175);
           }
           break;
         case 'stage1_boss_death':
@@ -6354,6 +6088,50 @@ export class ThreeApp {
             const elev = this.simulation.state.terrain.getElevation(e.data.target.x, e.data.target.y).height;
             this.vfx.spawnTentacleImpact(e.data.target, STAGE1_BOSS_CONFIG.tentacle.strikeRadius, elev);
           }
+          break;
+        case 'stage1_boss_dual_slash':
+          this.soundManager.playWave();
+          this.addCameraTrauma(0.32);
+          this.vfx.spawnRiftScytheWave3D(
+            e.data.pos,
+            e.data.z ?? 0,
+            e.data.angle ?? 0,
+            e.data.slashIndex || 1,
+            e.data.radius || STAGE1_BOSS_CONFIG.leapDualSlash.slashRange
+          );
+          break;
+        case 'stage1_boss_tail_sweep':
+          if (e.data.phase === 'sweep') {
+            this.soundManager.playWave();
+            this.addCameraTrauma(0.32);
+            this.vfx.spawnRiftTailWhipSweep3D(
+              e.data.pos,
+              e.data.z ?? 0,
+              e.data.startAngle ?? 0,
+              e.data.sweepDir ?? 1,
+              e.data.arcRad ?? STAGE1_BOSS_CONFIG.tailSweepShards.sweepArcRad,
+              e.data.radius ?? STAGE1_BOSS_CONFIG.tailSweepShards.meleeSweepRadius
+            );
+          }
+          break;
+        case 'stage1_boss_laser_charge':
+          this.soundManager.playThreatAlert();
+          this.addCameraTrauma(0.18);
+          break;
+        case 'stage1_boss_spine_charge':
+          this.soundManager.playThreatAlert();
+          break;
+        case 'stage1_boss_spine_launch':
+          this.soundManager.playOrbitalStrike?.();
+          this.addCameraTrauma(0.45);
+          this.vfx.spawnRiftCraterEruption(e.data.pos, e.data.z ?? 120, 210);
+          this.vfx.spawnHeavenlyLightBeam(e.data.pos, e.data.z ?? 120, 1.1, 0x38bdf8);
+          break;
+        case 'boss_crystal_impact':
+          this.soundManager.playWave();
+          this.vfx.spawnRealisticExplosion(e.data.pos, e.data.z ?? 0, e.data.radius || 115, 'void', (e.data.z ?? 0) + 18);
+          this.vfx.spawnRiftCraterEruption(e.data.pos, e.data.z ?? 0, e.data.radius || 115);
+          this.addCameraTrauma(0.16);
           break;
         case 'boss_defeated':
           this.soundManager.playWorldEventComplete();
@@ -6385,6 +6163,7 @@ export class ThreeApp {
   public selectHero(heroId: HeroId): void {
     this.resetRegionalFreeze();
     this.simulation.selectHero(heroId);
+    this.ensureHeroSpriteSheetsLoaded(heroId);
     const prefix = heroId === 'doctor' ? 'doctor' : 'commander';
     const textures = {
       front: this.textures[`${prefix}_front`],
@@ -6397,11 +6176,22 @@ export class ThreeApp {
       this.playerSprite.material.map = textures.front;
       this.playerSprite.material.needsUpdate = true;
       if (heroId === 'doctor') {
-        if (this.commander3D) this.commander3D.group.visible = false;
-        this.playerSprite.visible = true;
+        this.experimentalCommander3D?.deactivateAndPause();
+        if (import.meta.env.DEV && this.use3DCommander && !this.experimentalDoctor3D?.isReady && !this.experimentalDoctor3D?.hasLoadError) {
+          this.setUse3DCommander(true);
+        }
+        const activeDoc3D = this.isExperimentalDoctor3DActive();
+        this.playerSprite.visible = !activeDoc3D;
+        if (this.experimentalDoctor3D) {
+          this.experimentalDoctor3D.group.visible = activeDoc3D;
+        }
       } else if (heroId === 'commander') {
-        this.playerSprite.visible = !this.use3DCommander;
-        if (this.commander3D) this.commander3D.group.visible = this.use3DCommander;
+        this.experimentalDoctor3D?.deactivateAndPause();
+        const active3D = this.isExperimental3DActive();
+        this.playerSprite.visible = !active3D;
+        if (this.experimentalCommander3D) {
+          this.experimentalCommander3D.group.visible = active3D;
+        }
       }
     }
   }
@@ -7484,6 +7274,97 @@ export class ThreeApp {
         this.fallingCrossMap.delete(id);
       }
     }
+
+    // 7. Rift Stalker Skill 4: Falling 3D Crystalline Rift Clusters + Organic Ground Danger Fissures
+    const activeCrystalIds = this.scratchBossCrystalIds;
+    activeCrystalIds.clear();
+    if (state.fallingBossCrystals.length > 0 && !this.sharedBossCrystalGeo) {
+      this.sharedBossCrystalGeo = this.vfx.createJaggedShardGeo(18, 72, 6, 89);
+      this.sharedBossCrystalGeo.rotateX(Math.PI);
+      this.sharedBossSideCrystalGeo = this.vfx.createJaggedShardGeo(10, 44, 5, 43);
+      this.sharedBossSideCrystalGeo.rotateX(Math.PI);
+      this.sharedBossCrystalWakeGeo = this.vfx.createOrganicPlumeColumnGeo(8, 22, 92, 12, 5, 0.35, 1.5);
+      this.sharedBossWarnGeo = new THREE.PlaneGeometry(2.2, 2.2);
+      this.sharedBossWarnGeo.rotateX(-Math.PI / 2);
+      this.sharedBossCrystalMat = new THREE.MeshStandardMaterial({
+        color: 0x38bdf8,
+        emissive: 0x9333ea,
+        emissiveIntensity: 1.85,
+        roughness: 0.16,
+        metalness: 0.62,
+        flatShading: true
+      });
+      this.sharedBossCrystalWakeMat = this.createVolumetricBeamMaterial(0xf5d0fe, 0x38bdf8, 1.9, 0.78, 16.0);
+    }
+    const crystalNowSec = performance.now() * 0.001;
+    if (this.sharedBossCrystalWakeMat) {
+      this.sharedBossCrystalWakeMat.uniforms.uTime.value = crystalNowSec;
+    }
+    for (let i = 0; i < state.fallingBossCrystals.length; i++) {
+      const bc = state.fallingBossCrystals[i];
+      activeCrystalIds.add(bc.id);
+      let rec = this.fallingBossCrystalMap.get(bc.id);
+      if (
+        !rec &&
+        this.sharedBossCrystalGeo &&
+        this.sharedBossSideCrystalGeo &&
+        this.sharedBossCrystalWakeGeo &&
+        this.sharedBossWarnGeo &&
+        this.sharedBossCrystalMat &&
+        this.sharedBossCrystalWakeMat
+      ) {
+        const grp = new THREE.Group();
+        const warningMat = this.vfx.createOrganicRippleShader(0x38bdf8, 0xf43f5e, i * 3.7);
+        const warningMesh = new THREE.Mesh(this.sharedBossWarnGeo, warningMat);
+        warningMesh.userData = { isSharedGeo: true };
+        warningMesh.position.set(bc.targetPos.x, bc.targetZ + 1.6, bc.targetPos.y);
+        warningMesh.scale.setScalar(bc.impactRadius);
+        grp.add(warningMesh);
+
+        const crystalGroup = new THREE.Group();
+        const coreCrystal = new THREE.Mesh(this.sharedBossCrystalGeo, this.sharedBossCrystalMat);
+        coreCrystal.userData = { isSharedGeo: true, isSharedMat: true };
+        crystalGroup.add(coreCrystal);
+
+        for (let k = 0; k < 3; k++) {
+          const ang = (k / 3) * Math.PI * 2;
+          const sc = new THREE.Mesh(this.sharedBossSideCrystalGeo, this.sharedBossCrystalMat);
+          sc.userData = { isSharedGeo: true, isSharedMat: true };
+          sc.position.set(Math.cos(ang) * 11, 14, Math.sin(ang) * 11);
+          sc.rotation.z = Math.cos(ang) * 0.28;
+          sc.rotation.x = Math.sin(ang) * 0.28;
+          crystalGroup.add(sc);
+        }
+
+        const wakeMesh = new THREE.Mesh(this.sharedBossCrystalWakeGeo, this.sharedBossCrystalWakeMat);
+        wakeMesh.userData = { isSharedGeo: true, isSharedMat: true };
+        wakeMesh.position.y = 40;
+        crystalGroup.add(wakeMesh);
+
+        grp.add(crystalGroup);
+        this.scene.add(grp);
+        rec = { group: grp, warningMesh, warningMat, crystalGroup };
+        this.fallingBossCrystalMap.set(bc.id, rec);
+      }
+      if (rec) {
+        rec.crystalGroup.position.set(bc.targetPos.x, bc.z + 34, bc.targetPos.y);
+        rec.crystalGroup.rotation.y += dt * 4.5;
+        const prog = Math.max(0.1, Math.min(1.0, 1.0 - (bc.z - bc.targetZ) / 520));
+        rec.warningMesh.scale.setScalar(bc.impactRadius * (0.62 + 0.42 * prog));
+        rec.warningMat.uniforms.uProgress.value = 0.25 + prog * 0.7;
+        rec.warningMat.uniforms.uAlpha.value = 0.4 + 0.55 * prog;
+        if (prog > 0.72) {
+          rec.warningMat.uniforms.uPrimary.value.setHex(0xf43f5e);
+        }
+      }
+    }
+    for (const [id, rec] of this.fallingBossCrystalMap.entries()) {
+      if (!activeCrystalIds.has(id)) {
+        this.scene.remove(rec.group);
+        rec.warningMat.dispose();
+        this.fallingBossCrystalMap.delete(id);
+      }
+    }
   }
 
   public setNarrativeSystems(observer: NarrativeObserver, director: DialogueDirector): void {
@@ -7511,7 +7392,9 @@ export class ThreeApp {
     this.createObstacles();
     this.syncArtifactTransform();
     this.spriteAnimator.reset();
-    this.commander3D.resetDeath();
+    this.experimentalCommander3D?.reset();
+    this.experimentalDoctor3D?.reset();
+    this.celestialBridge?.reset();
     if (this.orbitingBladeGroup) this.orbitingBladeGroup.visible = false;
     const p = this.simulation.state.player;
     this.cameraFocus.set(p.pos.x, p.z, p.pos.y);
@@ -7545,7 +7428,9 @@ export class ThreeApp {
     this.createObstacles();
     this.syncArtifactTransform();
     this.spriteAnimator.reset();
-    this.commander3D.resetDeath();
+    this.experimentalCommander3D?.reset();
+    this.experimentalDoctor3D?.reset();
+    this.celestialBridge?.reset();
     if (this.orbitingBladeGroup) this.orbitingBladeGroup.visible = false;
     const p = this.simulation.state.player;
     this.cameraFocus.set(p.pos.x, p.z, p.pos.y);
@@ -7673,6 +7558,12 @@ export class ThreeApp {
       this.disposeObject3D(record.group);
     }
     this.fallingCrossMap.clear();
+
+    for (const record of this.fallingBossCrystalMap.values()) {
+      this.scene.remove(record.group);
+      record.warningMat.dispose();
+    }
+    this.fallingBossCrystalMap.clear();
 
     for (const mesh of this.dropMap.values()) {
       this.scene.remove(mesh);
@@ -7867,6 +7758,10 @@ export class ThreeApp {
   }
 
   private clearTestMapEnvironmentDressing(): void {
+    if (this.celestialBridge) {
+      this.celestialBridge.dispose();
+      this.celestialBridge = null;
+    }
     if (this.testMapDressingGroup) {
       this.disposeObject3D(this.testMapDressingGroup);
       this.testMapDressingGroup = null;
@@ -7974,6 +7869,15 @@ export class ThreeApp {
     beamMesh.position.set(loaded.artifactPos.x, artElev + 1100, loaded.artifactPos.y);
     grp.add(beamMesh);
     this.summitBeaconMesh = beamMesh;
+
+    // 4b. Unlockable Stage 1 Celestial Shortcut Bridge (materializes upon first Teleporter Boss trigger)
+    const artBridgeOrigin = this.simulation.state.artifact?.pos || loaded.artifactPos;
+    const bossBridgeTarget = this.simulation.state.bossSpawnPos || loaded.bossSpawnPos;
+    this.celestialBridge = createCelestialShortcutBridge(col, artBridgeOrigin, bossBridgeTarget);
+    grp.add(this.celestialBridge.group);
+    if (this.simulation.state.stageNumber === 1 && this.simulation.state.artifact?.isBossSpawned) {
+      this.celestialBridge.activate();
+    }
 
     // 5. Crashed Colony Shipwreck Warm Emergency Fire & Sparks
     const shipPos = loaded.shipCenter || {
@@ -8110,6 +8014,19 @@ export class ThreeApp {
         mat.uniforms.uTime.value = tSec;
       }
       this.summitBeaconMesh.rotation.y += dt * 0.28;
+    }
+
+    // Update Unlockable Celestial Shortcut Bridge materialization & starlight shader
+    if (this.celestialBridge) {
+      if (
+        !this.celestialBridge.isActive &&
+        this.simulation.state.stageNumber === 1 &&
+        this.simulation.state.artifact?.isBossSpawned
+      ) {
+        this.celestialBridge.activate();
+      }
+      const pl = this.simulation.state.player;
+      this.celestialBridge.update(dt, tSec, this.celestialPlayerPosScratch.set(pl.pos.x, pl.z, pl.pos.y));
     }
 
     // Flicker crashed ship lights & gentle flora glow

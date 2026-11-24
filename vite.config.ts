@@ -53,6 +53,42 @@ function stageConfigDevPlugin(): Plugin {
       const stagesDir = path.resolve(process.cwd(), 'public', 'stages');
       const backupsDir = path.join(stagesDir, '.backups');
 
+      const serveDevGlb = (route: string, filename: string, missingMsg: string) => {
+        server.middlewares.use(route, (req, res, next) => {
+          if (req.method !== 'GET' && req.method !== 'HEAD') {
+            return next();
+          }
+          const glbPath = path.resolve(process.cwd(), 'exports', filename);
+          if (!fs.existsSync(glbPath)) {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+            res.end(missingMsg);
+            return;
+          }
+          const stat = fs.statSync(glbPath);
+          res.statusCode = 200;
+          res.setHeader('Content-Type', 'model/gltf-binary');
+          res.setHeader('Content-Length', String(stat.size));
+          res.setHeader('Cache-Control', 'public, max-age=3600');
+          if (req.method === 'HEAD') {
+            res.end();
+            return;
+          }
+          fs.createReadStream(glbPath).pipe(res);
+        });
+      };
+
+      serveDevGlb(
+        '/__dev/commander-tripo.glb',
+        'commander_tripo_animated.glb',
+        'Experimental Commander GLB not found at exports/commander_tripo_animated.glb'
+      );
+      serveDevGlb(
+        '/__dev/doctor-3d.glb',
+        'doctor_3d_animated.glb',
+        'Experimental Doctor GLB not found at exports/doctor_3d_animated.glb'
+      );
+
       server.middlewares.use('/__dev/stage-config', (req, res, next) => {
         const reqUrl = new URL(req.url || '/', 'http://localhost');
         const pathname = reqUrl.pathname;
@@ -176,6 +212,7 @@ export default defineConfig({
         '**/scratch/**',
         '**/dist/**',
         '**/docs/**',
+        '**/exports/**',
         '**/scripts/**',
         '**/public/stages/.backups/**',
         '**/public/stages/*.tmp'

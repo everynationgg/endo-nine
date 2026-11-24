@@ -331,6 +331,9 @@ export class UIManager {
     } catch {
       // ignore
     }
+    if (!import.meta.env.DEV) {
+      this.settings.use3DCommander = false;
+    }
   }
 
   public saveSettings(): void {
@@ -457,14 +460,21 @@ export class UIManager {
       }
     }
 
-    // Character Rendering Toggle
+    // Character Rendering Toggle (Strictly Localhost Dev Only)
+    if (!import.meta.env.DEV) {
+      this.settings.use3DCommander = false;
+    }
     if (this.btnSetting3D) {
-      if (this.settings.use3DCommander) {
+      const row = this.btnSetting3D.closest('.setting-item') as HTMLElement | null;
+      if (row) {
+        row.style.display = import.meta.env.DEV ? '' : 'none';
+      }
+      if (this.settings.use3DCommander && import.meta.env.DEV) {
         this.btnSetting3D.classList.add('active');
-        this.btnSetting3D.textContent = '3D EXPERIMENTAL (ROLLBACK)';
+        this.btnSetting3D.textContent = 'EXPERIMENTAL 3D (LOCALHOST)';
       } else {
         this.btnSetting3D.classList.remove('active');
-        this.btnSetting3D.textContent = '2.5D ILLUSTRATED (ACTIVE)';
+        this.btnSetting3D.textContent = 'ORIGINAL 2D SPRITES';
       }
     }
 
@@ -753,7 +763,9 @@ export class UIManager {
       <!-- 1. MAIN MENU SCREEN -->
       <div id="screen-main-menu" class="screen-modal">
         <div class="title-banner">
-          <h1>ENDO NINE</h1>
+          <div class="main-menu-logo-wrap">
+            <img class="main-menu-logo-img" src="/assets/branding/endonine_logo.png" alt="Endo Nine" decoding="async" />
+          </div>
           <div class="subtitle">Errant Night Chronicle — Sector 1: Permafrost</div>
         </div>
         <div style="display: flex; flex-direction: column; gap: 14px; width: 300px; align-items: stretch;">
@@ -770,7 +782,7 @@ export class UIManager {
           <div class="hero-select-nav-row">
             <!-- Hero Switchers -->
             <div class="hero-switch-group">
-              <button id="btn-select-commander" class="sci-btn survivor-btn active" style="padding: 8px 18px; font-weight: 800; border-color: var(--accent-gold); background: rgba(250, 204, 21, 0.2); display: flex; align-items: center; gap: 8px;">
+              <button id="btn-select-commander" class="sci-btn survivor-btn active" style="padding: 8px 18px; font-weight: 800; border-color: var(--en-cyan); background: rgba(0, 192, 255, 0.16); display: flex; align-items: center; gap: 8px;">
                 <span style="font-size: 13px; letter-spacing: 1px;">⚔ COMMANDER</span>
               </button>
               <button id="btn-select-doctor" class="sci-btn survivor-btn" style="padding: 8px 18px; font-weight: 800; border-color: rgba(255, 255, 255, 0.2); display: flex; align-items: center; gap: 8px;">
@@ -869,15 +881,9 @@ export class UIManager {
 
       <!-- 3. OFFICIAL ENDO NINE IN-GAME HUD -->
       <div id="hud-container" class="hidden">
-        <!-- Top Left: Borderless Endo Nine Wordmark & Orbital Arc -->
+        <!-- Top Left: Official Endo Nine Logo (50% of minimap width, 90% opacity) -->
         <div class="hud-logo-wrap" aria-label="Endo Nine">
-          <svg class="hud-logo-svg" width="172" height="44" viewBox="0 0 218 54" fill="none" xmlns="http://www.w3.org/2000/svg">
-            <path d="M 80 18 A 27 27 0 0 1 131 18" stroke="rgba(192,132,252,0.78)" stroke-width="1.35" stroke-linecap="round"/>
-            <path d="M 131 36 A 27 27 0 0 1 80 36" stroke="rgba(167,139,250,0.65)" stroke-width="1.35" stroke-linecap="round"/>
-            <path d="M 136 22 L 143 17" stroke="rgba(226,232,240,0.65)" stroke-width="1.15" stroke-linecap="round"/>
-            <text x="8" y="33" fill="#f8fafc" font-family="'Segoe UI','Inter',sans-serif" font-size="16" font-weight="500" letter-spacing="5.5">ENDO</text>
-            <text x="116" y="33" fill="#f8fafc" font-family="'Segoe UI','Inter',sans-serif" font-size="16" font-weight="500" letter-spacing="5.5">NINE</text>
-          </svg>
+          <img class="hud-logo-img" src="/assets/branding/endonine_logo.png" alt="Endo Nine" decoding="async" />
         </div>
 
         <!-- Top Center: Stage Metadata + Single Teleporter Progress Bar + Boss Bar -->
@@ -1281,12 +1287,12 @@ export class UIManager {
             <div class="settings-section">
               <div class="settings-section-title">COMMANDER CHARACTER RENDERING</div>
 
-              <div class="setting-item">
+              <div class="setting-item" style="${import.meta.env.DEV ? '' : 'display:none;'}">
                 <div class="setting-label-block">
-                  <div class="setting-title">Character Rendering Mode</div>
-                  <div class="setting-desc">Original Illustrated 2.5D Directional Sprites vs Experimental Procedural 3D Model.</div>
+                  <div class="setting-title">Character Rendering Mode (Localhost Only)</div>
+                  <div class="setting-desc">Switch between Original 2D hero sprites and Experimental 3D GLB models (Commander &amp; Doctor).</div>
                 </div>
-                <button id="setting-btn-3d" class="setting-toggle-btn">2.5D ILLUSTRATED (ACTIVE)</button>
+                <button id="setting-btn-3d" class="setting-toggle-btn">ORIGINAL 2D SPRITES</button>
               </div>
             </div>
           </div>
@@ -1315,7 +1321,7 @@ export class UIManager {
       <!-- 5. STAGE CLEAR SCREEN -->
       <div id="screen-stage-clear" class="screen-modal hidden">
         <div class="title-banner">
-          <h1 style="color: var(--accent-gold);">STAGE 1 COMPLETE</h1>
+          <h1 style="color: var(--en-cyan);">STAGE 1 COMPLETE</h1>
           <div class="subtitle">Overseer Resonance Secured</div>
         </div>
         <div id="clear-stats" style="margin-bottom: 24px; font-size: 15px; text-align: center; line-height: 1.8;"></div>
@@ -1729,10 +1735,15 @@ export class UIManager {
     this.btnQualityHigh?.addEventListener('click', () => setQuality('high'));
 
     this.btnSetting3D.addEventListener('click', () => {
+      if (!import.meta.env.DEV) return;
       this.settings.use3DCommander = !this.settings.use3DCommander;
       this.syncSettingsUI();
       this.saveSettings();
-      this.showPickupNotification(this.settings.use3DCommander ? 'Character Mode: 3D Experimental (Rollback)' : 'Character Mode: 2.5D Illustrated (Active)');
+      this.showPickupNotification(
+        this.settings.use3DCommander
+          ? 'Character Mode: Experimental 3D Hero (Localhost)'
+          : 'Character Mode: Original 2D Sprites (Active)'
+      );
     });
 
     this.btnSettingReset.addEventListener('click', () => {
@@ -2052,8 +2063,8 @@ export class UIManager {
         btnCmd.style.background = '';
       } else {
         btnCmd.classList.add('active');
-        btnCmd.style.borderColor = 'var(--accent-gold)';
-        btnCmd.style.background = 'rgba(250, 204, 21, 0.2)';
+        btnCmd.style.borderColor = 'var(--en-cyan)';
+        btnCmd.style.background = 'rgba(0, 192, 255, 0.16)';
         btnDoc.classList.remove('active');
         btnDoc.style.borderColor = 'rgba(255, 255, 255, 0.2)';
         btnDoc.style.background = '';
@@ -2091,7 +2102,7 @@ export class UIManager {
       if (titleEl) titleEl.textContent = 'Errant Night Vanguard';
       if (badgeEl) {
         badgeEl.textContent = 'READY FOR DEPLOYMENT';
-        badgeEl.style.color = 'var(--accent-gold)';
+        badgeEl.style.color = 'var(--en-cyan)';
       }
       if (hpEl) hpEl.textContent = '120 HP';
       if (spdEl) spdEl.textContent = '230 units/s';
@@ -2227,14 +2238,14 @@ export class UIManager {
       const dossierDiv = document.createElement('div');
       dossierDiv.style.cssText = 'font-size: 11.5px; color: #cbd5e1; line-height: 1.5; padding: 10px; display: flex; flex-direction: column; gap: 10px;';
       dossierDiv.innerHTML = isDoc ? `
-        <div style="font-weight: 800; color: var(--accent-gold); letter-spacing: 1px;">PERSONNEL RECORD: DOCTOR</div>
+        <div style="font-weight: 800; color: var(--en-cyan); letter-spacing: 1px;">PERSONNEL RECORD: DOCTOR</div>
         <p>Chief Medical Officer aboard the Errant Night. Expert in xenobiological containment, nano-cellular surgery, and bio-kinetic neural stimulation. Dispatched to Sector 1 alongside Commander to assess the physiological effects of planetary thawing.</p>
-        <div style="font-weight: 800; color: var(--accent-blue); letter-spacing: 0.8px;">TACTICAL ROLE</div>
+        <div style="font-weight: 800; color: var(--en-violet); letter-spacing: 0.8px;">TACTICAL ROLE</div>
         <p>High-agility combat medic. Employs twin rapid-firing laser pistols, bio-chemical contamination fields, and high-velocity phase rushes to sustain allies and neutralize hostile alien bio-strains.</p>
       ` : `
-        <div style="font-weight: 800; color: var(--accent-gold); letter-spacing: 1px;">PERSONNEL RECORD: COMMANDER</div>
+        <div style="font-weight: 800; color: var(--en-cyan); letter-spacing: 1px;">PERSONNEL RECORD: COMMANDER</div>
         <p>Supreme Vanguard Commander of the Errant Night expeditionary mission. Commissioned to explore the thawing permafrost of Sector 1 following the colony spacecraft crash near the primary Overseer resonance artifact.</p>
-        <div style="font-weight: 800; color: var(--accent-blue); letter-spacing: 0.8px;">CANONICAL CONTEXT (STAGE 1 CRATER)</div>
+        <div style="font-weight: 800; color: var(--en-violet); letter-spacing: 0.8px;">CANONICAL CONTEXT (STAGE 1 CRATER)</div>
         <p>Every deployment initiates at the crash furrow crater. The thawing ecosystem awakens dormant biological organisms. The Commander's arsenal can be evolved by attuning to the 4 ancient totems scattered across the basin.</p>
       `;
       container.appendChild(dossierDiv);

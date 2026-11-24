@@ -175,6 +175,10 @@ export class MeshTerrainCollider {
   private readonly towerCoreRadiusSlices: Float32Array;
   private readonly towerSliceHeight: number = 100;
 
+  // Dynamic Celestial Shortcut Bridge state (inactive until Stage 1 Teleporter Boss Trigger)
+  private celestialBridgeActive: boolean = false;
+  private celestialBridgeTris: ColliderTri[] = [];
+
   // Reusable scratch containers to keep per-frame heap allocations near zero
   private readonly visitedTriSet: Set<ColliderTri> = new Set();
 
@@ -315,6 +319,57 @@ export class MeshTerrainCollider {
     this.rebuildNavigationGraph();
   }
 
+  public getTowerBounds(): {
+    hasTowerMesh: boolean;
+    centerX: number;
+    centerZ: number;
+    minY: number;
+    maxY: number;
+    outerMaxR: number;
+    bottomCapMaxY: number;
+  } {
+    return {
+      hasTowerMesh: this.hasTowerMesh,
+      centerX: this.towerCenterX,
+      centerZ: this.towerCenterZ,
+      minY: this.towerMinY,
+      maxY: this.towerMaxY,
+      outerMaxR: this.towerOuterMaxR,
+      bottomCapMaxY: this.towerBottomCapMaxY
+    };
+  }
+
+  public registerCelestialBridgeTriangles(tris: ColliderTri[]): void {
+    this.celestialBridgeTris = [];
+    for (let i = 0; i < tris.length; i++) {
+      const tri: ColliderTri = { ...tris[i], sourceTag: 'celestial_bridge' };
+      this.celestialBridgeTris.push(tri);
+      this.allTriangles.push(tri);
+      const c0 = Math.max(0, Math.min(this.cols - 1, Math.floor(tri.minX / this.cellSize)));
+      const c1 = Math.max(0, Math.min(this.cols - 1, Math.floor(tri.maxX / this.cellSize)));
+      const r0 = Math.max(0, Math.min(this.rows - 1, Math.floor(tri.minZ / this.cellSize)));
+      const r1 = Math.max(0, Math.min(this.rows - 1, Math.floor(tri.maxZ / this.cellSize)));
+      for (let r = r0; r <= r1; r++) {
+        const rowOff = r * this.cols;
+        for (let c = c0; c <= c1; c++) {
+          this.buckets[rowOff + c].push(tri);
+        }
+      }
+    }
+    if (tris.length > 0 && !this.sourceTags.includes('celestial_bridge')) {
+      this.sourceTags.push('celestial_bridge');
+      this.sourceTags.sort();
+    }
+  }
+
+  public setCelestialBridgeActive(active: boolean): void {
+    this.celestialBridgeActive = active;
+  }
+
+  public isCelestialBridgeEnabled(): boolean {
+    return this.celestialBridgeActive;
+  }
+
   public getSourceSummary(): Array<{ sourceTag: string; defaultCategory: TerrainSurfaceCategory; activeCategory: TerrainSurfaceCategory; triCount: number }> {
     const map = new Map<string, { defaultCategory: TerrainSurfaceCategory; activeCategory: TerrainSurfaceCategory; triCount: number }>();
     for (let i = 0; i < this.allTriangles.length; i++) {
@@ -386,6 +441,7 @@ export class MeshTerrainCollider {
     if (!isTopDownQuery) {
       for (let i = 0; i < tris.length; i++) {
         const tri = tris[i];
+        if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
         if (
           tri.sourceTag !== 'terrain:ground' &&
           tri.category !== 'bridge' &&
@@ -406,6 +462,7 @@ export class MeshTerrainCollider {
     // Pass 2: Evaluate walkable floors strictly below minGroundCeilingY
     for (let i = 0; i < tris.length; i++) {
       const tri = tris[i];
+      if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
       if (tri.category === 'tree_nonsolid') continue;
 
       // Track highest sculpted terrain (ground OR steep hillside cliff) at (wx, wy)
@@ -573,6 +630,7 @@ export class MeshTerrainCollider {
           const nTris = this.buckets[rr * this.cols + cc];
           for (let i = 0; i < nTris.length; i++) {
             const tri = nTris[i];
+            if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
             if (tri.category === 'tree_nonsolid' || tri.category === 'water') continue;
             if (!WALKABLE_CATEGORIES.has(tri.category)) continue;
             const nyS = tri.nySigned ?? 1;
@@ -806,6 +864,7 @@ export class MeshTerrainCollider {
 
     for (let i = 0; i < tris.length; i++) {
       const tri = tris[i];
+      if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
       if (tri.category === 'tree_nonsolid') continue;
       if (!WALKABLE_CATEGORIES.has(tri.category)) continue;
       if (wx < tri.minX - 0.8 || wx > tri.maxX + 0.8 || wy < tri.minZ - 0.8 || wy > tri.maxZ + 0.8) continue;
@@ -853,6 +912,7 @@ export class MeshTerrainCollider {
       const tris = this.buckets[row * this.cols + col];
       for (let i = 0; i < tris.length; i++) {
         const tri = tris[i];
+        if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
         if (
           (tri.nySigned ?? 1) >= -0.15 ||
           (tri.sourceTag !== 'terrain:ground' && tri.category !== 'bridge' && tri.category !== 'waterfall_rock')
@@ -886,6 +946,7 @@ export class MeshTerrainCollider {
     let minCeilY = Infinity;
     for (let i = 0; i < tris.length; i++) {
       const tri = tris[i];
+      if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
       if (tri.category === 'tower_ledge') continue;
       if (
         tri.sourceTag !== 'terrain:ground' &&
@@ -933,6 +994,7 @@ export class MeshTerrainCollider {
         const tris = this.buckets[rowOff + c];
         for (let i = 0; i < tris.length; i++) {
           const tri = tris[i];
+          if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
           if ((tri.nySigned ?? 1) >= -0.05) continue;
           if (
             tri.sourceTag !== 'terrain:ground' &&
@@ -989,6 +1051,7 @@ export class MeshTerrainCollider {
     let minUpAboveY = Infinity;
     for (let i = 0; i < tris.length; i++) {
       const tri = tris[i];
+      if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
       if (
         tri.sourceTag !== 'terrain:ground' &&
         tri.category !== 'bridge' &&
@@ -1076,9 +1139,9 @@ export class MeshTerrainCollider {
           )
         );
         const coreR = this.towerCoreRadiusSlices[sIdx] ?? 0;
-        // True inner hollow chimney radius sits strictly inside the surrounding concrete core walls (~380u),
-        // preventing open grass/dirt beneath flared outer tower balconies from triggering false invisible walls.
-        const innerCoreLimit = coreR > 0 ? Math.min(380, Math.max(0, coreR - 8)) : 340;
+        // Seal the entire concrete core cylinder at each elevation up to the inner spiral stair margin,
+        // preventing entry into both the central chimney and any lower annular foundation cavities.
+        const innerCoreLimit = coreR > 0 ? Math.max(0, coreR - 6) : 340;
         const shaftRoofMaxR = entityZ >= this.towerMaxY - 280 ? Math.max(innerCoreLimit, 410) : innerCoreLimit;
 
         let hasOverheadTowerRoof = false;
@@ -1303,6 +1366,25 @@ export class MeshTerrainCollider {
       }
     }
 
+    // Analytical radial tower-core seal below the summit deck so hollow cavities inside the core cylinder remain unreachable
+    if (this.hasTowerMesh && effectiveFootZ < this.towerMaxY - 190 && walkwayCoreR > 0) {
+      const minCoreClearR = Math.max(290, walkwayCoreR - 4) + Math.min(18, radius * 0.45);
+      const fromDist = Math.hypot(fromPos.x - this.towerCenterX, fromPos.y - this.towerCenterZ);
+      const toDist = Math.hypot(toPos.x - this.towerCenterX, toPos.y - this.towerCenterZ);
+      if (toDist < minCoreClearR && (toDist < fromDist - 0.1 || fromDist >= minCoreClearR)) {
+        const outLen = toDist > 1e-4 ? toDist : 1;
+        return {
+          allowed: false,
+          newPos: { x: fromPos.x, y: fromPos.y },
+          surfaceNormal: {
+            x: (toPos.x - this.towerCenterX) / outLen,
+            y: (toPos.y - this.towerCenterZ) / outLen
+          },
+          reason: 'tower_core_seal'
+        };
+      }
+    }
+
     // Allow stepping over curbs/ledges/steps up to step clearance while still catching tall solid walls
     const bodyBottom = effectiveFootZ + 36;
     const bodyTop = effectiveFootZ + Math.max(entityHeight, 88);
@@ -1326,9 +1408,12 @@ export class MeshTerrainCollider {
 
           // Support.height > entityZ + stepUpLimit already prevents stepping up cliffs;
           // open terrain triangles never act as horizontal invisible walls.
+          if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
           if (!BLOCKING_CATEGORIES.has(tri.category)) continue;
           const isTowerWall = tri.sourceTag === 'node:first_artifact_tower';
-          const effectiveRadius = onTowerWalkway && isTowerWall ? Math.min(radius, 16) : radius;
+          const effectiveRadius = onTowerWalkway && isTowerWall ? Math.min(radius, 18) : radius;
+          // Seal lower tower foundation & rock seams right down to ankle height (+12u) so players cannot slip into under-wall cavities
+          const triBodyBottom = isTowerWall ? effectiveFootZ + (onTowerWalkway ? 22 : 12) : bodyBottom;
           // Allow walking cleanly underneath raised outer ship overhangs (>52u above feet) while keeping the grounded hull solid
           if (tri.sourceTag === 'node:ship' && tri.minY >= effectiveFootZ + 52) {
             continue;
@@ -1359,9 +1444,9 @@ export class MeshTerrainCollider {
               reason: 'tower_bottom_cap'
             };
           }
-          if (tri.maxY <= bodyBottom || tri.minY >= bodyTop) continue;
+          if (tri.maxY <= triBodyBottom || tri.minY >= bodyTop) continue;
           // Never allow exterior spiral walkway risers to block climbing the teleporter steps,
-          // while keeping solid Concrete tower walls strictly blocking at all heights
+          // while keeping solid Concrete tower walls strictly blocking at all heights and outer walls sealed
           if (
             tri.sourceTag === 'node:tower_walkway' &&
             tri.maxY <= Math.max(entityZ, effectiveFootZ) + stepUpLimit
@@ -1371,14 +1456,8 @@ export class MeshTerrainCollider {
           if (
             isTowerWall &&
             onTowerWalkway &&
-            walkwayCoreR > 0 &&
-            Math.hypot((tri.ax + tri.bx + tri.cx) / 3 - this.towerCenterX, (tri.az + tri.bz + tri.cz) / 3 - this.towerCenterZ) > walkwayCoreR + 8
-          ) {
-            continue;
-          }
-          if (
-            isTowerWall &&
-            tri.maxY <= (onTowerWalkway ? Math.max(entityZ, effectiveFootZ) + stepUpLimit + 14 : entityZ + 44)
+            support.category === 'tower_ledge' &&
+            tri.maxY <= Math.max(entityZ, effectiveFootZ) + stepUpLimit + 6
           ) {
             continue;
           }
@@ -1391,7 +1470,7 @@ export class MeshTerrainCollider {
             continue;
           }
 
-          const yLo = Math.max(tri.minY, bodyBottom);
+          const yLo = Math.max(tri.minY, triBodyBottom);
           const yHi = Math.min(tri.maxY, bodyTop);
           const hit = this.triangleHorizontalOverlap(tri, toPos.x, toPos.y, effectiveRadius, yLo, yHi);
           if (hit) {
@@ -1499,6 +1578,16 @@ export class MeshTerrainCollider {
       ? Math.max(0, Math.min(this.towerCoreRadiusSlices.length - 1, Math.floor((effectiveFootZ - this.towerMinY) / this.towerSliceHeight)))
       : 0;
     const pushCoreR = this.hasTowerMesh ? (this.towerCoreRadiusSlices[pushSliceIdx] ?? 0) : 0;
+    if (this.hasTowerMesh && effectiveFootZ < this.towerMaxY - 190 && pushCoreR > 0) {
+      const minCoreClearR = Math.max(290, pushCoreR - 4) + Math.min(18, radius * 0.45);
+      const dx = pos.x - this.towerCenterX;
+      const dy = pos.y - this.towerCenterZ;
+      const dist = Math.hypot(dx, dy);
+      if (dist > 1e-4 && dist < minCoreClearR) {
+        pos.x = this.towerCenterX + (dx / dist) * minCoreClearR;
+        pos.y = this.towerCenterZ + (dy / dist) * minCoreClearR;
+      }
+    }
     const bodyBottom = effectiveFootZ + 36;
     const bodyTop = effectiveFootZ + Math.max(entityHeight, 88);
 
@@ -1512,14 +1601,16 @@ export class MeshTerrainCollider {
           if (this.visitedTriSet.has(tri)) continue;
           this.visitedTriSet.add(tri);
 
+          if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
           if (!BLOCKING_CATEGORIES.has(tri.category)) continue;
           const isTowerWall = tri.sourceTag === 'node:first_artifact_tower';
           const effectiveRadius =
-            pushOnTowerWalkway && isTowerWall ? Math.min(radius, 16) : radius;
+            pushOnTowerWalkway && isTowerWall ? Math.min(radius, 18) : radius;
+          const triBodyBottom = isTowerWall ? effectiveFootZ + (pushOnTowerWalkway ? 22 : 12) : bodyBottom;
           if (tri.sourceTag === 'node:ship' && tri.minY >= effectiveFootZ + 52) {
             continue;
           }
-          if (tri.maxY <= bodyBottom || tri.minY >= bodyTop) continue;
+          if (tri.maxY <= triBodyBottom || tri.minY >= bodyTop) continue;
           if (
             tri.sourceTag === 'node:tower_walkway' &&
             tri.maxY <= Math.max(entityZ, effectiveFootZ) + stepUpLimit
@@ -1529,15 +1620,9 @@ export class MeshTerrainCollider {
           if (
             isTowerWall &&
             pushOnTowerWalkway &&
-            pushCoreR > 0 &&
-            Math.hypot((tri.ax + tri.bx + tri.cx) / 3 - this.towerCenterX, (tri.az + tri.bz + tri.cz) / 3 - this.towerCenterZ) > pushCoreR + 8
-          ) {
-            continue;
-          }
-          if (
-            isTowerWall &&
-            tri.maxY <= Math.max(entityZ, effectiveFootZ) + stepUpLimit + 14 &&
-            (tri.maxY <= entityZ + 52 || pushOnTowerWalkway)
+            support.hit &&
+            support.category === 'tower_ledge' &&
+            tri.maxY <= Math.max(entityZ, effectiveFootZ) + stepUpLimit + 6
           ) {
             continue;
           }
@@ -1550,7 +1635,7 @@ export class MeshTerrainCollider {
             continue;
           }
 
-          const yLo = Math.max(tri.minY, bodyBottom);
+          const yLo = Math.max(tri.minY, triBodyBottom);
           const yHi = Math.min(tri.maxY, bodyTop);
           const hit = this.triangleHorizontalOverlap(tri, pos.x, pos.y, effectiveRadius, yLo, yHi);
           if (hit && hit.pen > 0.2) {
@@ -1602,6 +1687,7 @@ export class MeshTerrainCollider {
             if (this.visitedTriSet.has(tri)) continue;
             this.visitedTriSet.add(tri);
 
+            if (!this.celestialBridgeActive && tri.sourceTag === 'celestial_bridge') continue;
             if (tri.category === 'tree_nonsolid') continue;
             if (ignoreWater && tri.category === 'water') continue;
 
