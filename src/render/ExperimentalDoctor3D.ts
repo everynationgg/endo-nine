@@ -9,7 +9,7 @@ import {
 } from './ExperimentalCommander3D';
 import type { ThreeVFX } from './ThreeVFX';
 
-const DOCTOR_GLB_DEV_URL = '/__dev/doctor-3d.glb';
+const DOCTOR_GLB_DEV_URL = '/assets/models/doctor_3d.glb';
 const DOCTOR_BASE_SCALE = 88.0; // Matches 0.98m sculpt -> ~86u world height
 const DOCTOR_RUN_BASE_SPEED = 240;
 
@@ -164,7 +164,6 @@ export class ExperimentalDoctor3D {
   }
 
   public async ensureLoaded(): Promise<boolean> {
-    if (!import.meta.env.DEV) return false;
     if (this.isReady) return true;
     if (this.loadPromise) return this.loadPromise;
 

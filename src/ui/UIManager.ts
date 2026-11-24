@@ -124,7 +124,7 @@ export class UIManager {
     voiceVolume: 0.95,
     subtitlesEnabled: true,
     isMuted: false,
-    use3DCommander: false,
+    use3DCommander: true,
     graphicsQuality: 'medium'
   };
   public onSettingsChangedCallback: ((settings: GameSettings) => void) | null = null;
@@ -336,18 +336,15 @@ export class UIManager {
       const saved = localStorage.getItem('endo_nine_settings') || localStorage.getItem('ender_nine_settings');
       if (saved) {
         const parsed = JSON.parse(saved);
-        // Migrate to 2.5D Illustrated active mode as default
-        if (parsed.version !== '2.5d_restored') {
-          parsed.use3DCommander = false;
-          parsed.version = '2.5d_restored';
+        // Migrate existing saves to 3D Hero Models enabled by default
+        if (parsed.version !== '3d_heroes_default') {
+          parsed.use3DCommander = true;
+          parsed.version = '3d_heroes_default';
         }
         this.settings = { ...this.settings, ...parsed };
       }
     } catch {
       // ignore
-    }
-    if (!import.meta.env.DEV) {
-      this.settings.use3DCommander = false;
     }
   }
 
@@ -475,18 +472,15 @@ export class UIManager {
       }
     }
 
-    // Character Rendering Toggle (Strictly Localhost Dev Only)
-    if (!import.meta.env.DEV) {
-      this.settings.use3DCommander = false;
-    }
+    // Character Rendering Toggle (3D Hero Models / 2D Sprites)
     if (this.btnSetting3D) {
       const row = this.btnSetting3D.closest('.setting-item') as HTMLElement | null;
       if (row) {
-        row.style.display = import.meta.env.DEV ? '' : 'none';
+        row.style.display = '';
       }
-      if (this.settings.use3DCommander && import.meta.env.DEV) {
+      if (this.settings.use3DCommander) {
         this.btnSetting3D.classList.add('active');
-        this.btnSetting3D.textContent = 'EXPERIMENTAL 3D (LOCALHOST)';
+        this.btnSetting3D.textContent = '3D HERO MODELS';
       } else {
         this.btnSetting3D.classList.remove('active');
         this.btnSetting3D.textContent = 'ORIGINAL 2D SPRITES';
@@ -1308,12 +1302,12 @@ export class UIManager {
             <div class="settings-section">
               <div class="settings-section-title">COMMANDER CHARACTER RENDERING</div>
 
-              <div class="setting-item" style="${import.meta.env.DEV ? '' : 'display:none;'}">
+              <div class="setting-item">
                 <div class="setting-label-block">
-                  <div class="setting-title">Character Rendering Mode (Localhost Only)</div>
-                  <div class="setting-desc">Switch between Original 2D hero sprites and Experimental 3D GLB models (Commander &amp; Doctor).</div>
+                  <div class="setting-title">Hero Rendering Mode</div>
+                  <div class="setting-desc">Switch between 3D GLB hero models (Commander &amp; Doctor) and classic 2D sprites.</div>
                 </div>
-                <button id="setting-btn-3d" class="setting-toggle-btn">ORIGINAL 2D SPRITES</button>
+                <button id="setting-btn-3d" class="setting-toggle-btn active">3D HERO MODELS</button>
               </div>
             </div>
           </div>
@@ -1756,13 +1750,12 @@ export class UIManager {
     this.btnQualityHigh?.addEventListener('click', () => setQuality('high'));
 
     this.btnSetting3D.addEventListener('click', () => {
-      if (!import.meta.env.DEV) return;
       this.settings.use3DCommander = !this.settings.use3DCommander;
       this.syncSettingsUI();
       this.saveSettings();
       this.showPickupNotification(
         this.settings.use3DCommander
-          ? 'Character Mode: Experimental 3D Hero (Localhost)'
+          ? 'Character Mode: 3D Hero Models (Active)'
           : 'Character Mode: Original 2D Sprites (Active)'
       );
     });
@@ -1778,7 +1771,7 @@ export class UIManager {
         voiceVolume: 0.95,
         subtitlesEnabled: true,
         isMuted: false,
-        use3DCommander: false,
+        use3DCommander: true,
         graphicsQuality: 'medium'
       };
       this.syncSettingsUI();

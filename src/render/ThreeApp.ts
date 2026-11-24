@@ -512,7 +512,7 @@ export class ThreeApp {
   private loadedHeroSpriteSheets = new Set<HeroId>();
   public experimentalCommander3D!: ExperimentalCommander3D;
   public experimentalDoctor3D!: ExperimentalDoctor3D;
-  public use3DCommander: boolean = false;
+  public use3DCommander: boolean = true;
   public onExperimental3DStateChanged: (() => void) | null = null;
   private playerShadow: THREE.Mesh;
   private playerResolveAura: THREE.Mesh;
@@ -4643,7 +4643,6 @@ export class ThreeApp {
 
   public isExperimental3DActive(): boolean {
     return (
-      import.meta.env.DEV &&
       this.use3DCommander &&
       this.simulation.state.player.heroId === 'commander' &&
       Boolean(this.experimentalCommander3D?.isReady)
@@ -4652,7 +4651,6 @@ export class ThreeApp {
 
   public isExperimentalDoctor3DActive(): boolean {
     return (
-      import.meta.env.DEV &&
       this.use3DCommander &&
       this.simulation.state.player.heroId === 'doctor' &&
       Boolean(this.experimentalDoctor3D?.isReady)
@@ -4664,10 +4662,9 @@ export class ThreeApp {
   }
 
   public setUse3DCommander(use3D: boolean): void {
-    const devAllowed = import.meta.env.DEV && use3D;
-    this.use3DCommander = devAllowed;
+    this.use3DCommander = use3D;
 
-    if (!devAllowed) {
+    if (!use3D) {
       this.experimentalCommander3D?.deactivateAndPause();
       this.experimentalDoctor3D?.deactivateAndPause();
       if (this.playerSprite) this.playerSprite.visible = true;
@@ -4685,17 +4682,11 @@ export class ThreeApp {
       } else {
         if (this.playerSprite) this.playerSprite.visible = true;
         this.experimentalDoctor3D.group.visible = false;
-        if (!this.experimentalDoctor3D.isLoading && !this.experimentalDoctor3D.hasLoadError) {
-          this.uiManager?.showPickupNotification('Loading Experimental 3D Doctor (Localhost)...');
-        }
         void this.experimentalDoctor3D.ensureLoaded().then((ok) => {
           if (!ok || !this.use3DCommander) return;
           const stillDoc = this.simulation.state.player.heroId === 'doctor';
           if (this.playerSprite) this.playerSprite.visible = !stillDoc;
           this.experimentalDoctor3D.group.visible = stillDoc;
-          if (stillDoc) {
-            this.uiManager?.showPickupNotification('Experimental 3D Doctor Ready [F10 Tuning]');
-          }
           this.onExperimental3DStateChanged?.();
         });
       }
@@ -4712,17 +4703,11 @@ export class ThreeApp {
       // Keep original 2D Commander visible while lazy-loading GLB
       if (this.playerSprite) this.playerSprite.visible = true;
       this.experimentalCommander3D.group.visible = false;
-      if (!this.experimentalCommander3D.isLoading && !this.experimentalCommander3D.hasLoadError) {
-        this.uiManager?.showPickupNotification('Loading Experimental 3D Commander (Localhost)...');
-      }
       void this.experimentalCommander3D.ensureLoaded().then((ok) => {
         if (!ok || !this.use3DCommander) return;
         const stillCommander = this.simulation.state.player.heroId === 'commander';
         if (this.playerSprite) this.playerSprite.visible = !stillCommander;
         this.experimentalCommander3D.group.visible = stillCommander;
-        if (stillCommander) {
-          this.uiManager?.showPickupNotification('Experimental 3D Commander Ready [F10 Tuning]');
-        }
         this.onExperimental3DStateChanged?.();
       });
     }
@@ -6487,7 +6472,7 @@ export class ThreeApp {
       this.playerSprite.material.needsUpdate = true;
       if (heroId === 'doctor') {
         this.experimentalCommander3D?.deactivateAndPause();
-        if (import.meta.env.DEV && this.use3DCommander && !this.experimentalDoctor3D?.isReady && !this.experimentalDoctor3D?.hasLoadError) {
+        if (this.use3DCommander && !this.experimentalDoctor3D?.isReady && !this.experimentalDoctor3D?.hasLoadError) {
           this.setUse3DCommander(true);
         }
         const activeDoc3D = this.isExperimentalDoctor3DActive();
@@ -6497,6 +6482,9 @@ export class ThreeApp {
         }
       } else if (heroId === 'commander') {
         this.experimentalDoctor3D?.deactivateAndPause();
+        if (this.use3DCommander && !this.experimentalCommander3D?.isReady && !this.experimentalCommander3D?.hasLoadError) {
+          this.setUse3DCommander(true);
+        }
         const active3D = this.isExperimental3DActive();
         this.playerSprite.visible = !active3D;
         if (this.experimentalCommander3D) {

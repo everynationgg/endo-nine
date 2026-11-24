@@ -89,7 +89,7 @@ export const DEFAULT_EXPERIMENTAL_TUNING: ExperimentalTuningConfig = {
 
 const BASE_MODEL_SCALE = 106.0;
 const RUN_CLIP_BASE_WORLD_SPEED = 203.6; // 1.921 m/s * 106.0 scale
-const GLB_DEV_URL = '/__dev/commander-tripo.glb';
+const GLB_DEV_URL = '/assets/models/commander_3d.glb';
 
 const UPPER_BODY_BONE_PREFIXES = [
   'mixamorigSpine1',

@@ -1995,7 +1995,18 @@ export class Simulation {
       }
     }
 
-    if (this.unstuckCooldown <= 0 && !p.isDashing) {
+    // Hard void-fall safety net: immediately rescue player if they ever fall beneath terrain or into the void
+    const fellIntoVoid =
+      p.z < -260 ||
+      (!p.isGrounded && p.vz < -120 && p.z < finalElev - 220);
+    if (fellIntoVoid) {
+      this.unstuckPlayer();
+      p.vz = 0;
+      p.isGrounded = true;
+      p.isJumping = false;
+      this.stuckCheckTimer = 0;
+      this.unstuckCooldown = 0.6;
+    } else if (this.unstuckCooldown <= 0 && !p.isDashing) {
       if (
         !p.isGrounded &&
         !p.isJumping &&
